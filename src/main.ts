@@ -9,6 +9,7 @@ import { createWebcamAdapter } from './adapters/webcam';
 import type { InputAdapter } from './adapters/input-adapter';
 import { createParamsReadout } from './app/readout';
 import { createPauseGate } from './app/pause-gate';
+import { createActivationTokenSource } from './app/activation-token';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 
@@ -24,6 +25,7 @@ if (app) {
         <button id="ms-pause" type="button" hidden>Pause</button>
         <button id="ms-toggle-preview" type="button" hidden>Show camera</button>
         <button id="ms-stop" type="button" hidden>Stop</button>
+        <span id="ms-activating" class="ms-activating" hidden>Starting…</span>
       </div>
       <p id="ms-error" class="ms-error" hidden></p>
       <div id="ms-readout"></div>
@@ -41,6 +43,8 @@ if (app) {
     .ms-controls button { font: inherit; padding: 8px 14px; border-radius: 6px;
       border: 1px solid #444; background: #1c1c22; color: #f2f2f2; cursor: pointer; }
     .ms-controls button:hover { background: #26262e; }
+    .ms-controls button:disabled { opacity: 0.5; cursor: default; }
+    .ms-activating { font-size: 12px; opacity: 0.75; align-self: center; }
     .ms-error { color: #ff8080; font-size: 13px; }
     #ms-readout.ms-paused { opacity: 0.55; }
     .ms-preview-video { display: block; margin-top: 12px; max-width: 320px; width: 100%;
@@ -56,6 +60,7 @@ if (app) {
   const pauseBtnRef = app.querySelector<HTMLButtonElement>('#ms-pause');
   const previewToggleBtnRef = app.querySelector<HTMLButtonElement>('#ms-toggle-preview');
   const stopBtnRef = app.querySelector<HTMLButtonElement>('#ms-stop');
+  const activatingElRef = app.querySelector<HTMLSpanElement>('#ms-activating');
 
   if (
     readoutContainerRef &&
@@ -65,7 +70,8 @@ if (app) {
     startCameraBtnRef &&
     pauseBtnRef &&
     previewToggleBtnRef &&
-    stopBtnRef
+    stopBtnRef &&
+    activatingElRef
   ) {
     // Re-bind to fresh consts so their (non-null) type is fixed at this
     // point — TypeScript would otherwise re-widen the outer refs to
@@ -79,12 +85,18 @@ if (app) {
     const pauseBtn = pauseBtnRef;
     const previewToggleBtn = previewToggleBtnRef;
     const stopBtn = stopBtnRef;
+    const activatingEl = activatingElRef;
 
     const readout = createParamsReadout(readoutEl);
     const pauseGate = createPauseGate((params, timestampMs) => readout.update(params, timestampMs));
+    const activation = createActivationTokenSource();
 
     let activeAdapter: InputAdapter | null = null;
+    let pendingAdapter: InputAdapter | null = null;
     let previewVideo: HTMLVideoElement | null = null;
+    // Assigned once the dev-only slider button exists, so it can be
+    // disabled/enabled alongside "Start camera" during activation.
+    let useSlidersBtn: HTMLButtonElement | null = null;
 
     function showError(message: string): void {
       errorEl.textContent = message;
@@ -144,7 +156,24 @@ if (app) {
       }
     }
 
-    function stopActive(): void {
+    function setStartButtonsDisabled(disabled: boolean): void {
+      startCameraBtn.disabled = disabled;
+      if (useSlidersBtn) useSlidersBtn.disabled = disabled;
+      activatingEl.hidden = !disabled;
+    }
+
+    /**
+     * Stops both the pending (mid-start) and active adapters and resets the
+     * UI. Does NOT touch the activation token — callers that need to
+     * invalidate an in-flight activate() do that explicitly, so this can be
+     * shared between stopActive() and the start of a new activate() without
+     * a new activation immediately invalidating itself.
+     */
+    function resetAdaptersAndUi(): void {
+      if (pendingAdapter) {
+        pendingAdapter.stop();
+        pendingAdapter = null;
+      }
       if (activeAdapter) {
         activeAdapter.stop();
         activeAdapter = null;
@@ -156,18 +185,49 @@ if (app) {
       stopBtn.hidden = true;
       pauseBtn.hidden = true;
       previewToggleBtn.hidden = true;
+      setStartButtonsDisabled(false);
+    }
+
+    function stopActive(): void {
+      activation.next(); // invalidate any in-flight activation so its late resolution is discarded
+      resetAdaptersAndUi();
     }
 
     async function activate(adapter: InputAdapter): Promise<void> {
-      stopActive();
+      // Claim this activation and supersede any earlier one *before* the
+      // await below, so a second click during a slow start() (webcam:
+      // getUserMedia + model load can take seconds) is detected reliably —
+      // this is the fix for the Stop-leaves-camera-on race: the previous
+      // adapter is now tracked as `pendingAdapter` from the moment its
+      // start() begins, not only after it resolves, so resetAdaptersAndUi()
+      // below can stop it even if it never finished starting.
+      const token = activation.next();
+      resetAdaptersAndUi();
+
+      pendingAdapter = adapter;
       clearError();
+      setStartButtonsDisabled(true);
+
       try {
         await adapter.start(pauseGate.listener);
+        if (!activation.isCurrent(token)) {
+          // Superseded while start() was in flight (another activate() or a
+          // stop happened) — discard this late resolution instead of wiring
+          // a stale adapter into the UI. Belt-and-suspenders alongside the
+          // synchronous stop in resetAdaptersAndUi().
+          adapter.stop();
+          return;
+        }
+        pendingAdapter = null;
         activeAdapter = adapter;
         stopBtn.hidden = false;
         pauseBtn.hidden = false;
         refreshPreviewAvailability();
+        setStartButtonsDisabled(false);
       } catch (err) {
+        if (!activation.isCurrent(token)) return; // stale failure; a newer activation already owns the UI
+        pendingAdapter = null;
+        setStartButtonsDisabled(false);
         const message = err instanceof Error ? err.message : String(err);
         showError(`Could not start "${adapter.id}": ${message}`);
       }
@@ -210,13 +270,14 @@ if (app) {
     // bundle (M1 acceptance criterion: "a production build contains no
     // slider UI").
     if (import.meta.env.DEV) {
-      const useSlidersBtn = document.createElement('button');
-      useSlidersBtn.type = 'button';
-      useSlidersBtn.id = 'ms-use-sliders';
-      useSlidersBtn.textContent = 'Use sliders';
-      controlsEl.appendChild(useSlidersBtn);
+      const devSlidersBtn = document.createElement('button');
+      devSlidersBtn.type = 'button';
+      devSlidersBtn.id = 'ms-use-sliders';
+      devSlidersBtn.textContent = 'Use sliders';
+      controlsEl.appendChild(devSlidersBtn);
+      useSlidersBtn = devSlidersBtn;
 
-      useSlidersBtn.addEventListener('click', () => {
+      devSlidersBtn.addEventListener('click', () => {
         void (async () => {
           clearError();
           try {
