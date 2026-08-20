@@ -15,12 +15,21 @@ import { createMulberry32, type Prng } from '../shared/prng';
 const SEPARATOR = String.fromCharCode(1);
 
 /**
+ * Combines a seed and a label into the single string that gets hashed into
+ * a numeric seed. Exported so other labeled-stream-style constructors
+ * (e.g. `createLabeledNoise`) can reuse the exact same separator convention
+ * instead of re-typing the control character independently.
+ */
+export function combineSeedLabel(seed: string, label: string): string {
+  return `${seed}${SEPARATOR}${label}`;
+}
+
+/**
  * Builds a fresh, independent Prng for a given (seed, label) pair. Always
  * constructs a new hash and a new PRNG on every call -- never advances or
  * shares state with any other call, regardless of label.
  */
 export function createLabeledStream(seed: string, label: string): Prng {
-  const combined = `${seed}${SEPARATOR}${label}`;
-  const hashed = cyrb53(combined);
+  const hashed = cyrb53(combineSeedLabel(seed, label));
   return createMulberry32(hashed);
 }

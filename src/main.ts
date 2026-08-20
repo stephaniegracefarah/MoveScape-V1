@@ -10,6 +10,13 @@ import type { InputAdapter } from './adapters/input-adapter';
 import { createParamsReadout } from './app/readout';
 import { createPauseGate } from './app/pause-gate';
 import { createActivationTokenSource } from './app/activation-token';
+import { getOrCreateUserId } from './app/user-identity';
+import { createLiveRenderLoop, type LiveRenderLoop } from './app/live-render-loop';
+import type { CanvasLike } from './compositor/render-scene';
+import { createWorld } from './world/world';
+import { deriveWorldSeed, formatLocalDate } from './world/seed';
+import { createBotanicalStyle } from './styles/botanical/botanical';
+import { BOTANICAL_PALETTE_PRESETS, type BotanicalPaletteId } from './styles/botanical/palettes';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 
@@ -27,6 +34,8 @@ if (app) {
         <button id="ms-stop" type="button" hidden>Stop</button>
         <span id="ms-activating" class="ms-activating" hidden>Starting…</span>
       </div>
+      <div class="ms-controls" id="ms-palette-controls"></div>
+      <canvas id="ms-canvas" class="ms-canvas" width="720" height="480"></canvas>
       <p id="ms-error" class="ms-error" hidden></p>
       <div id="ms-readout"></div>
       <div id="ms-preview"></div>
@@ -46,6 +55,8 @@ if (app) {
     .ms-controls button:disabled { opacity: 0.5; cursor: default; }
     .ms-activating { font-size: 12px; opacity: 0.75; align-self: center; }
     .ms-error { color: #ff8080; font-size: 13px; }
+    .ms-canvas { display: block; width: 100%; max-width: 720px; height: auto;
+      aspect-ratio: 3 / 2; background: #fdfdfb; border-radius: 8px; margin: 4px 0 16px; }
     #ms-readout.ms-paused { opacity: 0.55; }
     .ms-preview-video { display: block; margin-top: 12px; max-width: 320px; width: 100%;
       border-radius: 8px; transform: scaleX(-1); background: #000; }
@@ -61,6 +72,8 @@ if (app) {
   const previewToggleBtnRef = app.querySelector<HTMLButtonElement>('#ms-toggle-preview');
   const stopBtnRef = app.querySelector<HTMLButtonElement>('#ms-stop');
   const activatingElRef = app.querySelector<HTMLSpanElement>('#ms-activating');
+  const canvasElRef = app.querySelector<HTMLCanvasElement>('#ms-canvas');
+  const paletteControlsElRef = app.querySelector<HTMLDivElement>('#ms-palette-controls');
 
   if (
     readoutContainerRef &&
@@ -71,7 +84,9 @@ if (app) {
     pauseBtnRef &&
     previewToggleBtnRef &&
     stopBtnRef &&
-    activatingElRef
+    activatingElRef &&
+    canvasElRef &&
+    paletteControlsElRef
   ) {
     // Re-bind to fresh consts so their (non-null) type is fixed at this
     // point — TypeScript would otherwise re-widen the outer refs to
@@ -86,9 +101,21 @@ if (app) {
     const previewToggleBtn = previewToggleBtnRef;
     const stopBtn = stopBtnRef;
     const activatingEl = activatingElRef;
+    const canvasEl = canvasElRef;
+    const paletteControlsEl = paletteControlsElRef;
+    // getContext('2d') is effectively never null for a freshly-created
+    // <canvas> in a real browser; guarded rather than asserted so a
+    // hypothetical unsupported environment degrades to "no art rendering"
+    // instead of a thrown error, without disabling the rest of the app.
+    const canvasCtx = canvasEl.getContext('2d');
 
     const readout = createParamsReadout(readoutEl);
-    const pauseGate = createPauseGate((params, timestampMs) => readout.update(params, timestampMs));
+    let liveLoop: LiveRenderLoop | null = null;
+    let selectedPaletteId: BotanicalPaletteId = 'default';
+    const pauseGate = createPauseGate((params, timestampMs) => {
+      readout.update(params, timestampMs);
+      liveLoop?.feed(params);
+    });
     const activation = createActivationTokenSource();
 
     let activeAdapter: InputAdapter | null = null;
@@ -97,6 +124,40 @@ if (app) {
     // Assigned once the dev-only slider button exists, so it can be
     // disabled/enabled alongside "Start camera" during activation.
     let useSlidersBtn: HTMLButtonElement | null = null;
+
+    /**
+     * (Re)starts the Botanical live-preview loop against a fresh World built
+     * from the real persisted userId + today's date (M4's live-wiring
+     * decision — see docs/HANDOFF.md). Called on session start and whenever
+     * the palette selection changes while a session is already running, so
+     * switching palettes recolors the piece from a fresh spawn rather than
+     * leaving already-grown geometry in its old colors.
+     */
+    function startLiveLoop(): void {
+      if (!canvasCtx) return;
+      liveLoop?.stop();
+      const userId = getOrCreateUserId();
+      const worldSeed = deriveWorldSeed(userId, formatLocalDate(new Date()));
+      const overrides = BOTANICAL_PALETTE_PRESETS.find((preset) => preset.id === selectedPaletteId)?.overrides;
+      const world = createWorld(worldSeed, 0, overrides);
+      liveLoop = createLiveRenderLoop(
+        createBotanicalStyle(),
+        world,
+        // CanvasRenderingContext2D.fillStyle is `string | CanvasGradient |
+        // CanvasPattern`; CanvasLike only needs the plain-string subset this
+        // app ever assigns, so the cast is safe (same pattern already used
+        // in src/engine/pixel-determinism.test.ts for @napi-rs/canvas).
+        canvasCtx as unknown as CanvasLike,
+        { width: canvasEl.width, height: canvasEl.height },
+        () => pauseGate.isPaused(),
+      );
+    }
+
+    function stopLiveLoop(): void {
+      liveLoop?.stop();
+      liveLoop = null;
+      canvasCtx?.clearRect(0, 0, canvasEl.width, canvasEl.height);
+    }
 
     function showError(message: string): void {
       errorEl.textContent = message;
@@ -179,6 +240,7 @@ if (app) {
         activeAdapter = null;
         readout.reset();
       }
+      stopLiveLoop();
       hidePreview();
       pauseGate.reset();
       setPaused(false);
@@ -224,6 +286,7 @@ if (app) {
         pauseBtn.hidden = false;
         refreshPreviewAvailability();
         setStartButtonsDisabled(false);
+        startLiveLoop();
       } catch (err) {
         if (!activation.isCurrent(token)) return; // stale failure; a newer activation already owns the UI
         pendingAdapter = null;
@@ -261,6 +324,21 @@ if (app) {
         showPreview();
       }
     });
+
+    // Palette presets (M4 palette system): switching while a session is
+    // running restarts the live loop with the new colors, keeping the same
+    // camera/adapter running uninterrupted. A full custom color-wheel picker
+    // is a later enhancement — see docs/HANDOFF.md.
+    for (const preset of BOTANICAL_PALETTE_PRESETS) {
+      const paletteBtn = document.createElement('button');
+      paletteBtn.type = 'button';
+      paletteBtn.textContent = preset.displayName;
+      paletteBtn.addEventListener('click', () => {
+        selectedPaletteId = preset.id;
+        if (activeAdapter) startLiveLoop();
+      });
+      paletteControlsEl.appendChild(paletteBtn);
+    }
 
     // Dev-only: manual slider input. The button itself — and every string
     // that names it — is created only inside this block, and the adapter is
