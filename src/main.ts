@@ -29,7 +29,8 @@ if (app) {
 
   const style = document.createElement('style');
   style.textContent = `
-    .ms-shell { max-width: 480px; margin: 40px auto; padding: 0 20px;
+    body { background: #0f0f13; margin: 0; }
+    .ms-shell { max-width: 480px; margin: 0 auto; padding: 40px 20px;
       font-family: system-ui, sans-serif; color: #f2f2f2; }
     .ms-privacy { font-size: 13px; opacity: 0.75; }
     .ms-controls { display: flex; gap: 8px; margin: 16px 0; }
