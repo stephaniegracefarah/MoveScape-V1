@@ -14,4 +14,11 @@ export interface InputAdapter {
   start(onParams: ParamsListener): Promise<void>;
   /** Stop producing samples and release resources (camera, workers, timers). */
   stop(): void;
+  /**
+   * Optional: a live preview stream for adapters that have one (the webcam).
+   * Purely a UI affordance — tracking never depends on it, and the preview
+   * element must apply mirroring via CSS transform only (spec Part 3).
+   * Returns null when the adapter is not running.
+   */
+  previewStream?(): MediaStream | null;
 }
