@@ -19,5 +19,28 @@ export default tseslint.config(
         },
       ],
     },
+  },
+  {
+    // Invariant 4: the simulation engine ticks on the recording clock, never
+    // the wall clock -- fixed-timestep replay must be a pure function of its
+    // arguments.
+    files: ['src/engine/**/*.ts'],
+    rules: {
+      'no-restricted-properties': [
+        'error',
+        {
+          object: 'Date',
+          property: 'now',
+          message:
+            'Invariant 4: the engine ticks on the recording clock, never the wall clock.',
+        },
+        {
+          object: 'performance',
+          property: 'now',
+          message:
+            'Invariant 4: the engine ticks on the recording clock, never the wall clock.',
+        },
+      ],
+    },
   }
 );
