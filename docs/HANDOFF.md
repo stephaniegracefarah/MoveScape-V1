@@ -10,9 +10,9 @@ Rules for the coordinator writing entries: newest session on top; be specific en
 
 *(Keep this section updated — it is the fast path for a new session. What milestone is active, what works end-to-end right now, how to run the project and its tests.)*
 
-- **Active milestone:** M0 complete → M1 (capture and parameters) is next
-- **Works right now:** full scaffold — Vite + vanilla TypeScript builds, ESLint (with the invariant-2 `Math.random` ban, verified to fire), Vitest with a passing test, CI workflow on every push, contract files in place (`src/adapters/movement-params.ts`, `src/styles/style-renderer.ts`), docs moved to `docs/SPEC.md` + `docs/HANDOFF.md`
-- **Run:** `npm install`, then `npm run dev`
+- **Active milestone:** M1 built on branch `m1-capture-params`; awaiting the founder's live-camera acceptance test before merge to main
+- **Works right now:** M0 scaffold plus all of M1's code — webcam adapter (visibility-independent capture, pose worker, expansion/speed/symmetry), dev-gated slider adapter, live parameter readout, app shell with privacy note. 22 unit tests passing; production bundle verified to contain zero slider code
+- **Run:** `npm install`, then `npm run dev` (webcam needs a browser + camera; "Use sliders" appears in dev builds only)
 - **Test:** `npm test` (also `npm run lint`, `npm run typecheck`, `npm run build`)
 
 ## Open deviations from the main doc
@@ -32,6 +32,31 @@ Rules for the coordinator writing entries: newest session on top; be specific en
 ## Session log
 
 *(Newest first. One entry per session.)*
+
+### Session 002 — 2026-08-19 — M1 Capture and Parameters
+
+**Goal this session:** M1 in full, on branch `m1-capture-params`.
+
+**Completed:**
+- Coordinator pinned the `InputAdapter` contract (`src/adapters/input-adapter.ts`) and factory stubs before spawning builders, so the two parts could build in parallel against a fixed interface.
+- Builder A (webcam, Sonnet): visibility-independent capture (`MediaStreamTrackProcessor` primary, `requestVideoFrameCallback` on a detached video element as fallback), MediaPipe Tasks `PoseLandmarker` in a module Web Worker (GPU delegate, CPU fallback), pure landmark→params module with all tunables in one documented block (`POSE_PARAM_TUNING`), 10 unit tests on synthetic landmarks. New dependency: `@mediapipe/tasks-vision` (model + wasm fetched from CDN at startup, permitted by invariant 5).
+- Builder B (sliders/readout/shell, Sonnet): dev-gated slider adapter (~30 Hz), live parameter readout coupled only through `ParamsListener` (invariant 1), app shell with adapter switching, error surfacing, and the visible privacy note.
+
+**Deviations / decisions made, with reasoning:**
+- Speed/symmetry use 2D landmark coordinates only — MediaPipe's z is noisier and differently scaled; documented in code.
+- Frames are dropped, not queued, when the pose worker is busy, so params stay a live readout (immediacy over completeness).
+- `createSliderAdapter` accepts an optional injected minimal document for testability (no jsdom dependency); zero-arg call sites unaffected.
+- Coordinator committed builders' work after QA rather than builders pushing directly — keeps every push QA'd.
+
+**QA notes:**
+- Coordinator QA found a pipeline deadlock: the pose worker posted nothing on a no-pose frame while the main thread waited on a reply before sending the next frame — one undetected frame killed the session. Sent back to Builder A; fixed with a `noPose` message plus speed-state reset after 15 consecutive no-pose frames (stale-state speed spike on re-entry). 3 regression tests added.
+- Verified independently by coordinator: lint/typecheck/22 tests/build all green; production dist grep contains zero slider strings (M1 acceptance); dev-mode build does contain the slider chunk (gate is genuinely conditional).
+
+**Known issues added/resolved:**
+- None outstanding.
+
+**Next session should:**
+- Complete M1 acceptance: founder runs `npm run dev` and verifies the readout responds to real movement (and sliders drive it in dev). Then merge `m1-capture-params` to main and start M2 (seeds and worlds) after founder approval.
 
 ### Session 001 — 2026-08-19 — M0 Scaffold
 
