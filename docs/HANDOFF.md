@@ -10,9 +10,9 @@ Rules for the coordinator writing entries: newest session on top; be specific en
 
 *(Keep this section updated — it is the fast path for a new session. What milestone is active, what works end-to-end right now, how to run the project and its tests.)*
 
-- **Active milestone:** M0 complete → M1 (capture and parameters) is next
-- **Works right now:** full scaffold — Vite + vanilla TypeScript builds, ESLint (with the invariant-2 `Math.random` ban, verified to fire), Vitest with a passing test, CI workflow on every push, contract files in place (`src/adapters/movement-params.ts`, `src/styles/style-renderer.ts`), docs moved to `docs/SPEC.md` + `docs/HANDOFF.md`
-- **Run:** `npm install`, then `npm run dev`
+- **Active milestone:** M1 ACCEPTED by founder live test 2026-08-20 (camera drives bars, preview + pause + stop verified) — merging to main; M2 (seeds and worlds) is next pending founder approval
+- **Works right now:** M0 scaffold plus all of M1's code — webcam adapter (visibility-independent capture, pose worker, expansion/speed/symmetry), dev-gated slider adapter, live parameter readout, app shell with privacy note. 22 unit tests passing; production bundle verified to contain zero slider code
+- **Run:** `npm install`, then `npm run dev` (webcam needs a browser + camera; "Use sliders" appears in dev builds only)
 - **Test:** `npm test` (also `npm run lint`, `npm run typecheck`, `npm run build`)
 
 ## Open deviations from the main doc
@@ -20,6 +20,11 @@ Rules for the coordinator writing entries: newest session on top; be specific en
 *(Implementation choices that differ from or refine the spec, not yet folded back into the main doc. Each entry: what changed, why, and which part/section of the main doc it affects. When the founder folds one into the main doc, move it to the session log entry where the fold happened.)*
 
 - None yet.
+
+## Founder backlog (requested 2026-08-20, do not start without founder approval)
+
+- **More instantaneous inputs in v1:** founder wants at least 4 (spec currently ships 3: expansion/speed/symmetry, with verticality/hand height/lean/jerkiness listed as v1.x candidates). Needs a spec fold: pick the 4th (or more), bump MovementParams `v`, implement in the webcam adapter + sliders + readout. Candidate slot: alongside M4 tuning, when it's clear what Botanical needs.
+- **Speed reads ~0.30 while sitting still** (dim-light landmark jitter integrating into speed; screenshot on record). Should idle ≈0.05–0.10 so stillness genuinely reads as still. Tuning task in `POSE_PARAM_TUNING` (jitter floor / per-landmark visibility weighting / EMA + scale retune) — fits naturally with M4's movement-mapping tuning, or a small M1.x pass.
 
 ## Known issues / debt
 
@@ -32,6 +37,35 @@ Rules for the coordinator writing entries: newest session on top; be specific en
 ## Session log
 
 *(Newest first. One entry per session.)*
+
+### Session 002 — 2026-08-19 — M1 Capture and Parameters
+
+**Goal this session:** M1 in full, on branch `m1-capture-params`.
+
+**Completed:**
+- Coordinator pinned the `InputAdapter` contract (`src/adapters/input-adapter.ts`) and factory stubs before spawning builders, so the two parts could build in parallel against a fixed interface.
+- Builder A (webcam, Sonnet): visibility-independent capture (`MediaStreamTrackProcessor` primary, `requestVideoFrameCallback` on a detached video element as fallback), MediaPipe Tasks `PoseLandmarker` in a module Web Worker (GPU delegate, CPU fallback), pure landmark→params module with all tunables in one documented block (`POSE_PARAM_TUNING`), 10 unit tests on synthetic landmarks. New dependency: `@mediapipe/tasks-vision` (model + wasm fetched from CDN at startup, permitted by invariant 5).
+- Builder B (sliders/readout/shell, Sonnet): dev-gated slider adapter (~30 Hz), live parameter readout coupled only through `ParamsListener` (invariant 1), app shell with adapter switching, error surfacing, and the visible privacy note.
+
+**Deviations / decisions made, with reasoning:**
+- Speed/symmetry use 2D landmark coordinates only — MediaPipe's z is noisier and differently scaled; documented in code.
+- Frames are dropped, not queued, when the pose worker is busy, so params stay a live readout (immediacy over completeness).
+- `createSliderAdapter` accepts an optional injected minimal document for testability (no jsdom dependency); zero-arg call sites unaffected.
+- Coordinator committed builders' work after QA rather than builders pushing directly — keeps every push QA'd.
+
+**QA notes:**
+- Coordinator QA found a pipeline deadlock: the pose worker posted nothing on a no-pose frame while the main thread waited on a reply before sending the next frame — one undetected frame killed the session. Sent back to Builder A; fixed with a `noPose` message plus speed-state reset after 15 consecutive no-pose frames (stale-state speed spike on re-entry). 3 regression tests added.
+- Verified independently by coordinator: lint/typecheck/22 tests/build all green; production dist grep contains zero slider strings (M1 acceptance); dev-mode build does contain the slider chunk (gate is genuinely conditional).
+
+**Known issues added/resolved:**
+- Resolved: "ModuleFactory not set" on camera start, and its successor (silent hang in dev). Final fix: module worker + `preloadWasmModuleFactory()` in pose-worker.ts (fetch the fileset-resolved wasm loader, execute via indirect eval so `ModuleFactory` is set before MediaPipe's `importScripts()` attempt, which module workers throw on but MediaPipe swallows). Works in dev AND build, verified headless with a fake camera in both. start() now rejects on native worker error/messageerror + 20s timeout — never hangs silently. A classic worker does NOT work (Vite dev serves worker imports un-bundled); a bare module worker does NOT work (no importScripts). The preload is load-bearing.
+- Resolved: Stop leaked a live camera stream when Start was clicked again during slow startup — pendingAdapter tracked before awaiting start(), activation tokens discard superseded adapters, start buttons disabled while "Starting…".
+- Resolved: white-on-white shell text (no page background was set).
+
+**Founder live-test results (M1 acceptance):** sliders drive the readout ✓; camera drives the readout with no video element on screen ✓. Founder-requested additions built the same session: camera preview show/hide toggle (CSS-only mirroring, hidden by default, via optional `previewStream?()` on InputAdapter) and a wiring-layer Pause/Resume gate (adapter stays warm; precursor to session pause).
+
+**Next session should:**
+- Merge `m1-capture-params` (PR #1) to main after founder confirms the preview/pause additions, then start M2 (seeds and worlds) after founder approval.
 
 ### Session 001 — 2026-08-19 — M0 Scaffold
 
