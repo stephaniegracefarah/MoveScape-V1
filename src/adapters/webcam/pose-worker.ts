@@ -5,8 +5,9 @@
  * regardless of anything on screen — the whole point of moving capture and
  * inference off the main thread and off any <video> element.
  *
- * Instantiated from index.ts via the Vite worker pattern:
- *   new Worker(new URL('./pose-worker.ts', import.meta.url), { type: 'module' })
+ * Instantiated from index.ts via the Vite worker pattern, deliberately as a
+ * CLASSIC worker (no `type: 'module'`) — see the comment in index.ts for why:
+ *   new Worker(new URL('./pose-worker.ts', import.meta.url))
  */
 import { FilesetResolver, PoseLandmarker } from '@mediapipe/tasks-vision';
 import { computeMovementParams, nextStateAfterNoPose, type PoseFrameState } from './params-from-landmarks';

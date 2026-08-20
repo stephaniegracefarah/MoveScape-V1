@@ -53,10 +53,13 @@ Rules for the coordinator writing entries: newest session on top; be specific en
 - Verified independently by coordinator: lint/typecheck/22 tests/build all green; production dist grep contains zero slider strings (M1 acceptance); dev-mode build does contain the slider chunk (gate is genuinely conditional).
 
 **Known issues added/resolved:**
-- None outstanding.
+- Resolved: "ModuleFactory not set" on camera start — MediaPipe's WASM loader calls `importScripts()`, unavailable in module workers; pose worker switched to a classic worker (Vite bundles its imports for build, and Vite 8's dev server handles them too — verified live). Do not revert to `type: 'module'`.
+- Resolved: white-on-white shell text (no page background was set).
+
+**Founder live-test results (M1 acceptance):** sliders drive the readout ✓; camera drives the readout with no video element on screen ✓. Founder-requested additions built the same session: camera preview show/hide toggle (CSS-only mirroring, hidden by default, via optional `previewStream?()` on InputAdapter) and a wiring-layer Pause/Resume gate (adapter stays warm; precursor to session pause).
 
 **Next session should:**
-- Complete M1 acceptance: founder runs `npm run dev` and verifies the readout responds to real movement (and sliders drive it in dev). Then merge `m1-capture-params` to main and start M2 (seeds and worlds) after founder approval.
+- Merge `m1-capture-params` (PR #1) to main after founder confirms the preview/pause additions, then start M2 (seeds and worlds) after founder approval.
 
 ### Session 001 — 2026-08-19 — M0 Scaffold
 

@@ -59,9 +59,23 @@ export function createWebcamAdapter(): InputAdapter {
       throw new Error(describeGetUserMediaError(err), { cause: err });
     }
 
-    const poseWorker = new Worker(new URL('./pose-worker.ts', import.meta.url), {
-      type: 'module',
-    });
+    // Deliberately a CLASSIC worker (no `type: 'module'`) — do not "fix"
+    // this back to a module worker. @mediapipe/tasks-vision's internal
+    // WASM/Emscripten glue loader calls importScripts() at runtime to fetch
+    // and execute the WASM loader script and populate Module.ModuleFactory.
+    // importScripts() does not exist in ES module Worker scopes, so under
+    // `type: 'module'` that call throws/no-ops and the model never finishes
+    // loading, surfacing as "ModuleFactory not set". This is a known,
+    // currently-unfixed MediaPipe limitation (see google-ai-edge/mediapipe
+    // issues #5527, #4694, #5479, #5257, and
+    // https://ankdev.me/blog/how-to-run-mediapipe-task-vision-in-a-web-worker).
+    // Vite bundles a classic worker's whole dependency graph (npm imports
+    // and local relative imports alike) into one self-contained IIFE script
+    // for the production build, and Vite 8's dev server handles this
+    // worker's imports as well — verified working live in dev (Chrome,
+    // 2026-08-19), despite older Vite issues describing a dev-mode gap for
+    // classic workers.
+    const poseWorker = new Worker(new URL('./pose-worker.ts', import.meta.url));
     worker = poseWorker;
 
     // Wait for the worker to finish loading the pose model (GPU or CPU
@@ -134,5 +148,10 @@ export function createWebcamAdapter(): InputAdapter {
     teardown();
   }
 
-  return { id: 'webcam', start, stop };
+  /** Live preview stream while running; null before start(), after stop(), or on start() failure. */
+  function previewStream(): MediaStream | null {
+    return running ? stream : null;
+  }
+
+  return { id: 'webcam', start, stop, previewStream };
 }
