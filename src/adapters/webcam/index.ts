@@ -71,10 +71,31 @@ export function createWebcamAdapter(): InputAdapter {
     // https://ankdev.me/blog/how-to-run-mediapipe-task-vision-in-a-web-worker).
     // Vite bundles a classic worker's whole dependency graph (npm imports
     // and local relative imports alike) into one self-contained IIFE script
-    // for the production build, and Vite 8's dev server handles this
-    // worker's imports as well — verified working live in dev (Chrome,
-    // 2026-08-19), despite older Vite issues describing a dev-mode gap for
-    // classic workers.
+    // for the PRODUCTION BUILD (`vite build` / `vite preview`), so
+    // pose-worker.ts's `import` statements need no source changes there.
+    //
+    // CAVEAT (re-verified 2026-08-20, do not remove without re-testing):
+    // `npm run dev` does NOT get this bundling. Constructing this exact
+    // worker from a fresh `vite dev` page load reproducibly throws
+    // `Uncaught SyntaxError: Cannot use import statement outside a module`
+    // inside the worker — confirmed via headless Edge AND headless Chrome,
+    // via both DOM-dump and direct CDP Runtime.evaluate against this literal
+    // expression, across two separate verification passes. This is a known,
+    // still-open Vite gap (vitejs/vite issues #8470, #7019, #2550): dev mode
+    // serves this worker's compiled JS with `import` statements intact,
+    // which only a module worker can execute, but only a classic worker
+    // lets MediaPipe's importScripts() run — no single `type` satisfies
+    // both in dev. Because this worker's native `error` event isn't
+    // listened for anywhere in this file (only 'message' is), that parse
+    // failure doesn't reject start() — it hangs forever, which can look
+    // deceptively like "it's working" if getUserMedia already succeeded and
+    // lit up the camera indicator, since the camera preview has nothing to
+    // do with whether pose inference is actually running.
+    // A one-off manual "it worked in dev" report should be re-checked with
+    // a hard refresh + DevTools console open before trusting it over this;
+    // fixing the underlying gap would require changing pose-worker.ts
+    // itself (e.g. dynamic `import()` instead of static imports), which is
+    // out of scope here.
     const poseWorker = new Worker(new URL('./pose-worker.ts', import.meta.url));
     worker = poseWorker;
 
