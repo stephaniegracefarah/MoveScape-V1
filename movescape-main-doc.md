@@ -250,6 +250,7 @@ movescape/
 ├── vite.config.ts
 ├── eslint.config.js           # incl. the Math.random/noise() ban scoped to world/ + styles/
 ├── .gitignore
+├── .gitattributes             # LF line endings everywhere (Windows dev, Linux CI)
 ├── .vscode/                   # extensions.json, settings.json (shared editor setup)
 ├── .github/
 │   └── workflows/ci.yml       # lint + typecheck + tests on every push
