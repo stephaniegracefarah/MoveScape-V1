@@ -10,17 +10,17 @@ Rules for the coordinator writing entries: newest session on top; be specific en
 
 *(Keep this section updated — it is the fast path for a new session. What milestone is active, what works end-to-end right now, how to run the project and its tests.)*
 
-- **Active milestone:** M1 ACCEPTED by founder live test 2026-08-20 (camera drives bars, preview + pause + stop verified) — merging to main; M2 (seeds and worlds) is next pending founder approval
-- **Works right now:** M0 scaffold plus all of M1's code — webcam adapter (visibility-independent capture, pose worker, expansion/speed/symmetry), dev-gated slider adapter, live parameter readout, app shell with privacy note. 22 unit tests passing; production bundle verified to contain zero slider code
+- **Active milestone:** M2 (seeds and worlds) built on branch `m2-seeds-worlds`, PR #2 open, awaiting founder acceptance and merge; M3 (engine and compositor) is next pending founder approval
+- **Works right now:** M0 scaffold, all of M1 (webcam adapter, dev-gated slider adapter, live parameter readout, app shell with privacy note), plus M2's seed/world layer — `createLabeledStream(seed, label)` (hand-written cyrb53 + mulberry32, `src/shared/`) as the sole randomness source for world/style code, `deriveWorldSeed`/`deriveSessionSeed`/`formatLocalDate` (`src/world/seed.ts`), and `createWorld(worldSeed, sessionIndex, overrides?)` producing a `World` with a generic `knob(name)` accessor and per-name override precedence. Nothing in the app wires this in yet — layer 2 has no UI consumer until a real style exists (M4). 59 unit tests passing (22 from M1 + 37 new); production bundle still verified to contain zero slider code (unaffected by this milestone)
 - **Run:** `npm install`, then `npm run dev` (webcam needs a browser + camera; "Use sliders" appears in dev builds only)
 - **Test:** `npm test` (also `npm run lint`, `npm run typecheck`, `npm run build`)
-- **Dev machine quirk:** shells may have a stale PATH (Node/gh installed 2026-08-19). Refresh in PowerShell before npm/gh: `$env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')`
+- **Dev machine quirk:** shells may have a stale PATH (Node/gh installed 2026-08-19). Refresh in PowerShell before npm/gh: `$env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')`. The plain Bash tool's default PATH also misses both — `export PATH="$PATH:/c/Program Files/GitHub CLI:/c/Program Files/nodejs"` fixes it there.
 
 ## Open deviations from the main doc
 
 *(Implementation choices that differ from or refine the spec, not yet folded back into the main doc. Each entry: what changed, why, and which part/section of the main doc it affects. When the founder folds one into the main doc, move it to the session log entry where the fold happened.)*
 
-- None yet.
+- **`World` ships generic in M2, with no concrete fields yet.** Part 3 describes the world layer deriving "palette, background, branch/growth personality constants, wind direction, density tendencies, per-style knob values" — M2 implements only the general mechanism (`knob(name: string): number`, seed-derived via a labeled stream, overridable per-name) and adds no concrete field names, because no style exists yet to consume them (Botanical isn't built until M4) and inventing placeholder knob names now would be unused speculative code. The generic accessor already satisfies the spec's actual requirement ("adding a new knob later leaves every existing world unchanged") for any knob name a future style declares via `worldKnobs()`. Affects Part 3, "The seed system" (World object paragraph). Expect this to resolve itself naturally once M4 gives Botanical real knob names — no fold needed unless the founder wants `World` to carry a fixed named vocabulary instead of a generic accessor.
 
 ## Founder backlog (requested 2026-08-20, do not start without founder approval)
 
@@ -38,6 +38,33 @@ Rules for the coordinator writing entries: newest session on top; be specific en
 ## Session log
 
 *(Newest first. One entry per session.)*
+
+### Session 003 — 2026-08-20 — M2 Seeds and Worlds
+
+**Goal this session:** M2 in full, on branch `m2-seeds-worlds`.
+
+**Completed:**
+- Coordinator explored the current scaffold (`src/world/world.ts` was still M0/M1's placeholder; `src/shared/` had only `clamp01`) and drafted a full implementation plan (hash/PRNG choice, labeled-stream mechanism, World shape, override semantics, test list mapped to each acceptance criterion) via a Plan agent, reviewed it, and got founder approval before building.
+- Single Sonnet builder implemented the milestone sequentially (small enough that a two-way split would have cost more coordination than it saved): `src/shared/hash.ts` (hand-written cyrb53), `src/shared/prng.ts` (hand-written mulberry32, factory not singleton), `src/world/labeled-stream.ts` (`createLabeledStream(seed, label)` — the sole randomness entry point for world/style code; builds a fresh hash→PRNG chain per call so knob independence holds by construction), `src/world/seed.ts` (`formatLocalDate`, `deriveWorldSeed`, `deriveSessionSeed`), and an expanded `src/world/world.ts` (`World` with `worldSeed`/`sessionSeed`/`sessionIndex`/`knob(name)`, `createWorld` with per-name override precedence).
+- 37 new unit tests (59 total with M1's 22), covering the milestone's four acceptance criteria directly plus the underlying primitives (hash/PRNG determinism and distribution sanity, labeled-stream label/seed independence).
+
+**Deviations / decisions made, with reasoning:**
+- Hand-wrote cyrb53 + mulberry32 rather than adding a dependency — each is ~10 lines of public-domain pure-integer math, consistent with M0/M1's minimal-dependency stance (only runtime dep remains `@mediapipe/tasks-vision`).
+- `World` kept generic (`knob(name)`) with zero concrete fields (no palette/wind/density) — see "Open deviations" above; no style exists yet to consume named knobs, and the project's own anti-stub-file principle rules out inventing unused vocabulary now.
+- `formatLocalDate` uses the `Date`'s local Y/M/D components, not `toISOString()` (UTC) — a UTC day boundary would flip "today's world" near midnight in negative-UTC-offset timezones, breaking the "Tuesday is Tuesday" promise. Kept as a pure function taking a `Date` parameter so tests stay timezone-agnostic.
+- `userId` persistence (the "locally stored random identity created on first run" from Part 3) is explicitly deferred — `deriveWorldSeed(userId, localDate)` stays a pure function taking `userId` as a plain string parameter; the actual get-or-create-in-localStorage wiring waits until a milestone first constructs a real `World` in the running app (M4), since M2's acceptance criteria are all pure/unit-testable with no app wiring required.
+- World-level knobs derive from `worldSeed` (not `sessionSeed`), so they stay stable across sibling sessions on the same day; `sessionSeed` is exposed as a plain public field (not override-aware) for a style's own session-level jitter streams, since session-level stochastic detail is never one of the user's overridable choices per spec.
+
+**QA notes:**
+- Coordinator independently reread the crux files (`labeled-stream.ts`, `world.ts`, `hash.ts`, `prng.ts`, `seed.ts`) rather than trusting the builder's summary, and confirmed the labeled-stream construction genuinely builds a fresh chain per call (no shared/cached generator state) — the property the whole independence guarantee rests on.
+- Independently reran `lint`/`typecheck`/`test`/`build` (all green, 59/59 tests) rather than accepting the builder's report at face value.
+- Read through `world.test.ts` in full and confirmed the four acceptance-criteria tests (same-seed identity, session-index variation, override precedence, knob-stream independence) actually exercise the claimed property rather than passing trivially — in particular the independence test varies read order across four separate `World` instances.
+
+**Known issues added/resolved:**
+- None.
+
+**Next session should:**
+- After founder reviews/merges PR #2, start M3 (engine and compositor): fixed-timestep simulation loop, recording writer, the StyleRenderer interface is already pinned (`src/styles/style-renderer.ts`), the 2D depth compositor, and a placeholder style (e.g. drifting circles) to exercise it. M3's acceptance criterion is the first determinism test (same recipe → identical geometry hash and identical pixel hash across two runs at different render frame rates, same environment) — this is the milestone that first makes real use of M2's `World`/`createLabeledStream`. Check the founder backlog (4th+ instantaneous input; stillness-speed jitter tuning) before proposing scope — both remain unapproved and don't block M3.
 
 ### Session 002 — 2026-08-19 — M1 Capture and Parameters
 
