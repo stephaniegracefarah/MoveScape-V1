@@ -44,7 +44,7 @@ MoveScape sits at the unclaimed intersection: **seeded, explorable generative wo
 
 **Serendipity by default, control by choice.** The day's world asserts its own personality — palette, growth character, mood — and the user can override any part of it (choosing a style now, choosing colors later). The more the user overrides, the more predictable the world becomes and the more it reflects their taste. Beginners get full serendipity; people who develop taste get control. Both experiences are intended.
 
-**Movement has immediate, legible effect.** The POC's single most important validated finding: the experience clicks the moment your movement visibly changes the art. Throwing your arms wide opens the forms *now*; a burst of speed produces a burst of growth *now*; the connection between what you did and what happened is always intuitive. Every style must honor this as a responsiveness budget — movement effects visible within a frame or two — and speed in particular stays a direct, unsoftened readout of real movement.
+**Movement has immediate, legible effect.** The POC's single most important validated finding: the experience clicks the moment your movement visibly changes the art. Throwing your arms wide opens the forms *now*; a burst of speed produces a burst of growth *now*; the connection between what you did and what happened is always intuitive. Every style must honor this as a responsiveness budget — movement effects visible within a frame or two — and speed in particular stays a direct, honest readout of real movement (smoothed only for sensor stability, never blended with noise).
 
 **Sharing art protects privacy.** Sharing fitness data exposes pace, weight, and ability level. A MoveScape piece reveals only that you moved. Someone who feels shy about posting a workout can proudly post a drawing their body made.
 
@@ -152,7 +152,7 @@ Wearable adapters map their own signals into the same instantaneous vector (hear
 
 ### The seed system
 
-Seeding splits into two levels. The **world seed** is `hash(userId, localDate)` and determines the world's identity: palette, environmental personality, terrain, growth rules. The **session seed** is `hash(worldSeed, sessionIndex)` — the first session of the day is index 0, the second index 1 — and determines the small stochastic details of a run: initial spawn placement, blossom micro-variation, particle jitter. This split preserves the model's core promise (Tuesday is Tuesday; two Tuesday sessions share terrain, palette, and personality) while making sibling sessions feel like two performances inside the same universe rather than identical simulations receiving different movement. The piece recipe records the session index alongside the seed, so reconstruction stays exact. Both seeds are stable strings hashed (for example, xxhash or cyrb53) into PRNG seeds. v1 works without accounts, so `userId` is a locally stored random identity created on first run; when accounts arrive, it migrates. The PRNG must be an explicit seeded generator (for example, mulberry32 or sfc32) passed into everything generative — **layers 2 and 3 use the seeded generator exclusively; `Math.random()` is banned there**, enforced by code review habit and ideally a lint rule. p5.js's `noise()` must likewise be seeded via `noiseSeed()` from the same stream.
+Seeding splits into two levels. The **world seed** is `hash(userId, localDate)` and determines the world's identity: palette, environmental personality, terrain, growth rules. The **session seed** is `hash(worldSeed, sessionIndex)` — the first session of the day is index 0, the second index 1 — and determines the small stochastic details of a run: initial spawn placement, blossom micro-variation, particle jitter. This split preserves the model's core promise (Tuesday is Tuesday; two Tuesday sessions share terrain, palette, and personality) while making sibling sessions feel like two performances inside the same universe rather than identical simulations receiving different movement. The piece recipe records the session index alongside the seed, so reconstruction stays exact. Both seeds are stable strings hashed (for example, xxhash or cyrb53) into PRNG seeds. v1 works without accounts, so `userId` is a locally stored random identity created on first run; when accounts arrive, it migrates. The PRNG must be an explicit seeded generator (for example, mulberry32 or sfc32) passed into everything generative — **layers 2 and 3 use the seeded generator exclusively; `Math.random()` is banned there**, enforced by code review habit and ideally a lint rule. Perlin/simplex noise likewise comes from the project's own implementation driven by a labeled stream — p5.js's global `noise()` is a page-wide singleton and cannot provide independent per-style labeled streams, so it is not used.
 
 From the seed, the world layer derives a `World` object: palette, background, branch/growth personality constants, wind direction, density tendencies, per-style knob values. Derivation order matters for stability: each style draws its knob values from an independent, labeled stream (seed + knob name), so adding a new knob later leaves every existing world unchanged.
 
@@ -160,7 +160,9 @@ User overrides sit on top: the `World` is generated in full, then any user-chose
 
 **The piece recipe** is the unit of permanence: `{ version, styleId, userChoices, worldSeed, sessionIndex, movementRecording }`, where the movement recording is the timestamped MovementParams stream (three floats at ~15–30 Hz — a 30-minute session is well under a megabyte, and compresses heavily since the values are smooth). Replaying a recipe reproduces the piece exactly, at any resolution — which is also the path to high-res export, poster printing, and the far-future VR re-projection of old pieces.
 
-**Fixed-timestep simulation — a hard requirement for exact replay.** The art simulation advances on a fixed tick (for example, 60 updates per simulated second) driven by the recording's own clock, with the instantaneous parameters sampled from the recording at each tick. Rendering is decoupled and runs at whatever frame rate the device manages. Wall-clock time and display frame rate must have zero influence on the simulation, because a simulation stepped by real elapsed time produces different art on a fast machine than a slow one — which would break replay, high-res re-export, and cross-device reconstruction all at once. (The POC stepped by wall clock; this is one of the things the fresh build does right from the start.) A useful side effect: replay can run much faster than real time, so opening a saved piece from its recipe is quick.
+**Fixed-timestep simulation — a hard requirement for exact replay.** The art simulation advances on a fixed tick (for example, 60 updates per simulated second) driven by the recording's own clock, with the instantaneous parameters sampled from the recording at each tick by **sample-and-hold**: each tick uses the most recent recorded sample at or before its timestamp, with no interpolation. This sampling policy is part of the recipe format and pinned by its version — live sessions and replays must apply the identical policy, or the two diverge. Rendering is decoupled and runs at whatever frame rate the device manages. Wall-clock time and display frame rate must have zero influence on the simulation, because a simulation stepped by real elapsed time produces different art on a fast machine than a slow one — which would break replay, high-res re-export, and cross-device reconstruction all at once. (The POC stepped by wall clock; this is one of the things the fresh build does right from the start.) A useful side effect: replay can run much faster than real time, so opening a saved piece from its recipe is quick.
+
+**Determinism has two tiers, and guarantees are stated at the right one.** The generated *geometry* — the scene a style produces at every tick — is bit-identical everywhere, because JavaScript floating-point math is deterministic across engines. Rasterized *pixels* are identical only within one browser/GPU environment, because Canvas anti-aliasing and curve tessellation vary across platforms. Reconstruction promises ("replaying a recipe reproduces the piece exactly") therefore hold at the geometry level everywhere and at the pixel level within a given environment; automated tests hash geometry for cross-environment identity and hash pixels only within a single environment.
 
 ### Style renderers as plugins
 
@@ -200,13 +202,15 @@ The scope cap on this, stated as a rule: **preserve the information, delay the i
 
 **Capture pipeline (replaces the POC's layout patch):** the POC worked around a real bug — browsers throttle frame delivery for a `<video>` element that scrolls out of view, which starved pose tracking — by pinning the video and canvas side by side in the viewport. That patch constrains layout and rules out mobile, where the art should own the screen. v1 replaces it with a capture pipeline that is independent of DOM visibility: read frames directly from the camera's `MediaStream` via `MediaStreamTrackProcessor` where supported, falling back to `requestVideoFrameCallback` on a detached or hidden video element, and run pose inference in a Web Worker with `OffscreenCanvas` so detection continues at full rate regardless of what is on screen. With capture decoupled from layout, the camera preview becomes a pure design choice — full-size on desktop, a small optional thumbnail on mobile, or hidden entirely — while tracking quality stays constant.
 
-**Rendering:** plain Canvas 2D or p5.js per depth layer, behind the compositor abstraction described above; the plugin interface hides the choice. Styles needing particle density may adopt WebGL later while other styles stay as they are, and the geometry-plus-compositor split is what lets a future 3D/VR renderer replace the 2D compositor without touching any style.
+**Rendering:** plain Canvas 2D or p5.js per depth layer, behind the compositor abstraction described above; the plugin interface hides the choice. (If p5 is used, it is a drawing library only — its `random()` and `noise()` are never used; all randomness and noise come from the labeled seeded streams.) Styles needing particle density may adopt WebGL later while other styles stay as they are, and the geometry-plus-compositor split is what lets a future 3D/VR renderer replace the 2D compositor without touching any style.
 
 **Platform:** browser-first. v1 targets desktop (webcam plus room to move fits a laptop), but the phone browser is a firm near-term target — so v1 makes zero desktop-only assumptions: responsive layout, touch-friendly controls, and the visibility-independent capture pipeline above, which is what makes a mobile layout possible at all. v1 should also move from a single HTML file to a small modular project (Vite with vanilla TypeScript or similar), because the plugin architecture needs modules; the tooling choice itself is flexible.
 
 **Storage:** local only for v1 — IndexedDB for piece recipes, direct download for exported images. The movement recording is stored as part of the recipe, so saving a piece saves its session; sessions the user chooses to discard are deleted, with nothing retained. Because IndexedDB lives in one browser profile and is lost if the user clears browser data, recipe export/import is also the backup path: exporting recipes as files is how a user backs up their universe. Cloud sync is a v2 question.
 
 **Privacy enforcement:** the video element and pose model run entirely client-side (MediaPipe Tasks is on-device by design); v1 makes this *architecturally* true by having no backend at all.
+
+**Deployment:** the production build is a static site, deployed on Vercel (the founder's existing deployment platform) from a private repository. Sharing v1 with strangers is sharing a URL; visitors' cameras and saved pieces stay on their own devices, so distribution adds no data custody. Only the minified bundle is public — the source, spec, and handoff history stay private. This is a deliberate tradeoff: on-device privacy means the shipped code is readable by a determined visitor, and the project accepts that, treating the spec, the tuning, and iteration speed as the real IP rather than code secrecy.
 
 ### Build roadmap
 
@@ -226,30 +230,68 @@ The scope cap on this, stated as a rule: **preserve the information, delay the i
 
 This document's intended consumer for the build phase is an AI coding agent (Claude Code), working milestone by milestone in a repo. This part turns the architecture into agent-executable instructions: invariants the agent must never violate, and a milestone sequence where each milestone is one focused session with a testable acceptance criterion.
 
-**The two-document system.** The project runs on exactly two documents. This document is the stable spec — vision, requirements, architecture, milestones. The second is the **handoff/changelog doc** (`HANDOFF.md` in the repo), updated at the end of every session with what was finished, any implementation choices that deviated from or refined this spec (with reasoning), known issues, and what comes next. Every new session starts by reading both: this doc for what the system should be, the handoff doc for where the build actually stands. When accumulated deviations in the handoff doc amount to a real spec change, they get folded back into this document and the handoff entry notes that the fold happened.
+**The two-document system.** The project runs on exactly two documents. This document is the stable spec — vision, requirements, architecture, milestones — living at `docs/SPEC.md`. The second is the **handoff/changelog doc** (`docs/HANDOFF.md`), updated at the end of every session with what was finished, any implementation choices that deviated from or refined this spec (with reasoning), known issues, and what comes next. Every new session starts by reading both: this doc for what the system should be, the handoff doc for where the build actually stands. When accumulated deviations in the handoff doc amount to a real spec change, they get folded back into this document and the handoff entry notes that the fold happened.
 
 **The orchestration pattern.** Each session is run by a **coordinator agent** whose job is management, verification, and the handoff — it writes little or no feature code itself. The coordinator reads both documents, takes the current milestone, and decomposes it into build tasks; spins up builder agents to implement each part; then **QAs each part against the milestone's acceptance criteria and the invariants below** — the invariants are the QA checklist — and sends work back to builders with specific feedback until it passes. Where a milestone contains independent parts (for example, M1's capture pipeline and slider adapter), builders can run in parallel; where parts share a contract, the coordinator pins the interface first and builders implement against it. The session ends with the coordinator updating the handoff doc.
+
+### Repository layout
+
+The folder structure is the architecture made visible: one directory per layer, the contracts as named files, and the shared seeded-noise/math utilities kept dependency-free. M0 creates this skeleton (folders, configs, contract files); each later milestone fills in only its own modules — no stub files are pre-created for future milestones.
+
+```
+movescape/
+├── README.md                  # what this is, screenshot, how to run/test
+├── docs/
+│   ├── SPEC.md                # this document
+│   └── HANDOFF.md             # the handoff/changelog doc
+├── index.html
+├── package.json
+├── tsconfig.json
+├── vite.config.ts
+├── eslint.config.js           # incl. the Math.random/noise() ban scoped to world/ + styles/
+├── .gitignore
+├── .vscode/                   # extensions.json, settings.json (shared editor setup)
+├── .github/
+│   └── workflows/ci.yml       # lint + typecheck + tests on every push
+└── src/
+    ├── main.ts                # entry point: wires the layers together
+    ├── app/                   # UI shell: session start/end, style picker, readout
+    ├── adapters/              # LAYER 1 — inputs
+    │   ├── movement-params.ts # THE contract (versioned MovementParams)
+    │   ├── webcam/            # capture pipeline, pose worker, param computation
+    │   └── sliders/           # dev-only manual adapter (UI behind build flag)
+    ├── world/                 # LAYER 2 — seeds, labeled PRNG streams, World, overrides
+    ├── styles/                # LAYER 3 — plugins
+    │   ├── style-renderer.ts  # the plugin interface
+    │   └── botanical/         # style #1 (style #2 lands in M6 as a sibling folder)
+    ├── engine/                # fixed-timestep loop, recording writer, replay, recipe
+    ├── compositor/            # 2D depth compositor
+    ├── storage/               # IndexedDB recipes, export/import, image export
+    └── shared/                # seeded noise, math utils — imports from no other layer
+```
+
+Unit tests are colocated (`foo.test.ts` beside `foo.ts`); the cross-cutting determinism tests live in `src/engine/`. CI is part of the QA story: the same lint + typecheck + test commands the coordinator runs locally run on every push, so an invariant violation cannot land silently.
 
 ### Invariants (never violate, regardless of milestone)
 
 1. **The MovementParams contract is the only coupling** between input adapters and everything downstream. No adapter-specific code in the world layer or styles; no style-specific code in adapters.
-2. **Seeded randomness only in the world layer and styles.** `Math.random()` is banned in those modules — enforce with an ESLint rule, and seed p5 `noise()` via `noiseSeed()` where p5 is used. Every random draw comes from a labeled stream (seed + knob name) so adding knobs never shifts existing worlds.
-3. **Determinism is tested, not assumed.** Same recipe → identical output is a permanent automated test (render to canvas at fixed size, hash pixels, compare).
+2. **Seeded randomness only in the world layer and styles.** `Math.random()` is banned in those modules — enforce with an ESLint rule. Noise likewise comes from the project's own labeled-stream implementation; p5's global `noise()` singleton is banned in those modules too. Every random draw comes from a labeled stream (seed + knob name) so adding knobs never shifts existing worlds.
+3. **Determinism is tested, not assumed — at two tiers.** Same recipe → identical geometry hash is a permanent automated test and must hold across environments; same recipe → identical pixel hash (render to canvas at fixed size, hash pixels, compare) is also a permanent automated test but is asserted only within a single browser/GPU environment, because rasterization differs across platforms.
 4. **Fixed-timestep simulation.** The simulation ticks on the recording clock; wall time and frame rate never influence art. Live sessions and replays run the identical code path — a live session is just a replay of a recording being written in real time.
 5. **No backend, no network for video.** All processing on-device; the only network use is fetching static assets and the pose model.
-6. **Immediacy budget.** Movement effects visible within a frame or two of detection; speed is never noise-blended.
+6. **Immediacy budget.** Movement effects visible within a frame or two of detection; speed is never noise-blended. (EMA smoothing for sensor stability is fine and is not noise-blending — but the EMA window must itself stay within the immediacy budget. What is banned is blending decorative noise into the speed signal.)
 7. **Effort maps to character, never to worth.** No code path may scale quality, rarity, or value by exertion.
 8. **Preserve depth, delay infrastructure.** Every generated element carries z; the compositor stays a depth-sort-fade-composite loop. No scene graphs, no VR abstractions.
 
 ### Milestones
 
-**M0 — Scaffold.** Vite + vanilla TypeScript, ESLint (including the `Math.random` ban scoped to `src/world` and `src/styles`), Vitest, empty module boundaries matching the three layers. *Accept: build, lint, and a trivial test pass.*
+**M0 — Scaffold.** The repository layout above: Vite + vanilla TypeScript, ESLint (including the `Math.random`/`noise()` ban scoped to `src/world` and `src/styles`), Vitest, CI workflow, README, docs moved into `docs/`, and empty module boundaries matching the three layers. *Accept: build, lint, and a trivial test pass locally and in CI.*
 
 **M1 — Capture and parameters.** The visibility-independent capture pipeline (MediaStreamTrackProcessor, `requestVideoFrameCallback` fallback), PoseLandmarker in a Web Worker, the webcam adapter computing expansion/speed/symmetry, the manual-slider adapter with its UI gated behind the dev build flag, and an on-screen readout. *Accept: readout responds to real movement with the video element hidden; sliders drive the same readout in a dev build; a production build contains no slider UI.*
 
 **M2 — Seeds and worlds.** worldSeed/sessionSeed derivation, labeled PRNG streams, the `World` object with user-override layering. *Accept: unit tests prove same-seed identity, session-index variation, override precedence, and knob-stream independence (adding a knob leaves other knobs' values unchanged).*
 
-**M3 — Engine and compositor.** Fixed-timestep simulation loop, recording writer, the StyleRenderer interface, the 2D depth compositor, and a placeholder style (e.g., drifting circles) to exercise it. *Accept: the determinism test passes — same recipe, identical pixel hash, across two runs at different render frame rates.*
+**M3 — Engine and compositor.** Fixed-timestep simulation loop, recording writer, the StyleRenderer interface, the 2D depth compositor, and a placeholder style (e.g., drifting circles) to exercise it. *Accept: the determinism tests pass — same recipe yields an identical geometry hash and an identical pixel hash across two runs at different render frame rates (same environment).*
 
 **M4 — Botanical.** The real style: branching growth with blossom clusters, depth layering (pale far, dark near), lifecycle, movement mapping honoring the immediacy budget. This milestone is where most of the project's total effort belongs, iterated until the art is save-worthy — the experience MVP. *Accept: subjective (the founder wants to save a piece), plus the determinism test still passing.*
 
@@ -263,4 +305,4 @@ Each milestone lands on a green determinism test before the next begins. When bu
 
 ---
 
-*Document status: Draft 5, written from the founder Q&A of 2026-08-20, with an external product review incorporated the same day (art-first positioning, character-only effort, world/session seed split, derived session-level parameters, experience-vs-architecture MVP sequencing, compositor scope cap), followed by the fresh-build reframing, the immediacy principle, the fixed-timestep requirement, and the AI build guide (Part 4). Part 2's remaining open question (the accumulation model) is scheduled to be revisited after several weeks of real v1 use.*
+*Document status: Draft 6, written from the founder Q&A of August 2026, with an external product review incorporated the same day (art-first positioning, character-only effort, world/session seed split, derived session-level parameters, experience-vs-architecture MVP sequencing, compositor scope cap), followed by the fresh-build reframing, the immediacy principle, the fixed-timestep requirement, and the AI build guide (Part 4). A pre-build technical review (2026-08-19) added: two-tier determinism (geometry everywhere, pixels per-environment), the sample-and-hold recording policy pinned by recipe version, project-owned labeled-stream noise in place of p5's global `noise()`, and the EMA-vs-noise-blending clarification of the immediacy invariant. Part 2's remaining open question (the accumulation model) is scheduled to be revisited after several weeks of real v1 use.*
