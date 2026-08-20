@@ -10,7 +10,7 @@ Rules for the coordinator writing entries: newest session on top; be specific en
 
 *(Keep this section updated — it is the fast path for a new session. What milestone is active, what works end-to-end right now, how to run the project and its tests.)*
 
-- **Active milestone:** M1 built on branch `m1-capture-params`; awaiting the founder's live-camera acceptance test before merge to main
+- **Active milestone:** M1 ACCEPTED by founder live test 2026-08-20 (camera drives bars, preview + pause + stop verified) — merging to main; M2 (seeds and worlds) is next pending founder approval
 - **Works right now:** M0 scaffold plus all of M1's code — webcam adapter (visibility-independent capture, pose worker, expansion/speed/symmetry), dev-gated slider adapter, live parameter readout, app shell with privacy note. 22 unit tests passing; production bundle verified to contain zero slider code
 - **Run:** `npm install`, then `npm run dev` (webcam needs a browser + camera; "Use sliders" appears in dev builds only)
 - **Test:** `npm test` (also `npm run lint`, `npm run typecheck`, `npm run build`)
@@ -20,6 +20,11 @@ Rules for the coordinator writing entries: newest session on top; be specific en
 *(Implementation choices that differ from or refine the spec, not yet folded back into the main doc. Each entry: what changed, why, and which part/section of the main doc it affects. When the founder folds one into the main doc, move it to the session log entry where the fold happened.)*
 
 - None yet.
+
+## Founder backlog (requested 2026-08-20, do not start without founder approval)
+
+- **More instantaneous inputs in v1:** founder wants at least 4 (spec currently ships 3: expansion/speed/symmetry, with verticality/hand height/lean/jerkiness listed as v1.x candidates). Needs a spec fold: pick the 4th (or more), bump MovementParams `v`, implement in the webcam adapter + sliders + readout. Candidate slot: alongside M4 tuning, when it's clear what Botanical needs.
+- **Speed reads ~0.30 while sitting still** (dim-light landmark jitter integrating into speed; screenshot on record). Should idle ≈0.05–0.10 so stillness genuinely reads as still. Tuning task in `POSE_PARAM_TUNING` (jitter floor / per-landmark visibility weighting / EMA + scale retune) — fits naturally with M4's movement-mapping tuning, or a small M1.x pass.
 
 ## Known issues / debt
 
