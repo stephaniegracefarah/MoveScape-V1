@@ -5,9 +5,12 @@
  * regardless of anything on screen — the whole point of moving capture and
  * inference off the main thread and off any <video> element.
  *
- * Instantiated from index.ts via the Vite worker pattern, deliberately as a
- * CLASSIC worker (no `type: 'module'`) — see the comment in index.ts for why:
- *   new Worker(new URL('./pose-worker.ts', import.meta.url))
+ * Instantiated from index.ts via the Vite worker pattern as a MODULE worker
+ * (`type: 'module'` — required for `npm run dev`, where Vite serves this
+ * file's imports as real ES modules that only a module worker can execute):
+ *   new Worker(new URL('./pose-worker.ts', import.meta.url), { type: 'module' })
+ * MediaPipe's importScripts()-based wasm loading doesn't work in module
+ * workers; see the pre-loading workaround in createLandmarker() below.
  */
 import { FilesetResolver, PoseLandmarker } from '@mediapipe/tasks-vision';
 import { computeMovementParams, nextStateAfterNoPose, type PoseFrameState } from './params-from-landmarks';
@@ -44,8 +47,49 @@ let frameState: PoseFrameState | null = null;
  *  nextStateAfterNoPose / POSE_PARAM_TUNING.NO_POSE_RESET_THRESHOLD). */
 let consecutiveNoPoseFrames = 0;
 
+/**
+ * Pre-executes MediaPipe's Emscripten wasm loader in this worker's global
+ * scope, working around a known tasks-vision limitation in module workers
+ * (google-ai-edge/mediapipe issues #5527, #4694, #5479, #5257).
+ *
+ * Mechanism (read from the installed vision_bundle.mjs, v1.0.1): MediaPipe
+ * loads its wasm glue by calling importScripts(wasmLoaderPath) — which in an
+ * ES module worker throws a TypeError that MediaPipe SWALLOWS — and then
+ * fails with "ModuleFactory not set.". But it only needs that script to have
+ * defined `ModuleFactory` on the worker's global scope, and it uses a
+ * pre-existing one happily. So we fetch the exact loader script the fileset
+ * resolved (SIMD or non-SIMD variant) and execute it at global scope
+ * ourselves. Indirect eval — `(0, eval)(...)` — evaluates at global scope,
+ * so the loader's top-level `var ModuleFactory = ...` lands on globalThis
+ * exactly where importScripts() would have put it.
+ *
+ * Why not a classic worker (where importScripts exists)? Verified 2026-08-20:
+ * Vite's dev server serves this file's `import` statements as-is, which a
+ * classic worker cannot parse (`Cannot use import statement outside a
+ * module`) — a known open Vite gap (vitejs/vite issues #8470, #7019, #2550).
+ * Module worker + this pre-load is the one combination that works in BOTH
+ * `npm run dev` and the production build.
+ */
+async function preloadWasmModuleFactory(wasmLoaderPath: string): Promise<void> {
+  const scope = globalThis as { ModuleFactory?: unknown };
+  if (typeof scope.ModuleFactory === 'function') return; // already loaded
+  const response = await fetch(wasmLoaderPath);
+  if (!response.ok) {
+    throw new Error(`failed to fetch wasm loader (HTTP ${response.status}): ${wasmLoaderPath}`);
+  }
+  const loaderSource = await response.text();
+  // Deliberate eval: executes MediaPipe's own wasm loader (the same static
+  // CDN asset MediaPipe itself would have run via importScripts) at global
+  // scope; see the function comment above.
+  (0, eval)(loaderSource);
+  if (typeof scope.ModuleFactory !== 'function') {
+    throw new Error(`wasm loader did not define ModuleFactory: ${wasmLoaderPath}`);
+  }
+}
+
 async function createLandmarker(): Promise<PoseLandmarker> {
   const vision = await FilesetResolver.forVisionTasks(WASM_FILESET_BASE_URL);
+  await preloadWasmModuleFactory(vision.wasmLoaderPath);
   // Required for the GPU delegate to bind textures inside a worker, where
   // there is no document canvas to fall back on.
   const canvas = new OffscreenCanvas(1, 1);
@@ -59,6 +103,10 @@ async function createLandmarker(): Promise<PoseLandmarker> {
     });
   } catch (gpuError) {
     console.warn('[pose-worker] GPU delegate unavailable, falling back to CPU:', gpuError);
+    // MediaPipe clears self.ModuleFactory after consuming it (verified in
+    // vision_bundle.mjs: `self.ModuleFactory=self.Module=void 0`), so the
+    // retry needs the loader pre-executed again.
+    await preloadWasmModuleFactory(vision.wasmLoaderPath);
     return PoseLandmarker.createFromOptions(vision, {
       baseOptions: { modelAssetPath: POSE_MODEL_URL, delegate: 'CPU' },
       runningMode: 'VIDEO',

@@ -59,68 +59,85 @@ export function createWebcamAdapter(): InputAdapter {
       throw new Error(describeGetUserMediaError(err), { cause: err });
     }
 
-    // Deliberately a CLASSIC worker (no `type: 'module'`) — do not "fix"
-    // this back to a module worker. @mediapipe/tasks-vision's internal
-    // WASM/Emscripten glue loader calls importScripts() at runtime to fetch
-    // and execute the WASM loader script and populate Module.ModuleFactory.
-    // importScripts() does not exist in ES module Worker scopes, so under
-    // `type: 'module'` that call throws/no-ops and the model never finishes
-    // loading, surfacing as "ModuleFactory not set". This is a known,
-    // currently-unfixed MediaPipe limitation (see google-ai-edge/mediapipe
-    // issues #5527, #4694, #5479, #5257, and
-    // https://ankdev.me/blog/how-to-run-mediapipe-task-vision-in-a-web-worker).
-    // Vite bundles a classic worker's whole dependency graph (npm imports
-    // and local relative imports alike) into one self-contained IIFE script
-    // for the PRODUCTION BUILD (`vite build` / `vite preview`), so
-    // pose-worker.ts's `import` statements need no source changes there.
-    //
-    // CAVEAT (re-verified 2026-08-20, do not remove without re-testing):
-    // `npm run dev` does NOT get this bundling. Constructing this exact
-    // worker from a fresh `vite dev` page load reproducibly throws
-    // `Uncaught SyntaxError: Cannot use import statement outside a module`
-    // inside the worker — confirmed via headless Edge AND headless Chrome,
-    // via both DOM-dump and direct CDP Runtime.evaluate against this literal
-    // expression, across two separate verification passes. This is a known,
-    // still-open Vite gap (vitejs/vite issues #8470, #7019, #2550): dev mode
-    // serves this worker's compiled JS with `import` statements intact,
-    // which only a module worker can execute, but only a classic worker
-    // lets MediaPipe's importScripts() run — no single `type` satisfies
-    // both in dev. Because this worker's native `error` event isn't
-    // listened for anywhere in this file (only 'message' is), that parse
-    // failure doesn't reject start() — it hangs forever, which can look
-    // deceptively like "it's working" if getUserMedia already succeeded and
-    // lit up the camera indicator, since the camera preview has nothing to
-    // do with whether pose inference is actually running.
-    // A one-off manual "it worked in dev" report should be re-checked with
-    // a hard refresh + DevTools console open before trusting it over this;
-    // fixing the underlying gap would require changing pose-worker.ts
-    // itself (e.g. dynamic `import()` instead of static imports), which is
-    // out of scope here.
-    const poseWorker = new Worker(new URL('./pose-worker.ts', import.meta.url));
+    // A MODULE worker — required for `npm run dev`, where Vite serves the
+    // worker's `import` statements as real ES modules that only a module
+    // worker can execute (a classic worker throws `Cannot use import
+    // statement outside a module`; known open Vite gap, vitejs/vite issues
+    // #8470, #7019, #2550 — verified here 2026-08-20 in headless Edge and
+    // Chrome). MediaPipe's wasm loading normally requires importScripts(),
+    // which module workers lack ("ModuleFactory not set."); pose-worker.ts
+    // works around that by pre-executing the wasm loader itself — see
+    // preloadWasmModuleFactory() there. Production `vite build` bundles the
+    // worker either way. Do not change this worker's type or remove that
+    // preload without re-verifying BOTH `npm run dev` AND `vite preview`.
+    const poseWorker = new Worker(new URL('./pose-worker.ts', import.meta.url), {
+      type: 'module',
+    });
     worker = poseWorker;
 
     // Wait for the worker to finish loading the pose model (GPU or CPU
     // delegate) before starting capture, so start() only resolves once the
     // adapter is actually live — and so any load failure rejects start()
-    // instead of surfacing later as silent missing frames.
+    // instead of surfacing later as silent missing frames. The native
+    // `error` and `messageerror` listeners and the timeout are load-bearing:
+    // a worker script that fails to PARSE (e.g. the dev-mode classic-worker
+    // regression this file's comments describe) never runs any worker code,
+    // so it never posts a `{type:'error'}` message — only the native `error`
+    // event fires. Without these, start() hangs forever while the camera
+    // light is on, which looks deceptively like success.
+    const READY_TIMEOUT_MS = 20_000;
     try {
       await new Promise<void>((resolve, reject) => {
-        const onReadyOrError = (event: MessageEvent<WorkerToMainMessage>): void => {
+        const settle = (result: { ok: true } | { ok: false; error: Error }): void => {
+          clearTimeout(timer);
+          poseWorker.removeEventListener('message', onMessage);
+          poseWorker.removeEventListener('error', onError);
+          poseWorker.removeEventListener('messageerror', onMessageError);
+          if (result.ok) resolve();
+          else reject(result.error);
+        };
+        const timer = setTimeout(() => {
+          settle({
+            ok: false,
+            error: new Error(
+              `Pose tracking failed to start: timed out after ${READY_TIMEOUT_MS / 1000}s waiting for the pose model to load (slow network fetching the model/wasm from CDN, or a silently crashed worker).`,
+            ),
+          });
+        }, READY_TIMEOUT_MS);
+        const onMessage = (event: MessageEvent<WorkerToMainMessage>): void => {
           const message = event.data;
           if (message.type === 'ready') {
-            poseWorker.removeEventListener('message', onReadyOrError);
-            resolve();
+            settle({ ok: true });
           } else if (message.type === 'error') {
-            poseWorker.removeEventListener('message', onReadyOrError);
-            reject(new Error(`Pose tracking failed to start: ${message.message}`));
+            settle({ ok: false, error: new Error(`Pose tracking failed to start: ${message.message}`) });
           }
         };
-        poseWorker.addEventListener('message', onReadyOrError);
+        const onError = (event: ErrorEvent): void => {
+          settle({
+            ok: false,
+            error: new Error(`Pose tracking failed to start: pose worker crashed: ${event.message || 'unknown worker error'}`),
+          });
+        };
+        const onMessageError = (): void => {
+          settle({ ok: false, error: new Error('Pose tracking failed to start: pose worker message could not be deserialized.') });
+        };
+        poseWorker.addEventListener('message', onMessage);
+        poseWorker.addEventListener('error', onError);
+        poseWorker.addEventListener('messageerror', onMessageError);
       });
     } catch (err) {
       teardown();
       throw err;
     }
+
+    // Post-ready: a worker crash can no longer reject start(), but it must
+    // still be loud, not silent.
+    poseWorker.addEventListener('error', (event: ErrorEvent) => {
+      console.error('[webcam adapter] pose worker crashed:', event.message || event);
+    });
+    poseWorker.addEventListener('messageerror', () => {
+      console.error('[webcam adapter] pose worker message could not be deserialized.');
+    });
 
     poseWorker.addEventListener('message', (event: MessageEvent<WorkerToMainMessage>) => {
       const message = event.data;
