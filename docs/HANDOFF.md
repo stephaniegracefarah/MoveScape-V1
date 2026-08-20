@@ -14,6 +14,7 @@ Rules for the coordinator writing entries: newest session on top; be specific en
 - **Works right now:** M0 scaffold plus all of M1's code — webcam adapter (visibility-independent capture, pose worker, expansion/speed/symmetry), dev-gated slider adapter, live parameter readout, app shell with privacy note. 22 unit tests passing; production bundle verified to contain zero slider code
 - **Run:** `npm install`, then `npm run dev` (webcam needs a browser + camera; "Use sliders" appears in dev builds only)
 - **Test:** `npm test` (also `npm run lint`, `npm run typecheck`, `npm run build`)
+- **Dev machine quirk:** shells may have a stale PATH (Node/gh installed 2026-08-19). Refresh in PowerShell before npm/gh: `$env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')`
 
 ## Open deviations from the main doc
 
