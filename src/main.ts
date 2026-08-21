@@ -523,9 +523,15 @@ if (app) {
         const panel = document.createElement('div');
         panel.id = 'ms-tuning-panel';
         panel.hidden = true;
+        // Explicit color (rather than relying on inheritance): this panel is
+        // appended directly to #app, a sibling of <main class="ms-shell">
+        // rather than a descendant of it, so it does NOT inherit .ms-shell's
+        // `color: #f2f2f2` -- without this it renders in the browser's
+        // default black text on the app's near-black background, effectively
+        // invisible.
         panel.style.cssText =
           'margin: 12px 0; padding: 12px; border: 1px solid #444; border-radius: 8px; ' +
-          'max-height: 420px; overflow-y: auto; font-size: 12px;';
+          'max-height: 420px; overflow-y: auto; font-size: 12px; color: #f2f2f2;';
 
         // Seed the panel's world-knob sliders from the world's own current
         // seed-derived values (not 0): whatever world is already live, or
