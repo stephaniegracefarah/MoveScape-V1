@@ -10,6 +10,7 @@
  * up" is -PI/2.
  */
 import { clamp01 } from '../../shared/math';
+import type { BotanicalTuningConfig } from './tuning-config';
 
 export type BranchLifecycle = 'growing' | 'mature' | 'shrinking';
 
@@ -39,57 +40,13 @@ export interface Branch {
   subBranchRolled: boolean;
 }
 
-// --- Internal constants (not world knobs -- first-pass values, expected to
-// get retuned after a live visual pass; each documented at its use site). ---
-
-/** Recursion depth cap for sub-branches. The reference image shows fairly
- * dense fanning of thin branches, so this errs a bit above a minimal guess. */
-export const MAX_GENERATION = 4;
-
-/** Fraction of max growth rate that still applies at speed=0 -- "any
- * movement counts," true stillness still yields a faint trickle of growth. */
-export const SPEED_FLOOR = 0.06;
-
-/** How much symmetry=1 damps wander amplitude vs symmetry=0. */
-export const SYMMETRY_DAMPING = 0.85;
-
-/** Scales the constant directional pull toward the world's windAngle knob.
- * Small and dt-scaled (ms), so its per-tick contribution stays comparable
- * to the noise-driven wander term rather than overwhelming it. */
-export const WIND_STRENGTH = 0.0005;
-
-/** grownLength (normalized units) per millisecond while shrinking. Picked
- * so a fully-grown branch fades away noticeably faster than it grew --
- * "fading away," not slow-motion growth in reverse. */
-export const SHRINK_RATE = 0.0002;
-
-/** Internal per-ms growth scale folded into baseGrowthPerTick alongside the
- * baseGrowthRate knob (0.5-2.0) -- tuned so growth reads at a reasonable
- * multi-second pace at 60Hz with a mid-range baseGrowthRate. */
-export const BASE_GROWTH_SCALE = 0.00005;
-
-/** Root/generation-0 target branch length before generation-based decay,
- * in normalized canvas units. */
-export const TARGET_LENGTH_BASE = 0.35;
-
-/** targetLength jitter multiplier lands in [0.7, 1.3). */
-export const TARGET_LENGTH_JITTER_SPAN = 0.6;
-
-/** Each sub-branch generation is half the (jittered) length of its parent's base. */
-export const GENERATION_LENGTH_DECAY = 0.5;
-
-/** Fixed line-segment radius (normalized, fraction of shorter side) that
- * makes many closely-spaced segment points read as a thin line, not a blob. */
-export const BRANCH_SEGMENT_RADIUS = 0.003;
-
-/** Branches read as solid, near-opaque lines (unlike genuinely translucent blossoms). */
-export const BRANCH_BASE_OPACITY = 0.92;
-
-// Color formula constants: dark + saturated near (z=0), pale + faded far (z=1).
-export const MAX_SAT = 70;
-export const SAT_FALLOFF = 45; // saturation range ~25-70%
-export const MIN_LIGHT = 15;
-export const LIGHT_RISE = 65; // lightness range ~15-80%
+// Internal tuning constants formerly hardcoded here (MAX_GENERATION,
+// SPEED_FLOOR, SYMMETRY_DAMPING, WIND_STRENGTH, SHRINK_RATE, BASE_GROWTH_SCALE,
+// TARGET_LENGTH_BASE, TARGET_LENGTH_JITTER_SPAN, GENERATION_LENGTH_DECAY,
+// BRANCH_SEGMENT_RADIUS, BRANCH_BASE_OPACITY, MAX_SAT, SAT_FALLOFF, MIN_LIGHT,
+// LIGHT_RISE) now live in tuning-config.ts's BotanicalTuningConfig, threaded
+// through the functions below as an explicit `tuning` argument -- see
+// DEFAULT_BOTANICAL_TUNING_CONFIG for their (unchanged) default values.
 
 /** Wraps a degree value into [0, 360). */
 export function mod360(degrees: number): number {
@@ -116,8 +73,14 @@ export function angleDifference(from: number, to: number): number {
  * This is exactly what the "speed drives growth honestly" tests assert
  * against, computed independently.
  */
-export function growthStepFor(args: { dt: number; speed: number; baseGrowthPerTick: number }): number {
-  return args.baseGrowthPerTick * args.dt * (SPEED_FLOOR + args.speed * (1 - SPEED_FLOOR));
+export function growthStepFor(args: {
+  dt: number;
+  speed: number;
+  baseGrowthPerTick: number;
+  tuning: BotanicalTuningConfig;
+}): number {
+  const speedFloor = args.tuning.speedFloor;
+  return args.baseGrowthPerTick * args.dt * (speedFloor + args.speed * (1 - speedFloor));
 }
 
 /**
@@ -136,18 +99,24 @@ export function wanderDeltaFor(args: {
   dt: number;
   windAngle: number;
   currentDirection: number;
+  tuning: BotanicalTuningConfig;
 }): number {
   const signedNoise = args.noise01 * 2 - 1;
   const wanderAmplitude =
-    args.wanderAmplitudeBase * (1 - args.symmetry * SYMMETRY_DAMPING) * (0.7 + args.expansion * 0.6);
-  const windPull = WIND_STRENGTH * args.dt * angleDifference(args.currentDirection, args.windAngle);
+    args.wanderAmplitudeBase * (1 - args.symmetry * args.tuning.symmetryDamping) * (0.7 + args.expansion * 0.6);
+  const windPull = args.tuning.windStrength * args.dt * angleDifference(args.currentDirection, args.windAngle);
   return signedNoise * wanderAmplitude + windPull;
 }
 
 /** targetLength for a freshly-spawned branch: jittered base, decayed per generation. */
-export function computeTargetLength(baseTargetLength: number, jitterDraw01: number, generation: number): number {
-  const jitterMultiplier = 0.7 + jitterDraw01 * TARGET_LENGTH_JITTER_SPAN;
-  return baseTargetLength * jitterMultiplier * GENERATION_LENGTH_DECAY ** generation;
+export function computeTargetLength(
+  baseTargetLength: number,
+  jitterDraw01: number,
+  generation: number,
+  tuning: BotanicalTuningConfig,
+): number {
+  const jitterMultiplier = 0.7 + jitterDraw01 * tuning.targetLengthJitterSpan;
+  return baseTargetLength * jitterMultiplier * tuning.generationLengthDecay ** generation;
 }
 
 /** matureDurationMs for a branch entering 'mature', drawn once at that transition. */
@@ -156,8 +125,8 @@ export function computeMatureDurationMs(baseMatureDurationMs: number, jitterDraw
 }
 
 /** shrinkDurationMs for a branch entering 'shrinking', proportional to how much it grew. */
-export function computeShrinkDurationMs(grownLength: number): number {
-  return grownLength / SHRINK_RATE;
+export function computeShrinkDurationMs(grownLength: number, tuning: BotanicalTuningConfig): number {
+  return grownLength / tuning.shrinkRate;
 }
 
 /** Hue for a freshly-spawned root/resprout branch: hueBase +/- hueSpread. */
@@ -166,9 +135,9 @@ export function computeHue(hueBaseDegrees: number, hueSpreadDegrees: number, sig
 }
 
 /** hsl() color string per the depth formula: dark+saturated near, pale+faded far. */
-export function computeColor(hue: number, z: number): string {
-  const saturation = MAX_SAT - z * SAT_FALLOFF;
-  const lightness = MIN_LIGHT + z * LIGHT_RISE;
+export function computeColor(hue: number, z: number, tuning: BotanicalTuningConfig): string {
+  const saturation = tuning.maxSat - z * tuning.satFalloff;
+  const lightness = tuning.minLight + z * tuning.lightRise;
   return `hsl(${hue}, ${saturation}%, ${lightness}%)`;
 }
 
@@ -241,9 +210,15 @@ export function tickGrowing(
     noise01: number;
     baseGrowthPerTick: number;
     wanderAmplitudeBase: number;
+    tuning: BotanicalTuningConfig;
   },
 ): boolean {
-  const growthStep = growthStepFor({ dt: args.dt, speed: args.speed, baseGrowthPerTick: args.baseGrowthPerTick });
+  const growthStep = growthStepFor({
+    dt: args.dt,
+    speed: args.speed,
+    baseGrowthPerTick: args.baseGrowthPerTick,
+    tuning: args.tuning,
+  });
   const directionDelta = wanderDeltaFor({
     noise01: args.noise01,
     wanderAmplitudeBase: args.wanderAmplitudeBase,
@@ -252,6 +227,7 @@ export function tickGrowing(
     dt: args.dt,
     windAngle: args.windAngle,
     currentDirection: branch.direction,
+    tuning: args.tuning,
   });
 
   branch.grownLength += growthStep;

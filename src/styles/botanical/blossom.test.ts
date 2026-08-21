@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createLabeledStream } from '../../world/labeled-stream';
 import { spawnBlossomCluster } from './blossom';
+import { DEFAULT_BOTANICAL_TUNING_CONFIG } from './tuning-config';
 
 function makeSegments(n: number): { x: number; y: number }[] {
   return Array.from({ length: n }, (_, i) => ({ x: i / n, y: 1 - i / n }));
@@ -16,6 +17,7 @@ describe('spawnBlossomCluster — count', () => {
       hue: 350,
       z: 0.3,
       draw,
+      tuning: DEFAULT_BOTANICAL_TUNING_CONFIG,
     });
     expect(blossoms.length).toBe(12);
   });
@@ -29,6 +31,7 @@ describe('spawnBlossomCluster — count', () => {
       hue: 350,
       z: 0.3,
       draw,
+      tuning: DEFAULT_BOTANICAL_TUNING_CONFIG,
     });
     expect(blossoms).toEqual([]);
   });
@@ -40,8 +43,8 @@ describe('spawnBlossomCluster — determinism', () => {
     const drawA = createLabeledStream('seed-1', 'branch1:blossoms');
     const drawB = createLabeledStream('seed-1', 'branch1:blossoms');
 
-    const a = spawnBlossomCluster({ branchId: 'branch1', segments, count: 8, hue: 350, z: 0.3, draw: drawA });
-    const b = spawnBlossomCluster({ branchId: 'branch1', segments, count: 8, hue: 350, z: 0.3, draw: drawB });
+    const a = spawnBlossomCluster({ branchId: 'branch1', segments, count: 8, hue: 350, z: 0.3, draw: drawA, tuning: DEFAULT_BOTANICAL_TUNING_CONFIG });
+    const b = spawnBlossomCluster({ branchId: 'branch1', segments, count: 8, hue: 350, z: 0.3, draw: drawB, tuning: DEFAULT_BOTANICAL_TUNING_CONFIG });
 
     expect(a).toEqual(b);
   });
@@ -51,8 +54,8 @@ describe('spawnBlossomCluster — determinism', () => {
     const drawA = createLabeledStream('seed-1', 'branch1:blossoms');
     const drawB = createLabeledStream('seed-2', 'branch1:blossoms');
 
-    const a = spawnBlossomCluster({ branchId: 'branch1', segments, count: 8, hue: 350, z: 0.3, draw: drawA });
-    const b = spawnBlossomCluster({ branchId: 'branch1', segments, count: 8, hue: 350, z: 0.3, draw: drawB });
+    const a = spawnBlossomCluster({ branchId: 'branch1', segments, count: 8, hue: 350, z: 0.3, draw: drawA, tuning: DEFAULT_BOTANICAL_TUNING_CONFIG });
+    const b = spawnBlossomCluster({ branchId: 'branch1', segments, count: 8, hue: 350, z: 0.3, draw: drawB, tuning: DEFAULT_BOTANICAL_TUNING_CONFIG });
 
     expect(a).not.toEqual(b);
   });
@@ -68,6 +71,7 @@ describe('spawnBlossomCluster — shape', () => {
       hue: 350,
       z: 0.3,
       draw,
+      tuning: DEFAULT_BOTANICAL_TUNING_CONFIG,
     });
 
     for (const blossom of blossoms) {
@@ -95,6 +99,7 @@ describe('spawnBlossomCluster — shape', () => {
       hue: 350,
       z: 0.3,
       draw,
+      tuning: DEFAULT_BOTANICAL_TUNING_CONFIG,
     });
     expect(blossoms.length).toBe(6);
   });

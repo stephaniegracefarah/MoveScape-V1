@@ -14,11 +14,6 @@ import { createLabeledStream } from '../../world/labeled-stream';
 import type { World } from '../../world/world';
 import type { Scene, SceneElement, StyleRenderer } from '../style-renderer';
 import {
-  BASE_GROWTH_SCALE,
-  BRANCH_BASE_OPACITY,
-  BRANCH_SEGMENT_RADIUS,
-  MAX_GENERATION,
-  TARGET_LENGTH_BASE,
   computeColor,
   computeHue,
   computeMatureDurationMs,
@@ -31,6 +26,7 @@ import {
   type Branch,
 } from './branch';
 import { spawnBlossomCluster, type Blossom } from './blossom';
+import { DEFAULT_BOTANICAL_TUNING_CONFIG, type BotanicalTuningConfig } from './tuning-config';
 
 // --- World-knob range mappings (each documented at its own line; exact
 // values are a first-pass, expected to get retuned after a live visual pass). ---
@@ -59,14 +55,10 @@ const WANDER_AMPLITUDE_SPAN = 0.13; // wanderAmplitudeBase lands in [0.02, 0.15)
 const BLOSSOMS_PER_CLUSTER_MIN = 6;
 const BLOSSOMS_PER_CLUSTER_SPAN = 13; // blossomsPerCluster lands in [6, 18]
 
-// Root points: fixed constants, not world knobs.
-const ROOT_Y_MIN = 0.7;
-const ROOT_Y_SPAN = 0.3; // root y lands in [0.7, 1.0) -- "growing up" from near the bottom
-const ROOT_BASE_DIRECTION_SPREAD = 0.3; // radians, spread around straight-up (-PI/2) per root
-
-// Sub-branch spawn: small jitters applied to a mature-roll child relative to its parent.
-const CHILD_Z_JITTER = 0.05;
-const CHILD_HUE_JITTER_DEGREES = 15;
+// Root point y-range, sub-branch jitter, MAX_GENERATION, growth/length/color
+// formula constants, etc. formerly lived here as local consts -- they now
+// live in tuning-config.ts's BotanicalTuningConfig (state.tuning.*), since
+// they're the values the dev tuning panel (main.ts) needs to override live.
 
 // Pre-first-step() spawn spread default: no step() has run yet at init(),
 // so root branches spawn using a neutral mid-range "current expansion".
@@ -107,6 +99,11 @@ export interface BotanicalState {
   resproutCounters: Map<number, number>;
   latestParams: MovementParams | undefined;
 
+  /** Resolved once at renderer creation (see createBotanicalInternal) --
+   * DEFAULT_BOTANICAL_TUNING_CONFIG merged with any caller-supplied partial
+   * override, constant for the renderer's whole lifetime. */
+  tuning: BotanicalTuningConfig;
+
   hueBaseDegrees: number;
   hueSpreadDegrees: number;
   maxConcurrentBranches: number;
@@ -121,7 +118,7 @@ export interface BotanicalState {
   subBranchSpawnChance: number;
 }
 
-function createEmptyState(): BotanicalState {
+function createEmptyState(tuning: BotanicalTuningConfig): BotanicalState {
   return {
     sessionSeed: '',
     roots: [],
@@ -129,6 +126,7 @@ function createEmptyState(): BotanicalState {
     blossoms: [],
     resproutCounters: new Map(),
     latestParams: undefined,
+    tuning,
     hueBaseDegrees: 0,
     hueSpreadDegrees: 0,
     maxConcurrentBranches: 0,
@@ -162,7 +160,7 @@ function spawnRootBranch(state: BotanicalState, rootIndex: number): Branch {
   const baseDirection = root.baseDirectionCenter + (directionDraw * 2 - 1) * spread;
 
   const targetLengthDraw = createLabeledStream(state.sessionSeed, `${id}:targetLength`)();
-  const targetLength = computeTargetLength(TARGET_LENGTH_BASE, targetLengthDraw, 0);
+  const targetLength = computeTargetLength(state.tuning.targetLengthBase, targetLengthDraw, 0, state.tuning);
 
   const hueDraw = createLabeledStream(state.sessionSeed, `${id}:hue`)();
   const hue = computeHue(state.hueBaseDegrees, state.hueSpreadDegrees, hueDraw * 2 - 1);
@@ -193,10 +191,10 @@ function spawnChildBranch(state: BotanicalState, parent: Branch): Branch {
   const anchor = parent.segments[anchorIndex] ?? parent.segments[parent.segments.length - 1]!;
 
   const zJitterDraw = createLabeledStream(state.sessionSeed, `${childId}:zJitter`)();
-  const z = clamp01(parent.z + (zJitterDraw * 2 - 1) * CHILD_Z_JITTER);
+  const z = clamp01(parent.z + (zJitterDraw * 2 - 1) * state.tuning.childZJitter);
 
   const hueJitterDraw = createLabeledStream(state.sessionSeed, `${childId}:hueJitter`)();
-  const hue = mod360(parent.hue + (hueJitterDraw * 2 - 1) * CHILD_HUE_JITTER_DEGREES);
+  const hue = mod360(parent.hue + (hueJitterDraw * 2 - 1) * state.tuning.childHueJitterDegrees);
 
   const generation = parent.generation + 1;
   const spread = state.branchSpreadBase * (0.4 + 0.6 * currentExpansion(state));
@@ -204,7 +202,7 @@ function spawnChildBranch(state: BotanicalState, parent: Branch): Branch {
   const baseDirection = parent.direction + (directionDraw * 2 - 1) * spread;
 
   const targetLengthDraw = createLabeledStream(state.sessionSeed, `${childId}:targetLength`)();
-  const targetLength = computeTargetLength(TARGET_LENGTH_BASE, targetLengthDraw, generation);
+  const targetLength = computeTargetLength(state.tuning.targetLengthBase, targetLengthDraw, generation, state.tuning);
 
   return spawnBranch({
     id: childId,
@@ -227,6 +225,7 @@ function spawnBlossomsFor(state: BotanicalState, branch: Branch): Blossom[] {
     hue: branch.hue,
     z: branch.z,
     draw,
+    tuning: state.tuning,
   });
 }
 
@@ -249,7 +248,7 @@ function initState(state: BotanicalState, world: World): void {
   state.hueSpreadDegrees = HUE_SPREAD_MIN + hueSpreadRaw * HUE_SPREAD_SPAN;
   state.maxConcurrentBranches = BRANCH_DENSITY_MIN + Math.floor(branchDensityRaw * BRANCH_DENSITY_SPAN);
   state.baseGrowthRate = GROWTH_RATE_MIN + baseGrowthRateRaw * GROWTH_RATE_SPAN;
-  state.baseGrowthPerTick = state.baseGrowthRate * BASE_GROWTH_SCALE;
+  state.baseGrowthPerTick = state.baseGrowthRate * state.tuning.baseGrowthScale;
   state.baseMatureDurationMs = MATURE_DURATION_MIN + matureDurationRaw * MATURE_DURATION_SPAN;
   state.windAngle = windAngleRaw * Math.PI * 2;
   state.rootCount = ROOT_COUNT_MIN + Math.floor(rootCountRaw * ROOT_COUNT_SPAN);
@@ -269,11 +268,11 @@ function initState(state: BotanicalState, world: World): void {
   const rootsDraw = createLabeledStream(state.sessionSeed, 'botanical-roots');
   for (let i = 0; i < state.rootCount; i++) {
     const x = rootsDraw();
-    const y = ROOT_Y_MIN + rootsDraw() * ROOT_Y_SPAN;
+    const y = state.tuning.rootYMin + rootsDraw() * state.tuning.rootYSpan;
     const zJitter = rootsDraw();
     const dirJitter = rootsDraw();
     const z = clamp01((i + zJitter) / state.rootCount);
-    const baseDirectionCenter = -Math.PI / 2 + (dirJitter * 2 - 1) * ROOT_BASE_DIRECTION_SPREAD;
+    const baseDirectionCenter = -Math.PI / 2 + (dirJitter * 2 - 1) * state.tuning.rootBaseDirectionSpread;
 
     state.roots.push({ x, y, z, baseDirectionCenter });
     state.resproutCounters.set(i, 0);
@@ -299,6 +298,7 @@ function stepState(state: BotanicalState, params: MovementParams, dt: number): v
         noise01,
         baseGrowthPerTick: state.baseGrowthPerTick,
         wanderAmplitudeBase: state.wanderAmplitudeBase,
+        tuning: state.tuning,
       });
 
       if (becameMature) {
@@ -317,7 +317,7 @@ function stepState(state: BotanicalState, params: MovementParams, dt: number): v
         const liveCount = state.branches.length + newBranches.length;
         if (
           rollDraw < state.subBranchSpawnChance &&
-          branch.generation < MAX_GENERATION &&
+          branch.generation < state.tuning.maxGeneration &&
           liveCount < state.maxConcurrentBranches
         ) {
           newBranches.push(spawnChildBranch(state, branch));
@@ -327,7 +327,7 @@ function stepState(state: BotanicalState, params: MovementParams, dt: number): v
       if (branch.lifecycleTimer >= branch.matureDurationMs) {
         branch.lifecycle = 'shrinking';
         branch.lifecycleTimer = 0;
-        branch.shrinkDurationMs = computeShrinkDurationMs(branch.grownLength);
+        branch.shrinkDurationMs = computeShrinkDurationMs(branch.grownLength, state.tuning);
         branch.shrinkProgress = 0;
       }
     } else {
@@ -363,7 +363,7 @@ function buildScene(state: BotanicalState): Scene {
       branch.lifecycle === 'shrinking'
         ? visibleSegmentCount(branch.segments.length, branch.shrinkProgress)
         : branch.segments.length;
-    const color = computeColor(branch.hue, branch.z);
+    const color = computeColor(branch.hue, branch.z, state.tuning);
 
     for (let i = 0; i < visibleCount; i++) {
       // visibleCount is always <= branch.segments.length (see visibleSegmentCount).
@@ -372,8 +372,8 @@ function buildScene(state: BotanicalState): Scene {
         z: branch.z,
         x: point.x,
         y: point.y,
-        radius: BRANCH_SEGMENT_RADIUS,
-        opacity: BRANCH_BASE_OPACITY,
+        radius: state.tuning.branchSegmentRadius,
+        opacity: state.tuning.branchBaseOpacity,
         color,
       });
     }
@@ -389,7 +389,7 @@ function buildScene(state: BotanicalState): Scene {
       y: blossom.y,
       radius: blossom.radius,
       opacity: blossom.baseOpacity * shrinkFade,
-      color: computeColor(blossom.hue, blossom.z),
+      color: computeColor(blossom.hue, blossom.z, state.tuning),
     });
   }
 
@@ -404,8 +404,12 @@ function buildScene(state: BotanicalState): Scene {
  * them from opaque SceneElement geometry, without widening the interface
  * every style must implement.
  */
-export function createBotanicalInternal(): { renderer: StyleRenderer; state: BotanicalState } {
-  const state = createEmptyState();
+export function createBotanicalInternal(tuning?: Partial<BotanicalTuningConfig>): {
+  renderer: StyleRenderer;
+  state: BotanicalState;
+} {
+  const resolvedTuning: BotanicalTuningConfig = { ...DEFAULT_BOTANICAL_TUNING_CONFIG, ...tuning };
+  const state = createEmptyState(resolvedTuning);
 
   const renderer: StyleRenderer = {
     id: 'botanical',
@@ -436,6 +440,6 @@ export function createBotanicalInternal(): { renderer: StyleRenderer; state: Bot
   return { renderer, state };
 }
 
-export function createBotanicalStyle(): StyleRenderer {
-  return createBotanicalInternal().renderer;
+export function createBotanicalStyle(tuning?: Partial<BotanicalTuningConfig>): StyleRenderer {
+  return createBotanicalInternal(tuning).renderer;
 }

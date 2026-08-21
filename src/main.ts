@@ -13,10 +13,15 @@ import { createActivationTokenSource } from './app/activation-token';
 import { getOrCreateUserId } from './app/user-identity';
 import { createLiveRenderLoop, type LiveRenderLoop } from './app/live-render-loop';
 import type { CanvasLike } from './compositor/render-scene';
-import { createWorld } from './world/world';
+import { createWorld, type World, type WorldOverrides } from './world/world';
 import { deriveWorldSeed, formatLocalDate } from './world/seed';
 import { createBotanicalStyle } from './styles/botanical/botanical';
-import { BOTANICAL_PALETTE_PRESETS, type BotanicalPaletteId } from './styles/botanical/palettes';
+import {
+  BOTANICAL_PALETTE_PRESETS,
+  type BotanicalPaletteId,
+  type BotanicalPalettePreset,
+} from './styles/botanical/palettes';
+import { DEFAULT_BOTANICAL_TUNING_CONFIG, type BotanicalTuningConfig } from './styles/botanical/tuning-config';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 
@@ -125,6 +130,23 @@ if (app) {
     // disabled/enabled alongside "Start camera" during activation.
     let useSlidersBtn: HTMLButtonElement | null = null;
 
+    // Handle onto the most recently created World (set at the bottom of
+    // startLiveLoop), so the dev-only tuning panel (built lazily, see the
+    // second import.meta.env.DEV block below) can initialize its world-knob
+    // sliders from the world's actual current seed-derived values instead of
+    // 0. Harmless and string-free in production -- stays null forever there.
+    let currentWorld: World | null = null;
+
+    // Dev tuning panel hand-off state. These four stay inert (null/undefined,
+    // never read meaningfully) in a production build, where the panel's own
+    // block below is dead-code-eliminated entirely -- see that block for the
+    // one clear rule governing how panelWorldOverrides and palette-preset
+    // overrides interact once the founder starts hand-tuning.
+    let manualOverridesActive = false;
+    let panelWorldOverrides: WorldOverrides | undefined;
+    let panelTuningConfig: Partial<BotanicalTuningConfig> | undefined;
+    let onPaletteSelected: ((preset: BotanicalPalettePreset) => void) | null = null;
+
     /**
      * (Re)starts the Botanical live-preview loop against a fresh World built
      * from the real persisted userId + today's date (M4's live-wiring
@@ -138,10 +160,20 @@ if (app) {
       liveLoop?.stop();
       const userId = getOrCreateUserId();
       const worldSeed = deriveWorldSeed(userId, formatLocalDate(new Date()));
-      const overrides = BOTANICAL_PALETTE_PRESETS.find((preset) => preset.id === selectedPaletteId)?.overrides;
+      // Once the dev tuning panel exists and the founder has touched a
+      // world-knob slider, manualOverridesActive latches true for the rest
+      // of the session: the panel's own fully-populated WorldOverrides
+      // object takes over completely, replacing the palette-preset lookup
+      // rather than merging with it. Both stay their production no-op
+      // values (false / undefined) in a build where the panel itself was
+      // dead-code-eliminated, so this line is a pure pass-through there.
+      const overrides = manualOverridesActive
+        ? panelWorldOverrides
+        : BOTANICAL_PALETTE_PRESETS.find((preset) => preset.id === selectedPaletteId)?.overrides;
       const world = createWorld(worldSeed, 0, overrides);
+      currentWorld = world;
       liveLoop = createLiveRenderLoop(
-        createBotanicalStyle(),
+        createBotanicalStyle(panelTuningConfig),
         world,
         // CanvasRenderingContext2D.fillStyle is `string | CanvasGradient |
         // CanvasPattern`; CanvasLike only needs the plain-string subset this
@@ -335,6 +367,11 @@ if (app) {
       paletteBtn.textContent = preset.displayName;
       paletteBtn.addEventListener('click', () => {
         selectedPaletteId = preset.id;
+        // No-op in production (onPaletteSelected stays null); in dev, once
+        // the tuning panel has taken over manual control, this pre-fills
+        // the panel's own hueBase/hueSpread sliders to the preset's values
+        // instead of the preset supplying a second, competing override.
+        onPaletteSelected?.(preset);
         if (activeAdapter) startLiveLoop();
       });
       paletteControlsEl.appendChild(paletteBtn);
@@ -367,6 +404,237 @@ if (app) {
             showError(`Could not start sliders: ${message}`);
           }
         })();
+      });
+    }
+
+    // Dev-only: the "backend knobs" tuning panel (M4x). Every DOM node,
+    // string, and BotanicalTuningConfig field name this block touches is
+    // created/referenced only inside this `import.meta.env.DEV` branch, so
+    // a production build tree-shakes the whole thing away exactly like the
+    // "Use sliders" block above (verified the same way: grep the built
+    // dist/ bundle for a panel-only string and confirm zero matches).
+    //
+    // One clear rule for how this interacts with the palette-preset
+    // mechanism (see also the comment in startLiveLoop): before the founder
+    // touches any world-knob slider here, palette buttons behave exactly as
+    // before (selectedPaletteId + the preset's own WorldOverrides). The
+    // instant a world-knob slider is touched, manualOverridesActive latches
+    // true and this panel's own fully-populated WorldOverrides object takes
+    // over completely -- palette buttons from then on are just a shortcut
+    // that pre-fills this panel's hueBase/hueSpread sliders to the preset's
+    // values (via the onPaletteSelected hook), never a second simultaneous
+    // override source.
+    if (import.meta.env.DEV) {
+      const tuningToggleBtn = document.createElement('button');
+      tuningToggleBtn.type = 'button';
+      tuningToggleBtn.id = 'ms-tuning-toggle';
+      tuningToggleBtn.textContent = 'Show tuning panel';
+      controlsEl.appendChild(tuningToggleBtn);
+
+      let panelEl: HTMLDivElement | null = null;
+      let restartDebounceHandle: ReturnType<typeof setTimeout> | null = null;
+
+      // Slider-drag restarts are debounced ~120ms after the last `input`
+      // event so dragging doesn't trigger a full-piece restart on every
+      // pixel of motion, while still feeling live/interactive.
+      function scheduleRestart(): void {
+        if (restartDebounceHandle !== null) clearTimeout(restartDebounceHandle);
+        restartDebounceHandle = setTimeout(() => {
+          restartDebounceHandle = null;
+          if (activeAdapter) startLiveLoop();
+        }, 120);
+      }
+
+      function makeSliderRow(
+        labelText: string,
+        min: number,
+        max: number,
+        step: number,
+        initialValue: number,
+        onChange: (value: number) => void,
+      ): HTMLDivElement {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex; align-items:center; gap:8px; margin:3px 0;';
+
+        const label = document.createElement('label');
+        label.textContent = labelText;
+        label.style.cssText = 'width:190px; font-size:11px; flex-shrink:0;';
+
+        const input = document.createElement('input');
+        input.type = 'range';
+        input.min = String(min);
+        input.max = String(max);
+        input.step = String(step);
+        input.value = String(initialValue);
+        input.style.cssText = 'flex: 1 1 auto; min-width: 0;';
+
+        const valueEl = document.createElement('span');
+        valueEl.textContent = initialValue.toFixed(4);
+        valueEl.style.cssText = 'font-size:11px; width:64px; flex-shrink:0; text-align:right;';
+
+        input.addEventListener('input', () => {
+          const value = Number(input.value);
+          valueEl.textContent = value.toFixed(4);
+          onChange(value);
+          scheduleRestart();
+        });
+
+        row.appendChild(label);
+        row.appendChild(input);
+        row.appendChild(valueEl);
+        return row;
+      }
+
+      /** Reasonable UI slider bounds around each default -- roughly 0 to
+       * 2-3x default for most fields, or a domain bound ([0,1] for
+       * opacity/fraction-like fields, [0,100] for HSL percentages, etc.)
+       * where that reads more naturally than a raw multiple. */
+      const TUNING_RANGES: Record<keyof BotanicalTuningConfig, { min: number; max: number; step: number }> = {
+        maxGeneration: { min: 1, max: 8, step: 1 },
+        speedFloor: { min: 0, max: 1, step: 0.01 }, // blended fraction of speed [0,1]
+        symmetryDamping: { min: 0, max: 1, step: 0.01 }, // damping fraction; >1 would invert wander
+        windStrength: { min: 0, max: 0.002, step: 0.00002 },
+        shrinkRate: { min: 0.00002, max: 0.001, step: 0.00001 },
+        baseGrowthScale: { min: 0, max: 0.0002, step: 0.000001 },
+        targetLengthBase: { min: 0, max: 1, step: 0.01 }, // normalized canvas-unit length
+        targetLengthJitterSpan: { min: 0, max: 1.5, step: 0.01 },
+        generationLengthDecay: { min: 0, max: 1, step: 0.01 }, // per-generation fraction
+        branchSegmentRadius: { min: 0, max: 0.02, step: 0.0001 },
+        branchBaseOpacity: { min: 0, max: 1, step: 0.01 },
+        maxSat: { min: 0, max: 100, step: 1 }, // HSL saturation %
+        satFalloff: { min: 0, max: 100, step: 1 },
+        minLight: { min: 0, max: 100, step: 1 }, // HSL lightness %
+        lightRise: { min: 0, max: 100, step: 1 },
+        rootYMin: { min: 0, max: 1, step: 0.01 }, // normalized canvas y
+        rootYSpan: { min: 0, max: 1, step: 0.01 },
+        rootBaseDirectionSpread: { min: 0, max: Math.PI, step: 0.01 }, // radians
+        childZJitter: { min: 0, max: 0.3, step: 0.005 },
+        childHueJitterDegrees: { min: 0, max: 60, step: 1 },
+        blossomRadiusMin: { min: 0, max: 0.1, step: 0.001 },
+        blossomRadiusSpan: { min: 0, max: 0.15, step: 0.001 },
+        blossomOpacityMin: { min: 0, max: 1, step: 0.01 },
+        blossomOpacitySpan: { min: 0, max: 1, step: 0.01 },
+        blossomJitterMax: { min: 0, max: 0.1, step: 0.001 },
+        blossomHueJitterDegrees: { min: 0, max: 60, step: 1 },
+        blossomZJitter: { min: 0, max: 0.2, step: 0.005 },
+      };
+
+      function buildPanel(): HTMLDivElement {
+        const panel = document.createElement('div');
+        panel.id = 'ms-tuning-panel';
+        panel.hidden = true;
+        // Explicit color (rather than relying on inheritance): this panel is
+        // appended directly to #app, a sibling of <main class="ms-shell">
+        // rather than a descendant of it, so it does NOT inherit .ms-shell's
+        // `color: #f2f2f2` -- without this it renders in the browser's
+        // default black text on the app's near-black background, effectively
+        // invisible.
+        panel.style.cssText =
+          'margin: 12px 0; padding: 12px; border: 1px solid #444; border-radius: 8px; ' +
+          'max-height: 420px; overflow-y: auto; font-size: 12px; color: #f2f2f2;';
+
+        // Seed the panel's world-knob sliders from the world's own current
+        // seed-derived values (not 0): whatever world is already live, or
+        // (no session started yet) a fresh same-seed World built the same
+        // way startLiveLoop would, purely to read today's knob() values.
+        const initWorld: World =
+          currentWorld ??
+          createWorld(deriveWorldSeed(getOrCreateUserId(), formatLocalDate(new Date())), 0);
+
+        const worldKnobNames = createBotanicalStyle().worldKnobs();
+        const initialOverrides: Record<string, number> = {};
+        for (const name of worldKnobNames) {
+          initialOverrides[name] = initWorld.knob(name);
+        }
+        // Always fully populated (all 11 keys) once the panel exists, per
+        // spec -- even before manualOverridesActive flips true and this
+        // object actually starts driving startLiveLoop's overrides.
+        panelWorldOverrides = initialOverrides;
+
+        const worldHeading = document.createElement('h4');
+        worldHeading.textContent = 'World knobs (raw 0–1)';
+        worldHeading.style.cssText = 'margin: 4px 0;';
+        panel.appendChild(worldHeading);
+
+        const worldSliderInputs: Record<string, HTMLInputElement> = {};
+        const worldValueEls: Record<string, HTMLSpanElement> = {};
+
+        for (const name of worldKnobNames) {
+          const row = makeSliderRow(name, 0, 0.999999, 0.000001, initialOverrides[name] ?? 0, (value) => {
+            manualOverridesActive = true;
+            panelWorldOverrides = { ...(panelWorldOverrides ?? initialOverrides), [name]: value };
+          });
+          panel.appendChild(row);
+          const input = row.querySelector('input');
+          const valueEl = row.querySelector('span');
+          if (input) worldSliderInputs[name] = input;
+          if (valueEl) worldValueEls[name] = valueEl;
+        }
+
+        onPaletteSelected = (preset) => {
+          if (!manualOverridesActive) return;
+          for (const key of ['hueBase', 'hueSpread'] as const) {
+            const value = preset.overrides[key];
+            if (value === undefined) continue;
+            panelWorldOverrides = { ...(panelWorldOverrides ?? initialOverrides), [key]: value };
+            const input = worldSliderInputs[key];
+            const valueEl = worldValueEls[key];
+            if (input) input.value = String(value);
+            if (valueEl) valueEl.textContent = value.toFixed(4);
+          }
+        };
+
+        const tuningHeading = document.createElement('h4');
+        tuningHeading.textContent = 'Botanical tuning config';
+        tuningHeading.style.cssText = 'margin: 10px 0 4px;';
+        panel.appendChild(tuningHeading);
+
+        const workingTuning: BotanicalTuningConfig = { ...DEFAULT_BOTANICAL_TUNING_CONFIG };
+        panelTuningConfig = workingTuning;
+
+        for (const key of Object.keys(DEFAULT_BOTANICAL_TUNING_CONFIG) as (keyof BotanicalTuningConfig)[]) {
+          const range = TUNING_RANGES[key];
+          const row = makeSliderRow(key, range.min, range.max, range.step, DEFAULT_BOTANICAL_TUNING_CONFIG[key], (value) => {
+            workingTuning[key] = value;
+            panelTuningConfig = workingTuning;
+          });
+          panel.appendChild(row);
+        }
+
+        const exportBtn = document.createElement('button');
+        exportBtn.type = 'button';
+        exportBtn.textContent = 'Export current values';
+        exportBtn.style.cssText = 'margin-top: 10px;';
+
+        const exportArea = document.createElement('textarea');
+        exportArea.readOnly = true;
+        exportArea.style.cssText =
+          'display:block; width:100%; height:160px; margin-top:8px; font-family:monospace; font-size:11px; box-sizing:border-box;';
+
+        exportBtn.addEventListener('click', () => {
+          const payload = {
+            worldOverrides: panelWorldOverrides ?? initialOverrides,
+            tuningConfig: workingTuning,
+          };
+          exportArea.value = JSON.stringify(payload, null, 2);
+          exportArea.focus();
+          exportArea.select();
+        });
+
+        panel.appendChild(exportBtn);
+        panel.appendChild(exportArea);
+
+        return panel;
+      }
+
+      tuningToggleBtn.addEventListener('click', () => {
+        if (!panelEl) {
+          panelEl = buildPanel();
+          app.appendChild(panelEl);
+        }
+        const willShow = panelEl.hidden;
+        panelEl.hidden = !willShow;
+        tuningToggleBtn.textContent = willShow ? 'Hide tuning panel' : 'Show tuning panel';
       });
     }
   }

@@ -5,6 +5,7 @@ import { createWorld, type WorldOverrides } from '../../world/world';
 import { angleDifference, growthStepFor } from './branch';
 import { createBotanicalInternal, createBotanicalStyle } from './botanical';
 import { BOTANICAL_PALETTES } from './palettes';
+import { DEFAULT_BOTANICAL_TUNING_CONFIG } from './tuning-config';
 
 function makeParams(overrides: Partial<MovementParams> = {}): MovementParams {
   return { v: 1, expansion: 0.5, speed: 0.5, symmetry: 0.5, ...overrides };
@@ -175,7 +176,7 @@ describe('createBotanicalStyle — speed drives growth honestly (invariant 6)', 
 
     while (branch.lifecycle === 'growing' && tick < MAX_TICKS) {
       if (expectedGrown < targetLength) {
-        expectedGrown += growthStepFor({ dt, speed: 0, baseGrowthPerTick });
+        expectedGrown += growthStepFor({ dt, speed: 0, baseGrowthPerTick, tuning: DEFAULT_BOTANICAL_TUNING_CONFIG });
       }
       renderer.step(makeParams({ speed: 0, expansion: expansionDraw(), symmetry: symmetryDraw() }), time, dt);
       time += dt;
@@ -296,6 +297,40 @@ describe('BOTANICAL_PALETTES — override sanity', () => {
       const world = createWorld('palette-seed', 0, overrides);
       expect(world.knob('hueBase')).toBe(overrides.hueBase);
       expect(world.knob('hueSpread')).toBe(overrides.hueSpread);
+    }
+  });
+});
+
+describe('BotanicalTuningConfig — override plumbing (M4x tuning panel)', () => {
+  it('createBotanicalStyle() with no args behaves identically to passing DEFAULT_BOTANICAL_TUNING_CONFIG explicitly', () => {
+    const a = createBotanicalStyle();
+    const b = createBotanicalStyle(DEFAULT_BOTANICAL_TUNING_CONFIG);
+    a.init(createWorld('tuning-default-seed', 0, FAST_CYCLE_OVERRIDES));
+    b.init(createWorld('tuning-default-seed', 0, FAST_CYCLE_OVERRIDES));
+
+    const paramsAt = () => makeParams({ speed: 0.6, expansion: 0.5, symmetry: 0.4 });
+    runTicks(a, 300, 16.67, paramsAt);
+    runTicks(b, 300, 16.67, paramsAt);
+
+    expect(a.scene()).toEqual(b.scene());
+  });
+
+  it('overriding blossomRadiusMin/blossomRadiusSpan changes a spawned blossom\'s radius', () => {
+    const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 1 };
+    const { renderer, state } = createBotanicalInternal({ blossomRadiusMin: 0.2, blossomRadiusSpan: 0 });
+    renderer.init(createWorld('tuning-blossom-seed', 0, overrides));
+
+    const paramsAt = () => makeParams({ speed: 0.9, expansion: 0.5, symmetry: 0.5 });
+    let tick = 0;
+    while (state.blossoms.length === 0 && tick < 2000) {
+      renderer.step(paramsAt(), tick * 16.67, 16.67);
+      tick++;
+    }
+
+    expect(state.blossoms.length).toBeGreaterThan(0);
+    for (const blossom of state.blossoms) {
+      // blossomRadiusSpan: 0 makes the formula deterministic: radius === blossomRadiusMin exactly.
+      expect(blossom.radius).toBeCloseTo(0.2, 10);
     }
   });
 });
