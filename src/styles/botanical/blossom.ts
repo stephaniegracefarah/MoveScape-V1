@@ -7,6 +7,7 @@
  */
 import { clamp01 } from '../../shared/math';
 import { mod360 } from './branch';
+import type { BotanicalTuningConfig } from './tuning-config';
 
 export interface Blossom {
   branchId: string;
@@ -18,26 +19,11 @@ export interface Blossom {
   baseOpacity: number;
 }
 
-// --- Internal constants (not world knobs -- first-pass values). ---
-
-/** Blossom radius range (normalized, fraction of shorter side): [0.01, 0.05). */
-export const BLOSSOM_RADIUS_MIN = 0.01;
-export const BLOSSOM_RADIUS_SPAN = 0.04;
-
-/** Genuine translucency range so overlapping blossoms visibly darken via
- * canvas alpha compositing: [0.3, 0.55). */
-export const BLOSSOM_OPACITY_MIN = 0.3;
-export const BLOSSOM_OPACITY_SPAN = 0.25;
-
-/** Max per-axis jitter offset (normalized) around a blossom's anchor
- * segment point, so blossoms cluster around but don't sit exactly on the line. */
-export const BLOSSOM_JITTER_MAX = 0.02;
-
-/** Small per-blossom hue jitter around the owning branch's hue (degrees). */
-export const BLOSSOM_HUE_JITTER_DEGREES = 10;
-
-/** Small per-blossom z jitter around the owning branch's z. */
-export const BLOSSOM_Z_JITTER = 0.03;
+// Internal tuning constants formerly hardcoded here (BLOSSOM_RADIUS_MIN/SPAN,
+// BLOSSOM_OPACITY_MIN/SPAN, BLOSSOM_JITTER_MAX, BLOSSOM_HUE_JITTER_DEGREES,
+// BLOSSOM_Z_JITTER) now live in tuning-config.ts's BotanicalTuningConfig,
+// passed in via SpawnBlossomClusterArgs.tuning -- see
+// DEFAULT_BOTANICAL_TUNING_CONFIG for their (unchanged) default values.
 
 export interface SpawnBlossomClusterArgs {
   branchId: string;
@@ -47,6 +33,7 @@ export interface SpawnBlossomClusterArgs {
   z: number;
   /** Uniform [0,1) draw function, e.g. createLabeledStream(sessionSeed, branchId + ':blossoms'). */
   draw: () => number;
+  tuning: BotanicalTuningConfig;
 }
 
 /**
@@ -67,12 +54,12 @@ export function spawnBlossomCluster(args: SpawnBlossomClusterArgs): Blossom[] {
     // tells TS what the array's non-empty invariant already guarantees.
     const anchor = args.segments[anchorIndex] ?? args.segments[lastIndex]!;
 
-    const offsetX = (args.draw() * 2 - 1) * BLOSSOM_JITTER_MAX;
-    const offsetY = (args.draw() * 2 - 1) * BLOSSOM_JITTER_MAX;
-    const radius = BLOSSOM_RADIUS_MIN + args.draw() * BLOSSOM_RADIUS_SPAN;
-    const baseOpacity = BLOSSOM_OPACITY_MIN + args.draw() * BLOSSOM_OPACITY_SPAN;
-    const hueJitter = (args.draw() * 2 - 1) * BLOSSOM_HUE_JITTER_DEGREES;
-    const zJitter = (args.draw() * 2 - 1) * BLOSSOM_Z_JITTER;
+    const offsetX = (args.draw() * 2 - 1) * args.tuning.blossomJitterMax;
+    const offsetY = (args.draw() * 2 - 1) * args.tuning.blossomJitterMax;
+    const radius = args.tuning.blossomRadiusMin + args.draw() * args.tuning.blossomRadiusSpan;
+    const baseOpacity = args.tuning.blossomOpacityMin + args.draw() * args.tuning.blossomOpacitySpan;
+    const hueJitter = (args.draw() * 2 - 1) * args.tuning.blossomHueJitterDegrees;
+    const zJitter = (args.draw() * 2 - 1) * args.tuning.blossomZJitter;
 
     blossoms.push({
       branchId: args.branchId,

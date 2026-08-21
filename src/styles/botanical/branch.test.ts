@@ -1,8 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createLabeledNoise } from '../../world/labeled-noise';
 import {
-  SPEED_FLOOR,
-  SYMMETRY_DAMPING,
   angleDifference,
   computeColor,
   computeHue,
@@ -16,6 +14,10 @@ import {
   visibleSegmentCount,
   wanderDeltaFor,
 } from './branch';
+import { DEFAULT_BOTANICAL_TUNING_CONFIG } from './tuning-config';
+
+const SPEED_FLOOR = DEFAULT_BOTANICAL_TUNING_CONFIG.speedFloor;
+const SYMMETRY_DAMPING = DEFAULT_BOTANICAL_TUNING_CONFIG.symmetryDamping;
 
 describe('growthStepFor — honesty (invariant 6)', () => {
   it('is an exact, noise-free function of dt and speed', () => {
@@ -24,17 +26,20 @@ describe('growthStepFor — honesty (invariant 6)', () => {
     const speed = 0.42;
 
     const expected = baseGrowthPerTick * dt * (SPEED_FLOOR + speed * (1 - SPEED_FLOOR));
-    expect(growthStepFor({ dt, speed, baseGrowthPerTick })).toBeCloseTo(expected, 12);
+    expect(growthStepFor({ dt, speed, baseGrowthPerTick, tuning: DEFAULT_BOTANICAL_TUNING_CONFIG })).toBeCloseTo(
+      expected,
+      12,
+    );
   });
 
   it('speed=0 still produces a nonzero floor amount, never exactly zero', () => {
-    const step = growthStepFor({ dt: 16, speed: 0, baseGrowthPerTick: 0.0001 });
+    const step = growthStepFor({ dt: 16, speed: 0, baseGrowthPerTick: 0.0001, tuning: DEFAULT_BOTANICAL_TUNING_CONFIG });
     expect(step).toBeGreaterThan(0);
     expect(step).toBeCloseTo(0.0001 * 16 * SPEED_FLOOR, 12);
   });
 
   it('speed=1 produces the full, un-floored rate', () => {
-    const step = growthStepFor({ dt: 16, speed: 1, baseGrowthPerTick: 0.0001 });
+    const step = growthStepFor({ dt: 16, speed: 1, baseGrowthPerTick: 0.0001, tuning: DEFAULT_BOTANICAL_TUNING_CONFIG });
     expect(step).toBeCloseTo(0.0001 * 16, 12);
   });
 });
@@ -47,6 +52,7 @@ describe('wanderDeltaFor — determinism and shape', () => {
     dt: 16,
     windAngle: 0,
     currentDirection: 0,
+    tuning: DEFAULT_BOTANICAL_TUNING_CONFIG,
   };
 
   it('the same grownLength (via the same noise01) gives the same directionDelta', () => {
@@ -125,6 +131,7 @@ describe('tickGrowing — lifecycle transition threshold', () => {
       noise01: 0.5,
       baseGrowthPerTick: 0.00001,
       wanderAmplitudeBase: 0.05,
+      tuning: DEFAULT_BOTANICAL_TUNING_CONFIG,
     });
 
     expect(becameMature).toBe(false);
@@ -153,6 +160,7 @@ describe('tickGrowing — lifecycle transition threshold', () => {
       noise01: 0.5,
       baseGrowthPerTick: 0.001,
       wanderAmplitudeBase: 0.05,
+      tuning: DEFAULT_BOTANICAL_TUNING_CONFIG,
     });
 
     expect(becameMature).toBe(true);
@@ -181,6 +189,7 @@ describe('tickGrowing — lifecycle transition threshold', () => {
       noise01: 0.5,
       baseGrowthPerTick: 0.00001,
       wanderAmplitudeBase: 0.05,
+      tuning: DEFAULT_BOTANICAL_TUNING_CONFIG,
     });
     expect(branch.segments.length).toBe(2);
 
@@ -193,6 +202,7 @@ describe('tickGrowing — lifecycle transition threshold', () => {
       noise01: 0.6,
       baseGrowthPerTick: 0.00001,
       wanderAmplitudeBase: 0.05,
+      tuning: DEFAULT_BOTANICAL_TUNING_CONFIG,
     });
     expect(branch.segments.length).toBe(3);
   });
@@ -211,7 +221,7 @@ describe('mature -> shrinking threshold (documented in botanical.ts orchestratio
 
 describe('shrinking-complete threshold', () => {
   it('shrinkProgress >= 1 is the exact documented trigger', () => {
-    const shrinkDurationMs = computeShrinkDurationMs(0.35);
+    const shrinkDurationMs = computeShrinkDurationMs(0.35, DEFAULT_BOTANICAL_TUNING_CONFIG);
     expect(shrinkDurationMs).toBeGreaterThan(0);
     const justBelow = (shrinkDurationMs - 1) / shrinkDurationMs;
     const atOrAbove = shrinkDurationMs / shrinkDurationMs;
@@ -236,9 +246,9 @@ describe('visibleSegmentCount — shrink retraction', () => {
 
 describe('computeTargetLength — generation decay', () => {
   it('decays by GENERATION_LENGTH_DECAY (0.5) per generation, else-identical jitter', () => {
-    const gen0 = computeTargetLength(0.35, 0.5, 0);
-    const gen1 = computeTargetLength(0.35, 0.5, 1);
-    const gen2 = computeTargetLength(0.35, 0.5, 2);
+    const gen0 = computeTargetLength(0.35, 0.5, 0, DEFAULT_BOTANICAL_TUNING_CONFIG);
+    const gen1 = computeTargetLength(0.35, 0.5, 1, DEFAULT_BOTANICAL_TUNING_CONFIG);
+    const gen2 = computeTargetLength(0.35, 0.5, 2, DEFAULT_BOTANICAL_TUNING_CONFIG);
     expect(gen1).toBeCloseTo(gen0 * 0.5, 12);
     expect(gen2).toBeCloseTo(gen0 * 0.25, 12);
   });
@@ -252,8 +262,8 @@ describe('computeMatureDurationMs / computeShrinkDurationMs', () => {
   });
 
   it('shrinkDurationMs scales linearly with grownLength', () => {
-    const a = computeShrinkDurationMs(0.1);
-    const b = computeShrinkDurationMs(0.2);
+    const a = computeShrinkDurationMs(0.1, DEFAULT_BOTANICAL_TUNING_CONFIG);
+    const b = computeShrinkDurationMs(0.2, DEFAULT_BOTANICAL_TUNING_CONFIG);
     expect(b).toBeCloseTo(a * 2, 10);
   });
 });
@@ -273,8 +283,8 @@ describe('computeHue / mod360', () => {
 
 describe('computeColor — depth formula', () => {
   it('is dark and saturated near (z=0), pale and faded far (z=1)', () => {
-    const near = computeColor(100, 0);
-    const far = computeColor(100, 1);
+    const near = computeColor(100, 0, DEFAULT_BOTANICAL_TUNING_CONFIG);
+    const far = computeColor(100, 1, DEFAULT_BOTANICAL_TUNING_CONFIG);
     expect(near).toBe('hsl(100, 70%, 15%)');
     expect(far).toBe('hsl(100, 25%, 80%)');
   });
