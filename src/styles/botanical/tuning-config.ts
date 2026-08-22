@@ -24,8 +24,6 @@ export interface BotanicalTuningConfig {
   symmetryDamping: number;
   /** Scales the constant directional pull toward the world's windAngle knob. Defaults to 0 -- the new sweepStrength/sweepTarget mechanism (below) is what makes branches commit to the Scroll's overall sweep now; a nonzero windStrength alongside it can fight sweepPull (competing pulls toward two different fixed angles) and produce spiral-looking paths rather than graceful arcs. Left tunable, not removed, in case a future style wants an independent wind effect. */
   windStrength: number;
-  /** grownLength (normalized units) per millisecond while shrinking. */
-  shrinkRate: number;
   /** Internal per-ms growth scale folded into baseGrowthPerTick. */
   baseGrowthScale: number;
   /** Root/generation-0 target branch length before generation decay (fraction of the full [0,1] normalized coordinate space, not the canvas shorter side -- see branch.ts's tickGrowing, which adds growthStep directly to tipX/tipY). Needs to be large relative to 1.0 for a dominant branch to actually sweep across the canvas width (visual spec section 6), not just a short arc. */
@@ -111,7 +109,6 @@ export const DEFAULT_BOTANICAL_TUNING_CONFIG: BotanicalTuningConfig = {
   speedFloor: 0.06,
   symmetryDamping: 0.85,
   windStrength: 0,
-  shrinkRate: 0.0002,
   baseGrowthScale: 0.00005,
   targetLengthBase: 0.65,
   targetLengthJitterSpan: 0.6,

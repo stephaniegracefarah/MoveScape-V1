@@ -12,7 +12,12 @@
 import { clamp01 } from '../../shared/math';
 import type { BotanicalTuningConfig } from './tuning-config';
 
-export type BranchLifecycle = 'growing' | 'mature' | 'shrinking';
+// Persistence (docs/styles/botanical.md section 7, decided 2026-08-22): marks
+// are permanent ink. There is no 'shrinking' state and nothing is ever
+// removed -- a branch grows, matures, and stays exactly as it is forever.
+// Liveliness comes from continued new growth at generation-0 roots (see
+// botanical.ts's stepGrowthSystem), not from anything disappearing.
+export type BranchLifecycle = 'growing' | 'mature';
 
 export interface Branch {
   id: string;
@@ -34,10 +39,9 @@ export interface Branch {
   baseWidth: number;
 
   lifecycle: BranchLifecycle;
+  /** Counts up while mature. For a generation-0 branch, reaching matureDurationMs triggers the next sibling at this root (front-driven new growth) and resets to 0 -- see botanical.ts's stepGrowthSystem. Non-root branches just carry it, unused, once mature. */
   lifecycleTimer: number;
   matureDurationMs: number;
-  shrinkDurationMs: number;
-  shrinkProgress: number;
 
   forkFractions: number[];
   forkedFractions: boolean[];
@@ -124,22 +128,6 @@ export function computeMatureDurationMs(baseMatureDurationMs: number, jitterDraw
   return baseMatureDurationMs * (0.7 + jitterDraw01 * 0.6);
 }
 
-/** shrinkDurationMs for a branch entering 'shrinking', proportional to how much it grew. */
-export function computeShrinkDurationMs(grownLength: number, tuning: BotanicalTuningConfig): number {
-  return grownLength / tuning.shrinkRate;
-}
-
-/**
- * How many segments (from the START of the array) are visible while
- * shrinking, retracting from the tip end as shrinkProgress advances. The
- * real `segments` array is never truncated -- this is computed fresh each
- * scene-build call.
- */
-export function visibleSegmentCount(totalSegments: number, shrinkProgress: number): number {
-  const remainingFraction = 1 - shrinkProgress;
-  return Math.ceil(totalSegments * remainingFraction);
-}
-
 export interface SpawnBranchArgs {
   id: string;
   generation: number;
@@ -179,8 +167,6 @@ export function spawnBranch(args: SpawnBranchArgs): Branch {
     lifecycle: 'growing',
     lifecycleTimer: 0,
     matureDurationMs: 0,
-    shrinkDurationMs: 0,
-    shrinkProgress: 0,
     forkFractions: args.forkFractions,
     forkedFractions: args.forkFractions.map(() => false),
   };

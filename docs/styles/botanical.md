@@ -58,7 +58,9 @@ The current implementation renders the wrong *kind* of marks, so no tuning-panel
 
 ## 7. Movement mapping (unchanged in role, remapped in effect)
 
-The parameter contract is untouched. What changes is what the parameters *do*: speed still drives growth rate (immediacy budget intact); expansion maps to spread/reach of new growth and cluster size; symmetry maps to curvature calm vs. wildness. The lifecycle question (churn vs. accumulation vs. expanding canvas) is a live product decision being resolved with the founder — this spec is compatible with any outcome, because it defines marks, not persistence policy.
+The parameter contract is untouched. What changes is what the parameters *do*: speed still drives growth rate (immediacy budget intact); expansion maps to spread/reach of new growth and cluster size; symmetry maps to curvature calm vs. wildness.
+
+**Persistence (decided 2026-08-22): marks are permanent ink.** Nothing ever shrinks, fades out, or disappears. A branch grows, blossoms, and is immediately permanent — the 'shrinking' lifecycle state and shrink-driven removal are removed entirely. The canvas feels alive through continuous new growth at the front; clutter is managed by the scroll's expansion and the composition budget (section 6), never by deletion. The journey export therefore shows everything the mover ever made, exactly as it was made.
 
 ## Acceptance test for this spec
 

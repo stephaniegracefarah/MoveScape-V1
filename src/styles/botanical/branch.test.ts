@@ -6,12 +6,10 @@ import {
   computeChildBaseWidth,
   computeForkFractions,
   computeMatureDurationMs,
-  computeShrinkDurationMs,
   computeTargetLength,
   growthStepFor,
   spawnBranch,
   tickGrowing,
-  visibleSegmentCount,
   wanderDeltaFor,
 } from './branch';
 import { DEFAULT_BOTANICAL_TUNING_CONFIG } from './tuning-config';
@@ -240,39 +238,16 @@ describe('tickGrowing — lifecycle transition threshold', () => {
   });
 });
 
-describe('mature -> shrinking threshold (documented in botanical.ts orchestration)', () => {
+describe('mature -> resprout threshold (permanent ink: docs/styles/botanical.md section 7)', () => {
   it('lifecycleTimer >= matureDurationMs is the exact documented trigger', () => {
-    // This is a thin, direct check of the threshold comparison itself
-    // (the actual mutation happens in botanical.ts's stepState, which is
-    // covered end-to-end in botanical.test.ts).
+    // This is a thin, direct check of the threshold comparison itself (the
+    // actual mutation -- spawning a new sibling at the same root and
+    // resetting the timer, never removing the mature branch -- happens in
+    // botanical.ts's stepGrowthSystem, covered end-to-end in
+    // botanical.test.ts).
     const matureDurationMs = 5000;
     expect(4999 >= matureDurationMs).toBe(false);
     expect(5000 >= matureDurationMs).toBe(true);
-  });
-});
-
-describe('shrinking-complete threshold', () => {
-  it('shrinkProgress >= 1 is the exact documented trigger', () => {
-    const shrinkDurationMs = computeShrinkDurationMs(0.35, DEFAULT_BOTANICAL_TUNING_CONFIG);
-    expect(shrinkDurationMs).toBeGreaterThan(0);
-    const justBelow = (shrinkDurationMs - 1) / shrinkDurationMs;
-    const atOrAbove = shrinkDurationMs / shrinkDurationMs;
-    expect(justBelow < 1).toBe(true);
-    expect(atOrAbove >= 1).toBe(true);
-  });
-});
-
-describe('visibleSegmentCount — shrink retraction', () => {
-  it('keeps all segments at shrinkProgress=0', () => {
-    expect(visibleSegmentCount(10, 0)).toBe(10);
-  });
-
-  it('keeps none at shrinkProgress=1', () => {
-    expect(visibleSegmentCount(10, 1)).toBe(0);
-  });
-
-  it('retracts from the tip end proportionally in between', () => {
-    expect(visibleSegmentCount(10, 0.5)).toBe(5);
   });
 });
 
@@ -286,17 +261,11 @@ describe('computeTargetLength — generation decay', () => {
   });
 });
 
-describe('computeMatureDurationMs / computeShrinkDurationMs', () => {
+describe('computeMatureDurationMs', () => {
   it('jitters matureDurationMs within the documented [0.7, 1.3) multiplier band', () => {
     const base = 5000;
     expect(computeMatureDurationMs(base, 0)).toBeCloseTo(base * 0.7, 10);
     expect(computeMatureDurationMs(base, 0.999999)).toBeLessThan(base * 1.3);
-  });
-
-  it('shrinkDurationMs scales linearly with grownLength', () => {
-    const a = computeShrinkDurationMs(0.1, DEFAULT_BOTANICAL_TUNING_CONFIG);
-    const b = computeShrinkDurationMs(0.2, DEFAULT_BOTANICAL_TUNING_CONFIG);
-    expect(b).toBeCloseTo(a * 2, 10);
   });
 });
 

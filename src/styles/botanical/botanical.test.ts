@@ -46,9 +46,11 @@ function curvatureSum(segments: { x: number; y: number }[]): number {
   return sum;
 }
 
-// Overrides used by tests that need a full growing->mature->shrinking->
-// resprout cycle to complete within a bounded number of ticks: fast growth,
-// short maturity, so cycles complete in tens of ticks rather than thousands.
+// Overrides used by tests that need a full growing->mature->(front-driven
+// resprout) cycle to complete within a bounded number of ticks: fast growth,
+// short maturity, so a root's next sibling branch appears within tens of
+// ticks rather than thousands. Marks are permanent (docs/styles/botanical.md
+// section 7) -- "cycle" here means growth-then-resprout, not shrink/removal.
 const FAST_CYCLE_OVERRIDES: WorldOverrides = {
   baseGrowthRate: 0.99, // -> ~1.985, near the top of [0.5, 2.0)
   matureDurationMs: 0, // -> 3000ms, the minimum
@@ -227,15 +229,16 @@ describe('createBotanicalStyle — symmetry calms wander', () => {
     // jitter), so any ONE branch's path curvature is dominated by whichever
     // way its own noise+wind realization happened to lean, not cleanly by
     // the symmetry amplitude factor. Aggregating curvature across MANY
-    // independently-seeded branches (fast growth + a long matureDuration so
-    // nothing shrinks away mid-run, high branchDensity so many generations'
-    // worth of scheduled forks actually get to fire) lets the law of large
+    // independently-seeded branches (fast growth, high branchDensity so many
+    // generations' worth of scheduled forks actually get to fire -- marks
+    // are permanent now, docs/styles/botanical.md section 7, so every
+    // branch that ever spawns stays in the aggregate) lets the law of large
     // numbers surface the systematic (1 - symmetry * SYMMETRY_DAMPING)
     // amplitude effect that wanderDeltaFor's own unit tests already pin
     // down exactly.
     const overrides: WorldOverrides = {
       baseGrowthRate: 0.99,
-      matureDurationMs: 0.99, // long -- keeps branches alive (not shrunk away) for the whole run
+      matureDurationMs: 0.99, // long -- fewer root resprouts, so forking (not resprouting) dominates branch count
       branchDensity: 0.99,
     };
 
@@ -275,10 +278,14 @@ describe('createBotanicalStyle — bounded branch/element count', () => {
 
     expect(earlyCount).toBeGreaterThan(0);
     expect(lateCount).toBeGreaterThan(0);
-    // "Roughly steady-state" -- not monotonically growing without limit. A
-    // generous 5x band comfortably separates "bounded" from "unbounded."
+    // Marks are permanent (docs/styles/botanical.md section 7), so element
+    // count only ever grows -- but it must grow *toward a ceiling*
+    // (maxConcurrentBranches, the composition budget: both forking and
+    // front-driven resprouting stop once a growth system's branch count
+    // hits it), not without limit. A generous 5x band comfortably separates
+    // "converges to a bound" from "unbounded."
+    expect(lateCount).toBeGreaterThanOrEqual(earlyCount);
     expect(lateCount / earlyCount).toBeLessThan(5);
-    expect(earlyCount / lateCount).toBeLessThan(5);
   });
 });
 

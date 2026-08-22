@@ -502,7 +502,6 @@ if (app) {
         speedFloor: { min: 0, max: 1, step: 0.01 }, // blended fraction of speed [0,1]
         symmetryDamping: { min: 0, max: 1, step: 0.01 }, // damping fraction; >1 would invert wander
         windStrength: { min: 0, max: 0.002, step: 0.00002 },
-        shrinkRate: { min: 0.00002, max: 0.001, step: 0.00001 },
         baseGrowthScale: { min: 0, max: 0.0002, step: 0.000001 },
         targetLengthBase: { min: 0, max: 1, step: 0.01 }, // normalized canvas-unit length
         targetLengthJitterSpan: { min: 0, max: 1.5, step: 0.01 },

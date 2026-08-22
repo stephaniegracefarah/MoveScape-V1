@@ -6,7 +6,11 @@
  * ../../compositor/paper-ground.ts, wired in by main.ts/live-render-loop.ts).
  * One or two dominant root branches sweep left-to-right (the Scroll
  * composition, spec Part 3); pale depth echoes render the same kind of
- * growth further back in atmosphere. See branch.ts/blossom.ts/palettes.ts
+ * growth further back in atmosphere. Marks are permanent ink (visual spec
+ * section 7, decided 2026-08-22) -- nothing ever shrinks or is removed;
+ * liveliness comes from a root periodically starting a new sibling branch
+ * once its current one matures, not from anything disappearing. See
+ * branch.ts/blossom.ts/palettes.ts
  * for the pure, independently-tested growth/wander/lifecycle/spawn/color
  * math this file wires together; this file owns the mutable state and the
  * StyleRenderer lifecycle (init/step/scene/finish).
@@ -22,11 +26,9 @@ import {
   computeChildBaseWidth,
   computeForkFractions,
   computeMatureDurationMs,
-  computeShrinkDurationMs,
   computeTargetLength,
   spawnBranch,
   tickGrowing,
-  visibleSegmentCount,
   type Branch,
 } from './branch';
 import { spawnBlossomCluster, type Blossom } from './blossom';
@@ -312,7 +314,7 @@ function initGrowthSystem(
   }
 }
 
-/** Advances one growth system one tick: growth/wander/fork-crossing/lifecycle for every branch, exactly mirroring the pre-rebuild single-system stepState, just parametrized so the foreground system and each depth echo can all run through the same logic independently. */
+/** Advances one growth system one tick: growth/wander/fork-crossing/lifecycle for every branch, exactly mirroring the pre-rebuild single-system stepState, just parametrized so the foreground system and each depth echo can all run through the same logic independently. Nothing is ever removed from `system.branches`/`system.blossoms` (permanent ink, docs/styles/botanical.md section 7) -- this function only ever appends. */
 function stepGrowthSystem(
   state: BotanicalState,
   system: GrowthSystemState,
@@ -321,7 +323,6 @@ function stepGrowthSystem(
   dt: number,
   maxGenerationForSystem: number,
 ): void {
-  const toRemoveIds = new Set<string>();
   const newBranches: Branch[] = [];
   const liveCount = () => system.branches.length + newBranches.length;
 
@@ -359,23 +360,20 @@ function stepGrowthSystem(
         branch.matureDurationMs = computeMatureDurationMs(state.baseMatureDurationMs, jitterDraw);
         system.blossoms.push(...spawnBlossomsFor(state, branch));
       }
-    } else if (branch.lifecycle === 'mature') {
+    } else {
+      // mature -- permanent (docs/styles/botanical.md section 7's "marks are
+      // permanent ink": no shrink, no removal, ever). A generation-0 branch's
+      // timer instead triggers front-driven new growth: once matureDurationMs
+      // elapses, a new sibling spawns at the same root (subject to the same
+      // maxConcurrentBranches cap that already gates forking) and the timer
+      // resets, so a root keeps producing fresh growth for the life of the
+      // session rather than going still. Forked (generation > 0) branches
+      // just carry an unused timer once mature -- only roots resprout.
       branch.lifecycleTimer += dt;
 
       if (branch.lifecycleTimer >= branch.matureDurationMs) {
-        branch.lifecycle = 'shrinking';
         branch.lifecycleTimer = 0;
-        branch.shrinkDurationMs = computeShrinkDurationMs(branch.grownLength, state.tuning);
-        branch.shrinkProgress = 0;
-      }
-    } else {
-      // shrinking
-      branch.lifecycleTimer += dt;
-      branch.shrinkProgress = clamp01(branch.lifecycleTimer / branch.shrinkDurationMs);
-
-      if (branch.shrinkProgress >= 1) {
-        toRemoveIds.add(branch.id);
-        if (branch.generation === 0) {
+        if (branch.generation === 0 && liveCount() < state.maxConcurrentBranches) {
           const rootIndexMatch = /:root(\d+):/.exec(branch.id);
           const rootIndex = rootIndexMatch?.[1] !== undefined ? Number(rootIndexMatch[1]) : NaN;
           if (!Number.isNaN(rootIndex)) {
@@ -386,10 +384,6 @@ function stepGrowthSystem(
     }
   }
 
-  if (toRemoveIds.size > 0) {
-    system.branches = system.branches.filter((b) => !toRemoveIds.has(b.id));
-    system.blossoms = system.blossoms.filter((b) => !toRemoveIds.has(b.branchId));
-  }
   if (newBranches.length > 0) {
     system.branches.push(...newBranches);
   }
@@ -458,19 +452,13 @@ function emitGrowthSystem(
   zOffset: number,
   opacityMultiplier: number,
 ): void {
-  const branchById = new Map(system.branches.map((b) => [b.id, b]));
-
   for (const branch of system.branches) {
-    const visibleCount =
-      branch.lifecycle === 'shrinking'
-        ? visibleSegmentCount(branch.segments.length, branch.shrinkProgress)
-        : branch.segments.length;
-    if (visibleCount < 2) continue; // a stroke needs at least 2 points
+    if (branch.segments.length < 2) continue; // a stroke needs at least 2 points
 
     elements.push({
       kind: 'stroke',
       z: clamp01(branch.z + zOffset),
-      points: branch.segments.slice(0, visibleCount),
+      points: branch.segments,
       baseWidth: branch.baseWidth,
       taperExponent: state.tuning.taperExponent,
       color: branch.color,
@@ -479,22 +467,18 @@ function emitGrowthSystem(
   }
 
   for (const blossom of system.blossoms) {
-    const owner = branchById.get(blossom.branchId);
-    if (!owner) continue;
-    const shrinkFade = owner.lifecycle === 'shrinking' ? 1 - owner.shrinkProgress : 1;
-
     const element: SceneElement = {
       kind: 'circle',
       z: clamp01(blossom.z + zOffset),
       x: blossom.x,
       y: blossom.y,
       radius: blossom.radius,
-      opacity: blossom.baseOpacity * shrinkFade * opacityMultiplier,
+      opacity: blossom.baseOpacity * opacityMultiplier,
       color: blossom.color,
     };
     if (blossom.ringColor !== undefined) {
       element.ringColor = blossom.ringColor;
-      element.ringOpacity = (blossom.ringOpacity ?? blossom.baseOpacity) * shrinkFade * opacityMultiplier;
+      element.ringOpacity = (blossom.ringOpacity ?? blossom.baseOpacity) * opacityMultiplier;
     }
     elements.push(element);
   }
