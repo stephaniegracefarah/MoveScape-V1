@@ -222,6 +222,35 @@ describe('createBotanicalStyle — expansion widens spatial spread', () => {
   });
 });
 
+describe('createBotanicalStyle — expansion scales blossom cluster size', () => {
+  it('a branch that matures during expansion=1 gets a bigger cluster than one maturing during expansion=0, else identical', () => {
+    // visual spec section 7: "expansion maps to spread/reach of new growth
+    // and cluster size." rootCount forced to 1 root so this measures one
+    // cluster's own count, not a sum across a variable number of roots.
+    const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0 };
+
+    const low = createBotanicalInternal();
+    const high = createBotanicalInternal();
+    low.renderer.init(createWorld('cluster-size-seed', 0, overrides));
+    high.renderer.init(createWorld('cluster-size-seed', 0, overrides));
+
+    const lowParamsAt = () => makeParams({ expansion: 0, speed: 0.9, symmetry: 0.5 });
+    const highParamsAt = () => makeParams({ expansion: 1, speed: 0.9, symmetry: 0.5 });
+    // Long enough for the single root branch to reach maturity and spawn
+    // its one cluster (targetLengthBase is 0.65 post-rebuild -- a real
+    // stretch of ticks, not a handful), short enough that a front-driven
+    // resprout's second cluster hasn't also spawned yet to dilute the
+    // comparison (matureDurationMs's minimum is 3000ms = ~180 ticks past
+    // maturity, well beyond this window).
+    runTicks(low.renderer, 500, 16.67, lowParamsAt);
+    runTicks(high.renderer, 500, 16.67, highParamsAt);
+
+    expect(low.state.foreground.blossoms.length).toBeGreaterThan(0);
+    expect(high.state.foreground.blossoms.length).toBeGreaterThan(0);
+    expect(high.state.foreground.blossoms.length).toBeGreaterThan(low.state.foreground.blossoms.length);
+  });
+});
+
 describe('createBotanicalStyle — symmetry calms wander', () => {
   it('symmetry=1 produces measurably lower aggregate path curvature than symmetry=0, else-identical inputs', () => {
     // Wander noise varies very slowly relative to a single branch's whole

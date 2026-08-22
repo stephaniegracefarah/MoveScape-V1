@@ -273,12 +273,28 @@ function spawnChildBranch(state: BotanicalState, parent: Branch, childIndex: num
   });
 }
 
+/**
+ * Movement mapping (visual spec section 7): "expansion maps to spread/reach
+ * of new growth and cluster size." A cluster spawns at the moment its owning
+ * branch matures, so the CURRENT tick's expansion (not a session-average or
+ * the value at spawn-time root placement) is what should size it -- a
+ * branch that matures during an expansive movement gets a bigger cluster
+ * than one that matures during a contained movement, else identical.
+ * expansion=0.5 (this file's own pre-first-step default) reproduces exactly
+ * `state.blossomsPerCluster`, so the world knob's own mapped range stays
+ * the meaningful "baseline size" even though every real cluster varies
+ * around it.
+ */
+function expansionScaledClusterCount(state: BotanicalState): number {
+  return Math.round(state.blossomsPerCluster * (0.5 + currentExpansion(state)));
+}
+
 function spawnBlossomsFor(state: BotanicalState, branch: Branch): Blossom[] {
   const draw = createLabeledStream(state.sessionSeed, `${branch.id}:blossoms`);
   return spawnBlossomCluster({
     branchId: branch.id,
     segments: branch.segments,
-    count: state.blossomsPerCluster,
+    count: expansionScaledClusterCount(state),
     paletteColors: state.palette.colors,
     z: branch.z,
     draw,
