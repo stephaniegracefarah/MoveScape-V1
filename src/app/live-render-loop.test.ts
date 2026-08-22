@@ -20,7 +20,7 @@ function createStubStyle(): { style: StyleRenderer; stepCalls: number[] } {
     aestheticFamily: 'organic',
     worldKnobs: () => [],
     init: () => {},
-    step: (_params, time) => {
+    step: (_params, _sessionParams, time) => {
       stepCalls.push(time);
     },
     scene: (): Scene => ({ elements: [] }),

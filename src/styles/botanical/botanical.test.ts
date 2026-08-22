@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { MovementParams } from '../../adapters/movement-params';
+import { INITIAL_SESSION_PARAMS, type SessionParams } from '../../engine/session-params';
 import { createLabeledStream } from '../../world/labeled-stream';
 import { createWorld, type WorldOverrides } from '../../world/world';
 import { angleDifference, growthStepFor } from './branch';
@@ -11,16 +12,17 @@ function makeParams(overrides: Partial<MovementParams> = {}): MovementParams {
   return { v: 1, expansion: 0.5, speed: 0.5, symmetry: 0.5, ...overrides };
 }
 
-/** Runs `ticks` step() calls with the given dt, calling `paramsAt(i)` for each tick's params. */
+/** Runs `ticks` step() calls with the given dt, calling `paramsAt(i)` for each tick's params. `sessionParams` defaults to INITIAL_SESSION_PARAMS (held constant across the run) for tests that don't care about session-level effects. */
 function runTicks(
   renderer: ReturnType<typeof createBotanicalStyle>,
   ticks: number,
   dt: number,
   paramsAt: (i: number) => MovementParams,
+  sessionParams: SessionParams = INITIAL_SESSION_PARAMS,
 ): void {
   let time = 0;
   for (let i = 0; i < ticks; i++) {
-    renderer.step(paramsAt(i), time, dt);
+    renderer.step(paramsAt(i), sessionParams, time, dt);
     time += dt;
   }
 }
@@ -101,7 +103,7 @@ describe('createBotanicalStyle — determinism (invariant 4)', () => {
   it('scene() returns a fresh array each call, not a shared mutable reference', () => {
     const renderer = createBotanicalStyle();
     renderer.init(createWorld('same-seed', 0));
-    renderer.step(makeParams(), 0, 16);
+    renderer.step(makeParams(), INITIAL_SESSION_PARAMS, 0, 16);
 
     const first = renderer.scene();
     const firstLength = first.elements.length;
@@ -118,8 +120,8 @@ describe('createBotanicalStyle — seed variation', () => {
     rendererA.init(createWorld('world-seed-a', 0));
     rendererB.init(createWorld('world-seed-b', 0));
 
-    rendererA.step(makeParams(), 0, 16);
-    rendererB.step(makeParams(), 0, 16);
+    rendererA.step(makeParams(), INITIAL_SESSION_PARAMS, 0, 16);
+    rendererB.step(makeParams(), INITIAL_SESSION_PARAMS, 0, 16);
 
     expect(rendererA.scene()).not.toEqual(rendererB.scene());
   });
@@ -180,7 +182,7 @@ describe('createBotanicalStyle — speed drives growth honestly (invariant 6)', 
       if (expectedGrown < targetLength) {
         expectedGrown += growthStepFor({ dt, speed: 0, baseGrowthPerTick, tuning: DEFAULT_BOTANICAL_TUNING_CONFIG });
       }
-      renderer.step(makeParams({ speed: 0, expansion: expansionDraw(), symmetry: symmetryDraw() }), time, dt);
+      renderer.step(makeParams({ speed: 0, expansion: expansionDraw(), symmetry: symmetryDraw() }), INITIAL_SESSION_PARAMS, time, dt);
       time += dt;
       tick++;
     }
@@ -291,6 +293,43 @@ describe('createBotanicalStyle — symmetry calms wander', () => {
   });
 });
 
+describe('createBotanicalStyle — session movementVariance widens wander', () => {
+  it('higher movementVariance (via a hand-constructed SessionParams) produces measurably larger aggregate path curvature than movementVariance: 0, else-identical inputs', () => {
+    // Same aggregation strategy as the "symmetry calms wander" test above:
+    // wander noise on any ONE branch is dominated by its own noise+wind
+    // realization, so aggregate curvature across MANY independently-seeded
+    // branches (fast growth, high branchDensity) is needed to surface the
+    // systematic SESSION_VARIANCE_WANDER_SCALE effect on wanderAmplitudeBase.
+    const overrides: WorldOverrides = {
+      baseGrowthRate: 0.99,
+      matureDurationMs: 0.99,
+      branchDensity: 0.99,
+    };
+
+    const low = createBotanicalInternal();
+    const high = createBotanicalInternal();
+    low.renderer.init(createWorld('variance-seed', 0, overrides));
+    high.renderer.init(createWorld('variance-seed', 0, overrides));
+
+    const paramsAt = () => makeParams({ speed: 0.9, expansion: 0.5, symmetry: 0.5 });
+    const lowSessionParams: SessionParams = { ...INITIAL_SESSION_PARAMS, movementVariance: 0 };
+    // 0.25 is movementVariance's practical ceiling (population variance of a
+    // 0-1-bounded signal), matching SESSION_VARIANCE_WANDER_SCALE's own doc comment.
+    const highSessionParams: SessionParams = { ...INITIAL_SESSION_PARAMS, movementVariance: 0.25 };
+
+    runTicks(low.renderer, 700, 16.67, paramsAt, lowSessionParams);
+    runTicks(high.renderer, 700, 16.67, paramsAt, highSessionParams);
+
+    expect(low.state.foreground.branches.length).toBeGreaterThan(5); // sanity: many independent branches spawned
+    expect(high.state.foreground.branches.length).toBeGreaterThan(5);
+
+    const totalCurvature = (branches: { segments: { x: number; y: number }[] }[]) =>
+      branches.reduce((sum, b) => sum + curvatureSum(b.segments), 0);
+
+    expect(totalCurvature(high.state.foreground.branches)).toBeGreaterThan(totalCurvature(low.state.foreground.branches));
+  });
+});
+
 describe('createBotanicalStyle — bounded branch/element count', () => {
   it('element count at a late checkpoint is not dramatically larger than at an earlier checkpoint', () => {
     const overrides: WorldOverrides = FAST_CYCLE_OVERRIDES;
@@ -373,7 +412,7 @@ describe('BotanicalTuningConfig — override plumbing (M4x tuning panel)', () =>
     const paramsAt = () => makeParams({ speed: 0.9, expansion: 0.5, symmetry: 0.5 });
     let tick = 0;
     while (state.foreground.blossoms.length === 0 && tick < 2000) {
-      renderer.step(paramsAt(), tick * 16.67, 16.67);
+      renderer.step(paramsAt(), INITIAL_SESSION_PARAMS, tick * 16.67, 16.67);
       tick++;
     }
 

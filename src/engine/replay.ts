@@ -11,6 +11,7 @@ import type { World } from '../world/world';
 import type { Scene, StyleRenderer } from '../styles/style-renderer';
 import type { MovementRecording } from './recording';
 import { sampleIndexAtOrBefore } from './sample-and-hold';
+import { createSessionParamsAccumulator, type SessionParamsAccumulator } from './session-params';
 
 export const SIMULATION_TICK_HZ = 60;
 export const SIMULATION_TICK_MS = 1000 / SIMULATION_TICK_HZ;
@@ -30,6 +31,7 @@ export function advanceTicks(
   fromTick: number,
   toTick: number,
   fromSampleIndex: number,
+  accumulator: SessionParamsAccumulator,
   tickMs: number = SIMULATION_TICK_MS,
 ): number {
   let sampleIndex = fromSampleIndex;
@@ -43,7 +45,8 @@ export function advanceTicks(
       // into a non-empty recording (it throws on an empty one).
       throw new Error('advanceTicks: sample index out of range');
     }
-    style.step(sample.params, time, tickMs);
+    accumulator.update(sample.params.speed, time);
+    style.step(sample.params, accumulator.current(), time, tickMs);
   }
 
   return sampleIndex;
@@ -52,6 +55,8 @@ export function advanceTicks(
 /**
  * Convenience wrapper: initializes `style` against `world`, ticks it
  * through the entire recording's duration, and returns the final scene.
+ * Creates its own SessionParamsAccumulator internally, since it always runs
+ * start-to-finish in one call.
  */
 export function replay(
   style: StyleRenderer,
@@ -62,6 +67,7 @@ export function replay(
 ): Scene {
   style.init(world);
   const toTick = Math.ceil(durationMs / tickMs);
-  advanceTicks(style, recording, 0, toTick, 0, tickMs);
+  const accumulator = createSessionParamsAccumulator();
+  advanceTicks(style, recording, 0, toTick, 0, accumulator, tickMs);
   return style.finish();
 }

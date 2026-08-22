@@ -12,6 +12,7 @@
 import { describe, expect, it } from 'vitest';
 import type { MovementRecording } from './recording';
 import { advanceTicks, replay, SIMULATION_TICK_MS } from './replay';
+import { createSessionParamsAccumulator } from './session-params';
 import { createBotanicalStyle } from '../styles/botanical/botanical';
 import { createWorld, type WorldOverrides } from '../world/world';
 import { cyrb53 } from '../shared/hash';
@@ -51,10 +52,11 @@ describe('Botanical geometry determinism — same recipe, different tick batchin
     styleB.init(worldB);
 
     const totalTicks = Math.ceil(DURATION_MS / SIMULATION_TICK_MS);
-    let sampleIndex = advanceTicks(styleB, RECORDING, 0, 37, 0);
-    sampleIndex = advanceTicks(styleB, RECORDING, 37, 211, sampleIndex);
-    sampleIndex = advanceTicks(styleB, RECORDING, 211, 500, sampleIndex);
-    advanceTicks(styleB, RECORDING, 500, totalTicks, sampleIndex);
+    const accumulator = createSessionParamsAccumulator();
+    let sampleIndex = advanceTicks(styleB, RECORDING, 0, 37, 0, accumulator);
+    sampleIndex = advanceTicks(styleB, RECORDING, 37, 211, sampleIndex, accumulator);
+    sampleIndex = advanceTicks(styleB, RECORDING, 211, 500, sampleIndex, accumulator);
+    advanceTicks(styleB, RECORDING, 500, totalTicks, sampleIndex, accumulator);
     const sceneB = styleB.finish();
 
     expect(sceneB).toEqual(sceneA);

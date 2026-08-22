@@ -5,9 +5,11 @@ import type { World } from '../world/world';
 import { createWorld } from '../world/world';
 import type { MovementRecording } from './recording';
 import { advanceTicks, replay, SIMULATION_TICK_MS } from './replay';
+import { createSessionParamsAccumulator, type SessionParams } from './session-params';
 
 interface StepCall {
   params: MovementParams;
+  sessionParams: SessionParams;
   time: number;
   dt: number;
 }
@@ -36,9 +38,9 @@ class StubStyle implements StyleRenderer {
     this.initWorld = world;
   }
 
-  step(params: MovementParams, time: number, dt: number): void {
+  step(params: MovementParams, sessionParams: SessionParams, time: number, dt: number): void {
     this.calls.push('step');
-    this.steps.push({ params, time, dt });
+    this.steps.push({ params, sessionParams, time, dt });
   }
 
   scene(): Scene {
@@ -64,7 +66,7 @@ describe('advanceTicks — call count and args', () => {
     const recording: MovementRecording = [sample(0, 0)];
     const style = new StubStyle();
 
-    advanceTicks(style, recording, 0, 5, 0);
+    advanceTicks(style, recording, 0, 5, 0, createSessionParamsAccumulator());
 
     expect(style.steps).toHaveLength(5);
     style.steps.forEach((call, i) => {
@@ -77,7 +79,7 @@ describe('advanceTicks — call count and args', () => {
     const style = new StubStyle();
     const tickMs = 16.5;
 
-    advanceTicks(style, recording, 0, 10, 0, tickMs);
+    advanceTicks(style, recording, 0, 10, 0, createSessionParamsAccumulator(), tickMs);
 
     for (const call of style.steps) {
       expect(call.dt).toBe(tickMs);
@@ -90,7 +92,7 @@ describe('advanceTicks — call count and args', () => {
     const tickMs = 10;
 
     // Ticks land at t = 0, 10, 20, 30, 40 -> sample indices 0, 0, 1, 1, 2.
-    advanceTicks(style, recording, 0, 5, 0, tickMs);
+    advanceTicks(style, recording, 0, 5, 0, createSessionParamsAccumulator(), tickMs);
 
     expect(style.steps.map((c) => c.params.expansion)).toEqual([0, 0, 1, 1, 2]);
   });
@@ -102,11 +104,12 @@ describe('advanceTicks — chunking invariance', () => {
     const tickMs = 10;
 
     const whole = new StubStyle();
-    advanceTicks(whole, recording, 0, 10, 0, tickMs);
+    advanceTicks(whole, recording, 0, 10, 0, createSessionParamsAccumulator(), tickMs);
 
     const chunked = new StubStyle();
-    const midIndex = advanceTicks(chunked, recording, 0, 4, 0, tickMs);
-    advanceTicks(chunked, recording, 4, 10, midIndex, tickMs);
+    const chunkedAccumulator = createSessionParamsAccumulator();
+    const midIndex = advanceTicks(chunked, recording, 0, 4, 0, chunkedAccumulator, tickMs);
+    advanceTicks(chunked, recording, 4, 10, midIndex, chunkedAccumulator, tickMs);
 
     expect(chunked.steps).toEqual(whole.steps);
   });
@@ -115,11 +118,12 @@ describe('advanceTicks — chunking invariance', () => {
     const recording: MovementRecording = [sample(0, 0), sample(25, 1), sample(60, 2)];
     const tickMs = 10;
 
-    const wholeFinal = advanceTicks(new StubStyle(), recording, 0, 10, 0, tickMs);
+    const wholeFinal = advanceTicks(new StubStyle(), recording, 0, 10, 0, createSessionParamsAccumulator(), tickMs);
 
     const chunked = new StubStyle();
-    const midIndex = advanceTicks(chunked, recording, 0, 4, 0, tickMs);
-    const chunkedFinal = advanceTicks(chunked, recording, 4, 10, midIndex, tickMs);
+    const chunkedAccumulator = createSessionParamsAccumulator();
+    const midIndex = advanceTicks(chunked, recording, 0, 4, 0, chunkedAccumulator, tickMs);
+    const chunkedFinal = advanceTicks(chunked, recording, 4, 10, midIndex, chunkedAccumulator, tickMs);
 
     expect(chunkedFinal).toBe(wholeFinal);
   });

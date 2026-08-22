@@ -10,6 +10,7 @@
 import { describe, expect, it } from 'vitest';
 import type { MovementRecording } from './recording';
 import { advanceTicks, replay, SIMULATION_TICK_MS } from './replay';
+import { createSessionParamsAccumulator } from './session-params';
 import { createDriftingCirclesStyle } from '../styles/placeholder/drifting-circles';
 import { createWorld } from '../world/world';
 import { cyrb53 } from '../shared/hash';
@@ -47,10 +48,11 @@ describe('geometry determinism — same recipe, different tick batching', () => 
     styleB.init(worldB);
 
     const totalTicks = Math.ceil(DURATION_MS / SIMULATION_TICK_MS);
-    let sampleIndex = advanceTicks(styleB, RECORDING, 0, 7, 0);
-    sampleIndex = advanceTicks(styleB, RECORDING, 7, 13, sampleIndex);
-    sampleIndex = advanceTicks(styleB, RECORDING, 13, 22, sampleIndex);
-    advanceTicks(styleB, RECORDING, 22, totalTicks, sampleIndex);
+    const accumulator = createSessionParamsAccumulator();
+    let sampleIndex = advanceTicks(styleB, RECORDING, 0, 7, 0, accumulator);
+    sampleIndex = advanceTicks(styleB, RECORDING, 7, 13, sampleIndex, accumulator);
+    sampleIndex = advanceTicks(styleB, RECORDING, 13, 22, sampleIndex, accumulator);
+    advanceTicks(styleB, RECORDING, 22, totalTicks, sampleIndex, accumulator);
     const sceneB = styleB.finish();
 
     expect(sceneB).toEqual(sceneA);

@@ -16,6 +16,7 @@
  * StyleRenderer lifecycle (init/step/scene/finish).
  */
 import type { MovementParams } from '../../adapters/movement-params';
+import { INITIAL_SESSION_PARAMS, type SessionParams } from '../../engine/session-params';
 import { clamp01 } from '../../shared/math';
 import { createLabeledNoise } from '../../world/labeled-noise';
 import { createLabeledStream } from '../../world/labeled-stream';
@@ -56,6 +57,16 @@ const BRANCH_SPREAD_SPAN = 0.4; // branchSpreadBase lands in [0.15, 0.55) radian
 
 const WANDER_AMPLITUDE_MIN = 0.02;
 const WANDER_AMPLITUDE_SPAN = 0.13; // wanderAmplitudeBase lands in [0.02, 0.15) radians
+
+// Session-level movement-mapping (new in M5): movementVariance (how much
+// the session's energy has varied so far) gradually modulates wander
+// amplitude on top of the world knob's own baseline -- a session that
+// swings between stillness and bursts reads as more erratic/searching; a
+// steady-paced session reads calmer. movementVariance's practical range is
+// roughly [0, 0.25] (population variance of a 0-1-bounded signal maxes out
+// at 0.25). First-pass scale factor, expected to be tuned live like every
+// other Botanical constant (see docs/HANDOFF.md) -- not founder-specified.
+const SESSION_VARIANCE_WANDER_SCALE = 2;
 
 const BLOSSOMS_PER_CLUSTER_MIN = 25;
 const BLOSSOMS_PER_CLUSTER_SPAN = 55; // blossomsPerCluster lands in [25, 80) -- visual spec section 3
@@ -131,6 +142,7 @@ export interface BotanicalState {
   foreground: GrowthSystemState;
   echoes: GrowthSystemState[];
   latestParams: MovementParams | undefined;
+  latestSessionParams: SessionParams;
 
   /** Resolved once at renderer creation -- DEFAULT_BOTANICAL_TUNING_CONFIG merged with any caller-supplied partial override, constant for the renderer's whole lifetime. */
   tuning: BotanicalTuningConfig;
@@ -154,6 +166,7 @@ function createEmptyState(tuning: BotanicalTuningConfig): BotanicalState {
     foreground: createEmptyGrowthSystem(),
     echoes: ECHO_CONFIGS.map(() => createEmptyGrowthSystem()),
     latestParams: undefined,
+    latestSessionParams: INITIAL_SESSION_PARAMS,
     tuning,
     palette: BOTANICAL_PALETTE_PRESETS[0]!,
     maxConcurrentBranches: 0,
@@ -342,6 +355,9 @@ function stepGrowthSystem(
   const newBranches: Branch[] = [];
   const liveCount = () => system.branches.length + newBranches.length;
 
+  const effectiveWanderAmplitudeBase =
+    state.wanderAmplitudeBase * (1 + state.latestSessionParams.movementVariance * SESSION_VARIANCE_WANDER_SCALE);
+
   for (const branch of system.branches) {
     if (branch.lifecycle === 'growing') {
       const previousGrownLength = branch.grownLength;
@@ -356,7 +372,7 @@ function stepGrowthSystem(
         windAngle: state.windAngle,
         noise01,
         baseGrowthPerTick: state.baseGrowthPerTick,
-        wanderAmplitudeBase: state.wanderAmplitudeBase,
+        wanderAmplitudeBase: effectiveWanderAmplitudeBase,
         tuning: state.tuning,
       });
 
@@ -444,8 +460,9 @@ function initState(state: BotanicalState, world: World): void {
   });
 }
 
-function stepState(state: BotanicalState, params: MovementParams, dt: number): void {
+function stepState(state: BotanicalState, params: MovementParams, sessionParams: SessionParams, dt: number): void {
   state.latestParams = params;
+  state.latestSessionParams = sessionParams;
 
   stepGrowthSystem(state, state.foreground, FOREGROUND_SYSTEM_ID, params, dt, state.tuning.maxGeneration);
   ECHO_CONFIGS.forEach((echoConfig, i) => {
@@ -539,8 +556,8 @@ export function createBotanicalInternal(tuning?: Partial<BotanicalTuningConfig>)
       initState(state, world);
     },
 
-    step(params: MovementParams, _time: number, dt: number): void {
-      stepState(state, params, dt);
+    step(params: MovementParams, sessionParams: SessionParams, _time: number, dt: number): void {
+      stepState(state, params, sessionParams, dt);
     },
 
     scene(): Scene {
