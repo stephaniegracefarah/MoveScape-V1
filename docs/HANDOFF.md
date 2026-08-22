@@ -10,6 +10,7 @@ Rules for the coordinator writing entries: newest session on top; be specific en
 
 *(Keep this section updated — it is the fast path for a new session. What milestone is active, what works end-to-end right now, how to run the project and its tests.)*
 
+- **FOUNDER UPDATE 2026-08-22 — READ FIRST:** the founder has issued a **visual target spec** at `docs/styles/botanical.md` that supersedes Botanical's current look and the pending tuning-pass plan. See the "Founder update — 2026-08-22" entry at the top of the session log for the full record and milestone impact before acting on anything below this line. The next coordinator session's job is the rebuild described there, not the previously-queued tuning pass.
 - **Active milestone:** M4 is merged to main. Now mid-tuning-pass: the backend-knobs tuning panel (PR #5, branch `m4x-tuning-panel`) is built and QA'd, **awaiting founder review/merge**. Once merged, next step is using the panel live to work through the four visual-tuning notes in Session 005's "Founder live-review feedback" below, then locking in the founder's exported values as new defaults — before M5 (sessions and saving) starts.
 - **Works right now:** M0-M4 (webcam adapter, seed/world layer, fixed-timestep engine, compositor, Botanical) as before — see prior entries for the full description. **New in Session 006 (PR #5, not yet merged):** all of Botanical's ~27 previously-hardcoded internal tuning constants (`MAX_GENERATION`, `SHRINK_RATE`, blossom/color/root formula constants, etc.) now live in one `BotanicalTuningConfig` object (`src/styles/botanical/tuning-config.ts`), threaded through `branch.ts`/`blossom.ts`'s pure functions and `botanical.ts`'s state instead of read as module constants — `createBotanicalStyle()` with no args is unchanged (defaults are byte-identical to the old hardcoded values). A dev-only "backend knobs" panel in `main.ts` (behind `import.meta.env.DEV`, tree-shaken from production like the existing slider adapter) exposes a slider per World knob (raw 0-1, seeded from today's actual values) and per tuning-config field (ranged around its default), live-restarting the piece ~120ms after the last drag, plus an Export button that serializes the current `WorldOverrides` + `BotanicalTuningConfig` to a JSON blob in a read-only textarea for the founder to paste back. 160 unit tests passing (158 + 2 new); production bundle re-verified to contain zero panel code, zero slider code.
 - **Run:** `npm install`, then `npm run dev` (webcam needs a browser + camera; "Use sliders" and "Show tuning panel" appear in dev builds only)
@@ -42,6 +43,33 @@ Rules for the coordinator writing entries: newest session on top; be specific en
 ## Session log
 
 *(Newest first. One entry per session.)*
+
+### Founder update — 2026-08-22 — Visual target spec issued (recorded on the founder's behalf by the founder's Cowork session; not a coordinator build session)
+
+**What happened:** the founder reviewed Botanical's live output against the actual reference (Holger Lippmann's *Recursive Tree X*) and concluded the mismatch is **structural, not parametric** — no values reachable through the tuning panel produce the target look, because the mark vocabulary itself is wrong (circle-chain "branches," sparse single-child ramification, confetti-scale blossom clusters, hue-spread palette math, bottom-band lawn composition). Working with Cowork, the founder produced a **visual target spec** — now at **`docs/styles/botanical.md`** — plus rendered metaphor sketches the founder ranked. That file is now the authority on Botanical's look; where it conflicts with prior descriptions (including Session 005's "dense string of small circles" and "white canvas" notes), it wins.
+
+**Decisions made by the founder (all recorded in the visual spec and/or the founder's main-doc copy):**
+- **Composition/canvas: the Scroll.** Fixed-height canvas expanding rightward as the piece accumulates; one or two dominant branches sweeping left→right; the Grove (rising stems) vocabulary allowed as secondary elements; radial/burst compositions rejected. The engine continuously composes a fixed-aspect **portrait crop** that must always look complete — that crop is the default save/share; the full scroll (**the journey**) is exportable on request. Duration never appears as numbers on the artwork.
+- **Marks:** branches become smooth **tapered strokes** (a new compositor primitive — the SceneElement vocabulary grows beyond circles); repeated forking to fine hairline twigs; blossom clusters become dense (25–80 circles, size mixture, gaussian packing) with within-cluster color mixing.
+- **Palette:** curated multi-tone color lists (deep crimson → near-black → dusty rose → cream) replace the `hueBase`/`hueSpread` model. The preset mechanism in `palettes.ts` survives; its contents change from hue math to color lists.
+- **Background:** warm cream (≈ `#f7f0e3`) with subtle seeded watercolor-paper texture — replaces white.
+
+**What this supersedes:** the queued plan in Session 006's "Next session should" (use the tuning panel to work Session 005's four tuning notes, then lock exported values as defaults). Those four notes are symptoms of the structural gaps and are all addressed by the rebuild. The tuning panel itself (PR #5) remains valuable — it is the right tool for calibrating the *rebuilt* Botanical — so merging PR #5 first is still sensible.
+
+**Milestone impact:**
+- **M3 reopened (scoped extension):** compositor gains the `taperedStroke` element and the cream textured paper ground; the depth model (sort/fade/thin by z) carries over.
+- **M4 reopened (rebuild to spec):** Botanical's topology, cluster generation, palette model, and composition rebuilt against `docs/styles/botanical.md`; its acceptance test is now that file's acceptance test (a static seeded render mistakable for the reference's family), replacing the prior subjective wording. The branch lifecycle state machine, pure-math file structure, labeled-stream determinism discipline, and `BotanicalTuningConfig` pattern all survive.
+- **M5 updated:** the expanding-scroll canvas, portrait-crop composition, and portrait/journey exports join its scope (already folded in the founder's main-doc copy).
+- All determinism tests stay green throughout — they are the safety net that makes this a rework, not a gamble.
+
+**Doc-structure decision (fold into the repo's SPEC.md):** per-style visual specs are now a standing tier — every style gets `docs/styles/<style>.md` as the authority on its look, with the Botanical file's eight-section structure as the template. SPEC.md's style section should point to them, and M4/M6-style acceptance criteria should read "passes its visual spec's acceptance test." The founder deliberately did **not** edit the repo's SPEC.md from outside — the coordinator folds these changes into it next session, respecting its current structure.
+
+**Next session should:**
+1. Read `docs/styles/botanical.md` in full before anything else.
+2. Merge PR #5 if the founder approves it (the panel aids the rebuild).
+3. Fold the doc-structure + canvas decisions into the repo's SPEC.md (see above).
+4. Plan and run the rebuild: M3 extension first (stroke primitive + paper ground), then M4 rebuild to the visual spec's acceptance test, keeping all determinism tests green; QA against the visual spec section by section.
+5. The founder backlog (4th instantaneous input; stillness-speed jitter) is unchanged and still awaits founder approval before starting.
 
 ### Session 006 — 2026-08-20 — Backend-knobs tuning panel
 
