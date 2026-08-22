@@ -3,9 +3,11 @@
  * real Botanical style instead of the M3 placeholder): replaying the
  * identical recipe (world seed + recording) produces bit-identical scene
  * geometry regardless of how the simulation ticks are batched. World
- * overrides force a fast growing->mature->shrinking->resprout cycle within a
- * reasonable test duration (see the constants below), so this test actually
- * exercises the full lifecycle, not just the growing phase.
+ * overrides force several fast growing->mature->(front-driven resprout)
+ * cycles within a reasonable test duration (see the constants below), so
+ * this test actually exercises the full lifecycle, not just the growing
+ * phase -- marks are permanent (docs/styles/botanical.md section 7), so
+ * "lifecycle" here means growth-then-resprout, never shrink/removal.
  */
 import { describe, expect, it } from 'vitest';
 import type { MovementRecording } from './recording';
