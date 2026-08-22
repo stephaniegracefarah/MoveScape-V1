@@ -2,18 +2,10 @@ import { describe, expect, it } from 'vitest';
 import type { MovementParams } from '../../adapters/movement-params';
 import { createLabeledStream } from '../../world/labeled-stream';
 import { createWorld, type WorldOverrides } from '../../world/world';
-import type { SceneElement } from '../style-renderer';
 import { angleDifference, growthStepFor } from './branch';
 import { createBotanicalInternal, createBotanicalStyle } from './botanical';
-import { BOTANICAL_PALETTES } from './palettes';
+import { BOTANICAL_PALETTE_PRESETS } from './palettes';
 import { DEFAULT_BOTANICAL_TUNING_CONFIG } from './tuning-config';
-
-/** botanical.ts's buildScene() only ever pushes 'circle' elements (M4x doesn't
- * yet convert branches to strokes) -- this narrows the union so tests can
- * read .x/.y off scene elements without a widened-type compile error. */
-function circlePositions(elements: SceneElement[]): { x: number; y: number }[] {
-  return elements.filter((e): e is Extract<SceneElement, { kind: 'circle' }> => e.kind === 'circle');
-}
 
 function makeParams(overrides: Partial<MovementParams> = {}): MovementParams {
   return { v: 1, expansion: 0.5, speed: 0.5, symmetry: 0.5, ...overrides };
@@ -63,11 +55,10 @@ const FAST_CYCLE_OVERRIDES: WorldOverrides = {
 };
 
 describe('createBotanicalStyle — worldKnobs', () => {
-  it('declares exactly the 11 documented knob names', () => {
+  it('declares exactly the 9 documented knob names', () => {
     const renderer = createBotanicalStyle();
     const expected = [
-      'hueBase',
-      'hueSpread',
+      'paletteIndex',
       'branchDensity',
       'baseGrowthRate',
       'matureDurationMs',
@@ -76,7 +67,6 @@ describe('createBotanicalStyle — worldKnobs', () => {
       'branchSpreadBase',
       'wanderAmplitudeBase',
       'blossomsPerCluster',
-      'subBranchSpawnChance',
     ];
     expect([...renderer.worldKnobs()].sort()).toEqual([...expected].sort());
   });
@@ -152,11 +142,11 @@ describe('createBotanicalStyle — speed drives growth honestly (invariant 6)', 
     runTicks(high.renderer, 50, 16.67, highParamsAt);
 
     const sumGrown = (branches: { grownLength: number }[]) => branches.reduce((s, b) => s + b.grownLength, 0);
-    const lowTotal = sumGrown(low.state.branches);
-    const highTotal = sumGrown(high.state.branches);
+    const lowTotal = sumGrown(low.state.foreground.branches);
+    const highTotal = sumGrown(high.state.foreground.branches);
 
-    expect(low.state.branches.every((b) => b.lifecycle === 'growing')).toBe(true);
-    expect(high.state.branches.every((b) => b.lifecycle === 'growing')).toBe(true);
+    expect(low.state.foreground.branches.every((b) => b.lifecycle === 'growing')).toBe(true);
+    expect(high.state.foreground.branches.every((b) => b.lifecycle === 'growing')).toBe(true);
     expect(highTotal).toBeGreaterThan(lowTotal);
   });
 
@@ -165,8 +155,10 @@ describe('createBotanicalStyle — speed drives growth honestly (invariant 6)', 
     const { renderer, state } = createBotanicalInternal();
     renderer.init(createWorld('honesty-seed', 0, overrides));
 
-    const branch = state.branches.find((b) => b.id === 'root0:0');
-    if (!branch) throw new Error('expected root0:0 to exist right after init()');
+    // rootCount=0 (raw) still maps to 1 root (ROOT_COUNT_MIN=1), spawned as
+    // the foreground system's first root branch: 'fg:root0:0'.
+    const branch = state.foreground.branches.find((b) => b.id === 'fg:root0:0');
+    if (!branch) throw new Error('expected fg:root0:0 to exist right after init()');
     const targetLength = branch.targetLength;
     const baseGrowthPerTick = state.baseGrowthPerTick;
 
@@ -201,18 +193,28 @@ describe('createBotanicalStyle — expansion widens spatial spread', () => {
   it('expansion=1 produces a measurably wider bounding-box spread than expansion=0, across resprout cycles', () => {
     const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0 };
 
-    const low = createBotanicalStyle();
-    const high = createBotanicalStyle();
-    low.init(createWorld('expansion-seed', 0, overrides));
-    high.init(createWorld('expansion-seed', 0, overrides));
+    const low = createBotanicalInternal();
+    const high = createBotanicalInternal();
+    low.renderer.init(createWorld('expansion-seed', 0, overrides));
+    high.renderer.init(createWorld('expansion-seed', 0, overrides));
 
     const lowParamsAt = () => makeParams({ expansion: 0, speed: 0.6, symmetry: 0.5 });
     const highParamsAt = () => makeParams({ expansion: 1, speed: 0.6, symmetry: 0.5 });
-    runTicks(low, 400, 200, lowParamsAt);
-    runTicks(high, 400, 200, highParamsAt);
+    runTicks(low.renderer, 400, 200, lowParamsAt);
+    runTicks(high.renderer, 400, 200, highParamsAt);
 
-    const lowSpread = boundingBoxSpread(circlePositions(low.scene().elements));
-    const highSpread = boundingBoxSpread(circlePositions(high.scene().elements));
+    // Measured on the foreground system alone (state.foreground), not the
+    // merged scene() output: depth echoes (a separate, mostly
+    // expansion-invariant "atmosphere" layer -- their own root positions are
+    // seed-derived, not expansion-driven) add a large shared point-count
+    // "noise floor" to the combined scene that swamps this specific,
+    // foreground-only signal once included.
+    const foregroundPositions = (state: (typeof low)['state']) => [
+      ...state.foreground.branches.flatMap((b) => b.segments),
+      ...state.foreground.blossoms.map((b) => ({ x: b.x, y: b.y })),
+    ];
+    const lowSpread = boundingBoxSpread(foregroundPositions(low.state));
+    const highSpread = boundingBoxSpread(foregroundPositions(high.state));
 
     expect(highSpread).toBeGreaterThan(lowSpread);
   });
@@ -226,14 +228,14 @@ describe('createBotanicalStyle — symmetry calms wander', () => {
     // way its own noise+wind realization happened to lean, not cleanly by
     // the symmetry amplitude factor. Aggregating curvature across MANY
     // independently-seeded branches (fast growth + a long matureDuration so
-    // nothing shrinks away mid-run, high subBranchSpawnChance/branchDensity
-    // so many generations spawn) lets the law of large numbers surface the
-    // systematic (1 - symmetry * SYMMETRY_DAMPING) amplitude effect that
-    // wanderDeltaFor's own unit tests already pin down exactly.
+    // nothing shrinks away mid-run, high branchDensity so many generations'
+    // worth of scheduled forks actually get to fire) lets the law of large
+    // numbers surface the systematic (1 - symmetry * SYMMETRY_DAMPING)
+    // amplitude effect that wanderDeltaFor's own unit tests already pin
+    // down exactly.
     const overrides: WorldOverrides = {
       baseGrowthRate: 0.99,
       matureDurationMs: 0.99, // long -- keeps branches alive (not shrunk away) for the whole run
-      subBranchSpawnChance: 0.999,
       branchDensity: 0.99,
     };
 
@@ -247,19 +249,19 @@ describe('createBotanicalStyle — symmetry calms wander', () => {
     runTicks(low.renderer, 700, 16.67, lowParamsAt);
     runTicks(high.renderer, 700, 16.67, highParamsAt);
 
-    expect(low.state.branches.length).toBeGreaterThan(5); // sanity: many independent branches spawned
-    expect(high.state.branches.length).toBeGreaterThan(5);
+    expect(low.state.foreground.branches.length).toBeGreaterThan(5); // sanity: many independent branches spawned
+    expect(high.state.foreground.branches.length).toBeGreaterThan(5);
 
     const totalCurvature = (branches: { segments: { x: number; y: number }[] }[]) =>
       branches.reduce((sum, b) => sum + curvatureSum(b.segments), 0);
 
-    expect(totalCurvature(high.state.branches)).toBeLessThan(totalCurvature(low.state.branches));
+    expect(totalCurvature(high.state.foreground.branches)).toBeLessThan(totalCurvature(low.state.foreground.branches));
   });
 });
 
 describe('createBotanicalStyle — bounded branch/element count', () => {
   it('element count at a late checkpoint is not dramatically larger than at an earlier checkpoint', () => {
-    const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, subBranchSpawnChance: 0.9 };
+    const overrides: WorldOverrides = FAST_CYCLE_OVERRIDES;
     const renderer = createBotanicalStyle();
     renderer.init(createWorld('bounded-seed', 0, overrides));
 
@@ -282,8 +284,8 @@ describe('createBotanicalStyle — bounded branch/element count', () => {
 
 describe('createBotanicalStyle — branchDensity knob changes steady-state element count', () => {
   it('a low branchDensity override yields fewer elements than a high one, else identical', () => {
-    const lowOverrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, branchDensity: 0, subBranchSpawnChance: 0.9 };
-    const highOverrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, branchDensity: 0.99, subBranchSpawnChance: 0.9 };
+    const lowOverrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, branchDensity: 0 };
+    const highOverrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, branchDensity: 0.99 };
 
     const low = createBotanicalStyle();
     const high = createBotanicalStyle();
@@ -298,14 +300,14 @@ describe('createBotanicalStyle — branchDensity knob changes steady-state eleme
   });
 });
 
-describe('BOTANICAL_PALETTES — override sanity', () => {
-  it('each preset\'s overrides come back verbatim from world.knob()', () => {
-    for (const id of Object.keys(BOTANICAL_PALETTES) as (keyof typeof BOTANICAL_PALETTES)[]) {
-      const overrides = BOTANICAL_PALETTES[id];
-      const world = createWorld('palette-seed', 0, overrides);
-      expect(world.knob('hueBase')).toBe(overrides.hueBase);
-      expect(world.knob('hueSpread')).toBe(overrides.hueSpread);
-    }
+describe('BOTANICAL_PALETTE_PRESETS — paletteIndex knob resolves the intended preset', () => {
+  it('each preset index round-trips through the paletteIndex world knob, landing mid-bucket', () => {
+    BOTANICAL_PALETTE_PRESETS.forEach((preset, index) => {
+      const raw = (index + 0.5) / BOTANICAL_PALETTE_PRESETS.length;
+      const { renderer, state } = createBotanicalInternal();
+      renderer.init(createWorld('palette-seed', 0, { paletteIndex: raw }));
+      expect(state.palette.id).toBe(preset.id);
+    });
   });
 });
 
@@ -323,21 +325,26 @@ describe('BotanicalTuningConfig — override plumbing (M4x tuning panel)', () =>
     expect(a.scene()).toEqual(b.scene());
   });
 
-  it('overriding blossomRadiusMin/blossomRadiusSpan changes a spawned blossom\'s radius', () => {
+  it("overriding blossomRadiusSmallMin/blossomRadiusSmallSpan (with blossomLargeFraction forced to 0) changes a spawned blossom's radius", () => {
     const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 1 };
-    const { renderer, state } = createBotanicalInternal({ blossomRadiusMin: 0.2, blossomRadiusSpan: 0 });
+    const { renderer, state } = createBotanicalInternal({
+      blossomRadiusSmallMin: 0.2,
+      blossomRadiusSmallSpan: 0,
+      blossomLargeFraction: 0,
+    });
     renderer.init(createWorld('tuning-blossom-seed', 0, overrides));
 
     const paramsAt = () => makeParams({ speed: 0.9, expansion: 0.5, symmetry: 0.5 });
     let tick = 0;
-    while (state.blossoms.length === 0 && tick < 2000) {
+    while (state.foreground.blossoms.length === 0 && tick < 2000) {
       renderer.step(paramsAt(), tick * 16.67, 16.67);
       tick++;
     }
 
-    expect(state.blossoms.length).toBeGreaterThan(0);
-    for (const blossom of state.blossoms) {
-      // blossomRadiusSpan: 0 makes the formula deterministic: radius === blossomRadiusMin exactly.
+    expect(state.foreground.blossoms.length).toBeGreaterThan(0);
+    for (const blossom of state.foreground.blossoms) {
+      // blossomRadiusSmallSpan: 0 and blossomLargeFraction: 0 make the
+      // formula deterministic: radius === blossomRadiusSmallMin exactly.
       expect(blossom.radius).toBeCloseTo(0.2, 10);
     }
   });

@@ -2,13 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { createLabeledNoise } from '../../world/labeled-noise';
 import {
   angleDifference,
-  computeColor,
-  computeHue,
+  checkCrossedForks,
+  computeChildBaseWidth,
+  computeForkFractions,
   computeMatureDurationMs,
   computeShrinkDurationMs,
   computeTargetLength,
   growthStepFor,
-  mod360,
   spawnBranch,
   tickGrowing,
   visibleSegmentCount,
@@ -52,6 +52,7 @@ describe('wanderDeltaFor — determinism and shape', () => {
     dt: 16,
     windAngle: 0,
     currentDirection: 0,
+    sweepTarget: 0,
     tuning: DEFAULT_BOTANICAL_TUNING_CONFIG,
   };
 
@@ -73,19 +74,41 @@ describe('wanderDeltaFor — determinism and shape', () => {
     const noise01 = 0.9; // a non-degenerate, non-midpoint sample
     const low = wanderDeltaFor({ ...baseArgs, symmetry: 0, noise01, windAngle: 0, currentDirection: 0 });
     const high = wanderDeltaFor({ ...baseArgs, symmetry: 1, noise01, windAngle: 0, currentDirection: 0 });
-    // windPull is 0 here (currentDirection === windAngle), so the whole
-    // delta is the noise term, scaled by (1 - symmetry * SYMMETRY_DAMPING).
+    // windPull and sweepPull are 0 here (currentDirection === windAngle ===
+    // sweepTarget), so the whole delta is the noise term, scaled by
+    // (1 - symmetry * SYMMETRY_DAMPING).
     expect(Math.abs(high)).toBeLessThan(Math.abs(low));
     expect(Math.abs(high)).toBeCloseTo(Math.abs(low) * (1 - SYMMETRY_DAMPING), 10);
   });
 
   it('wind pulls direction toward windAngle via the shorter rotational direction', () => {
     // noise01 = 0.5 -> signedNoise = 0, isolating the wind term.
+    // sweepTarget === currentDirection here, so the sweep term is inert.
+    // DEFAULT_BOTANICAL_TUNING_CONFIG.windStrength is 0 (the sweepTarget
+    // mechanism is what makes branches commit to a direction now -- see its
+    // own doc comment in tuning-config.ts), so this test overrides it to a
+    // nonzero value to isolate and verify the windPull formula term itself,
+    // independent of what the current product default happens to be.
     const delta = wanderDeltaFor({
       ...baseArgs,
       noise01: 0.5,
       currentDirection: 0,
       windAngle: 0.1,
+      sweepTarget: 0,
+      tuning: { ...DEFAULT_BOTANICAL_TUNING_CONFIG, windStrength: 0.0005 },
+    });
+    expect(delta).toBeGreaterThan(0); // pulls toward +0.1, the shorter way
+  });
+
+  it('sweep pulls direction toward sweepTarget via the shorter rotational direction', () => {
+    // noise01 = 0.5 -> signedNoise = 0, isolating the sweep term.
+    // windAngle === currentDirection here, so the wind term is inert.
+    const delta = wanderDeltaFor({
+      ...baseArgs,
+      noise01: 0.5,
+      currentDirection: 0,
+      windAngle: 0,
+      sweepTarget: 0.1,
     });
     expect(delta).toBeGreaterThan(0); // pulls toward +0.1, the shorter way
   });
@@ -115,11 +138,14 @@ describe('tickGrowing — lifecycle transition threshold', () => {
       id: 'b1',
       generation: 0,
       z: 0.5,
-      hue: 100,
+      color: '#4a1218',
       rootX: 0.5,
       rootY: 0.9,
       baseDirection: -Math.PI / 2,
       targetLength: 1, // large, so a single small tick won't cross it
+      sweepTarget: 0,
+      baseWidth: 0.02,
+      forkFractions: [],
     });
 
     const becameMature = tickGrowing(branch, {
@@ -144,11 +170,14 @@ describe('tickGrowing — lifecycle transition threshold', () => {
       id: 'b1',
       generation: 0,
       z: 0.5,
-      hue: 100,
+      color: '#4a1218',
       rootX: 0.5,
       rootY: 0.9,
       baseDirection: -Math.PI / 2,
       targetLength: 0.0001, // tiny, so one tick crosses it
+      sweepTarget: 0,
+      baseWidth: 0.02,
+      forkFractions: [],
     });
 
     const becameMature = tickGrowing(branch, {
@@ -172,11 +201,14 @@ describe('tickGrowing — lifecycle transition threshold', () => {
       id: 'b1',
       generation: 0,
       z: 0.5,
-      hue: 100,
+      color: '#4a1218',
       rootX: 0.5,
       rootY: 0.9,
       baseDirection: -Math.PI / 2,
       targetLength: 10,
+      sweepTarget: 0,
+      baseWidth: 0.02,
+      forkFractions: [],
     });
     expect(branch.segments.length).toBe(1);
 
@@ -268,24 +300,92 @@ describe('computeMatureDurationMs / computeShrinkDurationMs', () => {
   });
 });
 
-describe('computeHue / mod360', () => {
-  it('wraps into [0, 360)', () => {
-    expect(mod360(370)).toBeCloseTo(10, 10);
-    expect(mod360(-10)).toBeCloseTo(350, 10);
-    expect(mod360(0)).toBe(0);
+describe('computeForkFractions — scheduled fork points', () => {
+  it('produces `count` ascending-ish values within [forkFractionMin, forkFractionMax]', () => {
+    const draws = [0.5, 0.5, 0.5];
+    const fractions = computeForkFractions(3, draws, DEFAULT_BOTANICAL_TUNING_CONFIG);
+    expect(fractions.length).toBe(3);
+    fractions.forEach((f) => {
+      expect(f).toBeGreaterThanOrEqual(DEFAULT_BOTANICAL_TUNING_CONFIG.forkFractionMin);
+      expect(f).toBeLessThanOrEqual(DEFAULT_BOTANICAL_TUNING_CONFIG.forkFractionMax);
+    });
+    expect(fractions[0]!).toBeLessThan(fractions[1]!);
+    expect(fractions[1]!).toBeLessThan(fractions[2]!);
   });
 
-  it('computeHue applies signed spread around hueBase and wraps', () => {
-    expect(computeHue(350, 20, 1)).toBeCloseTo(10, 10); // 350 + 20 wraps to 10
-    expect(computeHue(10, 20, -1)).toBeCloseTo(350, 10); // 10 - 20 wraps to 350
+  it('count=0 produces an empty array', () => {
+    expect(computeForkFractions(0, [], DEFAULT_BOTANICAL_TUNING_CONFIG)).toEqual([]);
+  });
+
+  it('is deterministic for the same count and jitterDraws', () => {
+    const draws = [0.2, 0.8, 0.4];
+    const a = computeForkFractions(3, draws, DEFAULT_BOTANICAL_TUNING_CONFIG);
+    const b = computeForkFractions(3, draws, DEFAULT_BOTANICAL_TUNING_CONFIG);
+    expect(a).toEqual(b);
   });
 });
 
-describe('computeColor — depth formula', () => {
-  it('is dark and saturated near (z=0), pale and faded far (z=1)', () => {
-    const near = computeColor(100, 0, DEFAULT_BOTANICAL_TUNING_CONFIG);
-    const far = computeColor(100, 1, DEFAULT_BOTANICAL_TUNING_CONFIG);
-    expect(near).toBe('hsl(100, 70%, 15%)');
-    expect(far).toBe('hsl(100, 25%, 80%)');
+describe('checkCrossedForks — fork-point crossing detection', () => {
+  function makeBranch() {
+    return spawnBranch({
+      id: 'b1',
+      generation: 0,
+      z: 0.5,
+      color: '#4a1218',
+      rootX: 0.5,
+      rootY: 0.9,
+      baseDirection: -Math.PI / 2,
+      targetLength: 1,
+      sweepTarget: 0,
+      baseWidth: 0.02,
+      forkFractions: [0.3, 0.6],
+    });
+  }
+
+  it('reports a fraction newly crossed this tick and marks it fired', () => {
+    const branch = makeBranch();
+    const previousGrownLength = 0.2;
+    branch.grownLength = 0.4;
+
+    const crossed = checkCrossedForks(branch, previousGrownLength);
+    expect(crossed).toEqual([0]);
+    expect(branch.forkedFractions[0]).toBe(true);
+    expect(branch.forkedFractions[1]).toBe(false);
+  });
+
+  it('never reports an already-fired fraction again', () => {
+    const branch = makeBranch();
+    branch.grownLength = 0.4;
+    checkCrossedForks(branch, 0.2); // fires index 0
+
+    const previousGrownLength = branch.grownLength;
+    branch.grownLength = 0.5;
+    const crossed = checkCrossedForks(branch, previousGrownLength);
+    expect(crossed).toEqual([]);
+  });
+
+  it('does not report index 1 until grownLength actually reaches 0.6', () => {
+    const branch = makeBranch();
+    branch.grownLength = 0.4;
+    checkCrossedForks(branch, 0.2); // fires index 0 only
+
+    let previousGrownLength = branch.grownLength;
+    branch.grownLength = 0.55;
+    expect(checkCrossedForks(branch, previousGrownLength)).toEqual([]);
+    expect(branch.forkedFractions[1]).toBe(false);
+
+    previousGrownLength = branch.grownLength;
+    branch.grownLength = 0.6;
+    expect(checkCrossedForks(branch, previousGrownLength)).toEqual([1]);
+    expect(branch.forkedFractions[1]).toBe(true);
+  });
+});
+
+describe('computeChildBaseWidth — generation width decay', () => {
+  it('scales the parent baseWidth by generationWidthDecay', () => {
+    expect(computeChildBaseWidth(0.02, DEFAULT_BOTANICAL_TUNING_CONFIG)).toBeCloseTo(
+      0.02 * DEFAULT_BOTANICAL_TUNING_CONFIG.generationWidthDecay,
+      12,
+    );
   });
 });

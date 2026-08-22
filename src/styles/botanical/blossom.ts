@@ -6,7 +6,6 @@
  * cluster, every time).
  */
 import { clamp01 } from '../../shared/math';
-import { mod360 } from './branch';
 import type { BotanicalTuningConfig } from './tuning-config';
 
 export interface Blossom {
@@ -14,7 +13,10 @@ export interface Blossom {
   x: number;
   y: number;
   z: number;
-  hue: number;
+  color: string;
+  /** Present only when this blossom carries the thin ring-outline detail (docs/styles/botanical.md section 3). */
+  ringColor?: string;
+  ringOpacity?: number;
   radius: number;
   baseOpacity: number;
 }
@@ -29,7 +31,8 @@ export interface SpawnBlossomClusterArgs {
   branchId: string;
   segments: { x: number; y: number }[];
   count: number;
-  hue: number;
+  /** Curated palette color list for this cluster (docs/styles/botanical.md section 4), at least 1 entry, hex strings like '#a31621'. */
+  paletteColors: string[];
   z: number;
   /** Uniform [0,1) draw function, e.g. createLabeledStream(sessionSeed, branchId + ':blossoms'). */
   draw: () => number;
@@ -37,39 +40,102 @@ export interface SpawnBlossomClusterArgs {
 }
 
 /**
- * Spawns a full blossom cluster (exactly `count` blossoms) anchored near
- * the outer ~30% of a branch's segment history, each jittered slightly off
- * its anchor point. Draws exactly 6 values per blossom, in a fixed order,
- * from the caller-supplied `draw` -- deterministic for a given draw sequence.
+ * Standard Box-Muller transform: turns two independent uniform [0,1) draws
+ * into one standard-normal (mean 0, stddev 1) sample. `Math.max(u1, 1e-9)`
+ * guards against log(0) if the seeded stream ever produces exactly 0 --
+ * extremely unlikely but keeps the function total.
+ */
+function sampleGaussian(u1: number, u2: number): number {
+  return Math.sqrt(-2 * Math.log(Math.max(u1, 1e-9))) * Math.cos(2 * Math.PI * u2);
+}
+
+/**
+ * Lightens a '#rrggbb' hex color toward white by `amount` (0-1). Pure string
+ * math, no color-space conversion needed for this small a nudge.
+ */
+export function lightenHex(hex: string, amount: number): string {
+  const clean = hex.replace('#', '');
+  const r = parseInt(clean.slice(0, 2), 16);
+  const g = parseInt(clean.slice(2, 4), 16);
+  const b = parseInt(clean.slice(4, 6), 16);
+  const lighten = (channel: number) => Math.round(channel + (255 - channel) * amount);
+  const toHex = (channel: number) => channel.toString(16).padStart(2, '0');
+  return `#${toHex(lighten(r))}${toHex(lighten(g))}${toHex(lighten(b))}`;
+}
+
+/**
+ * Spawns a full blossom cluster (exactly `count` blossoms): dense, 2D
+ * gaussian-packed mass around a single anchor point, with a size mixture
+ * (mostly small, a few large) and rich color mixing drawn from a curated
+ * palette (docs/styles/botanical.md sections 3-4), instead of the old
+ * uniform-jitter/single-hue confetti model.
+ *
+ * Draw order:
+ *  1. Once for the whole cluster: anchorFraction (picks the anchor point
+ *     from `segments`), then baseColorIndex (picks the cluster's base tone
+ *     from `paletteColors`).
+ *  2. Per blossom, in order: sigma, two pairs of uniforms for the gaussian
+ *     x/y offsets (u1x, u2x, u1y, u2y), isLarge, radius, baseOpacity,
+ *     crossDraw (+ a palette index draw only when crossDraw is true),
+ *     zJitter, hasRing.
+ *
+ * Deterministic for a given draw sequence -- same inputs always produce the
+ * same cluster.
  */
 export function spawnBlossomCluster(args: SpawnBlossomClusterArgs): Blossom[] {
   const blossoms: Blossom[] = [];
   const lastIndex = args.segments.length - 1;
 
-  for (let i = 0; i < args.count; i++) {
-    const anchorFraction = 0.7 + args.draw() * 0.3;
-    const anchorIndex = Math.min(lastIndex, Math.floor(anchorFraction * args.segments.length));
-    // segments is always non-empty (spawnBranch seeds it with the root
-    // point), so the lastIndex fallback is always defined -- the `!` just
-    // tells TS what the array's non-empty invariant already guarantees.
-    const anchor = args.segments[anchorIndex] ?? args.segments[lastIndex]!;
+  // --- Cluster-wide picks (drawn once, not per-circle) ---
+  const anchorFraction = 0.7 + args.draw() * 0.3;
+  const anchorIndex = Math.min(lastIndex, Math.floor(anchorFraction * args.segments.length));
+  // segments is always non-empty (spawnBranch seeds it with the root
+  // point), so the lastIndex fallback is always defined -- the `!` just
+  // tells TS what the array's non-empty invariant already guarantees.
+  const anchor = args.segments[anchorIndex] ?? args.segments[lastIndex]!;
 
-    const offsetX = (args.draw() * 2 - 1) * args.tuning.blossomJitterMax;
-    const offsetY = (args.draw() * 2 - 1) * args.tuning.blossomJitterMax;
-    const radius = args.tuning.blossomRadiusMin + args.draw() * args.tuning.blossomRadiusSpan;
+  const baseColorIndex = Math.floor(args.draw() * args.paletteColors.length);
+  const baseColor = args.paletteColors[baseColorIndex]!;
+
+  for (let i = 0; i < args.count; i++) {
+    // Position: 2D gaussian packing around the anchor.
+    const sigma = args.tuning.blossomClusterSigmaMin + args.draw() * args.tuning.blossomClusterSigmaSpan;
+    const offsetX = sampleGaussian(args.draw(), args.draw()) * sigma;
+    const offsetY = sampleGaussian(args.draw(), args.draw()) * sigma;
+
+    // Size mixture: mostly small, a few large.
+    const isLarge = args.draw() < args.tuning.blossomLargeFraction;
+    const radius = isLarge
+      ? args.tuning.blossomRadiusLargeMin + args.draw() * args.tuning.blossomRadiusLargeSpan
+      : args.tuning.blossomRadiusSmallMin + args.draw() * args.tuning.blossomRadiusSmallSpan;
+
     const baseOpacity = args.tuning.blossomOpacityMin + args.draw() * args.tuning.blossomOpacitySpan;
-    const hueJitter = (args.draw() * 2 - 1) * args.tuning.blossomHueJitterDegrees;
+
+    // Color: cluster's own base tone, or (cross-draw) anywhere in the palette.
+    const crossDraw = args.draw() < args.tuning.blossomCrossDrawProbability;
+    const color = crossDraw ? args.paletteColors[Math.floor(args.draw() * args.paletteColors.length)]! : baseColor;
+
     const zJitter = (args.draw() * 2 - 1) * args.tuning.blossomZJitter;
 
-    blossoms.push({
+    // Ring outline: a thin ring, slightly lighter than the circle's own fill.
+    const hasRing = args.draw() < args.tuning.blossomRingProbability;
+
+    const blossom: Blossom = {
       branchId: args.branchId,
       x: clamp01(anchor.x + offsetX),
       y: clamp01(anchor.y + offsetY),
       z: clamp01(args.z + zJitter),
-      hue: mod360(args.hue + hueJitter),
+      color,
       radius,
       baseOpacity,
-    });
+    };
+
+    if (hasRing) {
+      blossom.ringColor = lightenHex(color, args.tuning.blossomRingLightenAmount);
+      blossom.ringOpacity = baseOpacity;
+    }
+
+    blossoms.push(blossom);
   }
 
   return blossoms;

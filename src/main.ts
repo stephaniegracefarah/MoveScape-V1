@@ -16,11 +16,7 @@ import type { CanvasLike } from './compositor/render-scene';
 import { createWorld, type World, type WorldOverrides } from './world/world';
 import { deriveWorldSeed, formatLocalDate } from './world/seed';
 import { createBotanicalStyle } from './styles/botanical/botanical';
-import {
-  BOTANICAL_PALETTE_PRESETS,
-  type BotanicalPaletteId,
-  type BotanicalPalettePreset,
-} from './styles/botanical/palettes';
+import { BOTANICAL_PALETTE_PRESETS, type BotanicalPaletteId } from './styles/botanical/palettes';
 import { DEFAULT_BOTANICAL_TUNING_CONFIG, type BotanicalTuningConfig } from './styles/botanical/tuning-config';
 
 const app = document.querySelector<HTMLDivElement>('#app');
@@ -61,7 +57,7 @@ if (app) {
     .ms-activating { font-size: 12px; opacity: 0.75; align-self: center; }
     .ms-error { color: #ff8080; font-size: 13px; }
     .ms-canvas { display: block; width: 100%; max-width: 720px; height: auto;
-      aspect-ratio: 3 / 2; background: #fdfdfb; border-radius: 8px; margin: 4px 0 16px; }
+      aspect-ratio: 3 / 2; background: #f7f0e3; border-radius: 8px; margin: 4px 0 16px; }
     #ms-readout.ms-paused { opacity: 0.55; }
     .ms-preview-video { display: block; margin-top: 12px; max-width: 320px; width: 100%;
       border-radius: 8px; transform: scaleX(-1); background: #000; }
@@ -145,7 +141,21 @@ if (app) {
     let manualOverridesActive = false;
     let panelWorldOverrides: WorldOverrides | undefined;
     let panelTuningConfig: Partial<BotanicalTuningConfig> | undefined;
-    let onPaletteSelected: ((preset: BotanicalPalettePreset) => void) | null = null;
+    let onPaletteSelected: ((paletteId: BotanicalPaletteId) => void) | null = null;
+
+    /**
+     * Palette selection (M4 rebuild) flows through one raw-0-1 `paletteIndex`
+     * world knob rather than a preset's own WorldOverrides object directly --
+     * curated color lists (palettes.ts) aren't numeric, so there's nothing
+     * else to override. Lands mid-bucket so botanical.ts's own
+     * `Math.floor(raw * presets.length)` mapping reliably resolves back to
+     * `paletteId`.
+     */
+    function paletteIndexOverride(paletteId: BotanicalPaletteId): WorldOverrides {
+      const index = BOTANICAL_PALETTE_PRESETS.findIndex((preset) => preset.id === paletteId);
+      const safeIndex = index === -1 ? 0 : index;
+      return { paletteIndex: (safeIndex + 0.5) / BOTANICAL_PALETTE_PRESETS.length };
+    }
 
     /**
      * (Re)starts the Botanical live-preview loop against a fresh World built
@@ -167,9 +177,7 @@ if (app) {
       // rather than merging with it. Both stay their production no-op
       // values (false / undefined) in a build where the panel itself was
       // dead-code-eliminated, so this line is a pure pass-through there.
-      const overrides = manualOverridesActive
-        ? panelWorldOverrides
-        : BOTANICAL_PALETTE_PRESETS.find((preset) => preset.id === selectedPaletteId)?.overrides;
+      const overrides = manualOverridesActive ? panelWorldOverrides : paletteIndexOverride(selectedPaletteId);
       const world = createWorld(worldSeed, 0, overrides);
       currentWorld = world;
       liveLoop = createLiveRenderLoop(
@@ -369,9 +377,9 @@ if (app) {
         selectedPaletteId = preset.id;
         // No-op in production (onPaletteSelected stays null); in dev, once
         // the tuning panel has taken over manual control, this pre-fills
-        // the panel's own hueBase/hueSpread sliders to the preset's values
-        // instead of the preset supplying a second, competing override.
-        onPaletteSelected?.(preset);
+        // the panel's own paletteIndex slider to the preset's value instead
+        // of the preset supplying a second, competing override.
+        onPaletteSelected?.(preset.id);
         if (activeAdapter) startLiveLoop();
       });
       paletteControlsEl.appendChild(paletteBtn);
@@ -499,24 +507,36 @@ if (app) {
         targetLengthBase: { min: 0, max: 1, step: 0.01 }, // normalized canvas-unit length
         targetLengthJitterSpan: { min: 0, max: 1.5, step: 0.01 },
         generationLengthDecay: { min: 0, max: 1, step: 0.01 }, // per-generation fraction
-        branchSegmentRadius: { min: 0, max: 0.02, step: 0.0001 },
+        branchBaseWidthMin: { min: 0, max: 0.05, step: 0.0005 }, // normalized stroke width
+        branchBaseWidthSpan: { min: 0, max: 0.05, step: 0.0005 },
+        generationWidthDecay: { min: 0, max: 1, step: 0.01 }, // per-generation fraction
+        taperExponent: { min: 0.5, max: 4, step: 0.05 },
         branchBaseOpacity: { min: 0, max: 1, step: 0.01 },
-        maxSat: { min: 0, max: 100, step: 1 }, // HSL saturation %
-        satFalloff: { min: 0, max: 100, step: 1 },
-        minLight: { min: 0, max: 100, step: 1 }, // HSL lightness %
-        lightRise: { min: 0, max: 100, step: 1 },
+        curvatureNoiseScale: { min: 0, max: 1, step: 0.005 }, // grownLength multiplier before noise sampling
+        sweepStrength: { min: 0, max: 0.005, step: 0.00002 },
+        childDirectionJitterMin: { min: 0, max: 1.5, step: 0.01 }, // radians
+        childDirectionJitterSpan: { min: 0, max: 1.5, step: 0.01 },
+        forkCountMin: { min: 0, max: 8, step: 1 },
+        forkCountSpan: { min: 0, max: 8, step: 1 },
+        forkFractionMin: { min: 0, max: 1, step: 0.01 }, // fraction of targetLength
+        forkFractionMax: { min: 0, max: 1, step: 0.01 },
         rootYMin: { min: 0, max: 1, step: 0.01 }, // normalized canvas y
         rootYSpan: { min: 0, max: 1, step: 0.01 },
         rootBaseDirectionSpread: { min: 0, max: Math.PI, step: 0.01 }, // radians
         childZJitter: { min: 0, max: 0.3, step: 0.005 },
-        childHueJitterDegrees: { min: 0, max: 60, step: 1 },
-        blossomRadiusMin: { min: 0, max: 0.1, step: 0.001 },
-        blossomRadiusSpan: { min: 0, max: 0.15, step: 0.001 },
+        blossomRadiusSmallMin: { min: 0, max: 0.05, step: 0.0005 },
+        blossomRadiusSmallSpan: { min: 0, max: 0.05, step: 0.0005 },
+        blossomRadiusLargeMin: { min: 0, max: 0.1, step: 0.001 },
+        blossomRadiusLargeSpan: { min: 0, max: 0.1, step: 0.001 },
+        blossomLargeFraction: { min: 0, max: 1, step: 0.01 },
         blossomOpacityMin: { min: 0, max: 1, step: 0.01 },
         blossomOpacitySpan: { min: 0, max: 1, step: 0.01 },
-        blossomJitterMax: { min: 0, max: 0.1, step: 0.001 },
-        blossomHueJitterDegrees: { min: 0, max: 60, step: 1 },
+        blossomClusterSigmaMin: { min: 0, max: 0.15, step: 0.001 }, // normalized gaussian sigma
+        blossomClusterSigmaSpan: { min: 0, max: 0.15, step: 0.001 },
         blossomZJitter: { min: 0, max: 0.2, step: 0.005 },
+        blossomRingProbability: { min: 0, max: 1, step: 0.01 },
+        blossomRingLightenAmount: { min: 0, max: 1, step: 0.01 },
+        blossomCrossDrawProbability: { min: 0, max: 1, step: 0.01 },
       };
 
       function buildPanel(): HTMLDivElement {
@@ -571,17 +591,15 @@ if (app) {
           if (valueEl) worldValueEls[name] = valueEl;
         }
 
-        onPaletteSelected = (preset) => {
+        onPaletteSelected = (paletteId) => {
           if (!manualOverridesActive) return;
-          for (const key of ['hueBase', 'hueSpread'] as const) {
-            const value = preset.overrides[key];
-            if (value === undefined) continue;
-            panelWorldOverrides = { ...(panelWorldOverrides ?? initialOverrides), [key]: value };
-            const input = worldSliderInputs[key];
-            const valueEl = worldValueEls[key];
-            if (input) input.value = String(value);
-            if (valueEl) valueEl.textContent = value.toFixed(4);
-          }
+          const value = paletteIndexOverride(paletteId).paletteIndex;
+          if (value === undefined) return;
+          panelWorldOverrides = { ...(panelWorldOverrides ?? initialOverrides), paletteIndex: value };
+          const input = worldSliderInputs['paletteIndex'];
+          const valueEl = worldValueEls['paletteIndex'];
+          if (input) input.value = String(value);
+          if (valueEl) valueEl.textContent = value.toFixed(4);
         };
 
         const tuningHeading = document.createElement('h4');
