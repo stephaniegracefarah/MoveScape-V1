@@ -2,10 +2,18 @@ import { describe, expect, it } from 'vitest';
 import type { MovementParams } from '../../adapters/movement-params';
 import { createLabeledStream } from '../../world/labeled-stream';
 import { createWorld, type WorldOverrides } from '../../world/world';
+import type { SceneElement } from '../style-renderer';
 import { angleDifference, growthStepFor } from './branch';
 import { createBotanicalInternal, createBotanicalStyle } from './botanical';
 import { BOTANICAL_PALETTES } from './palettes';
 import { DEFAULT_BOTANICAL_TUNING_CONFIG } from './tuning-config';
+
+/** botanical.ts's buildScene() only ever pushes 'circle' elements (M4x doesn't
+ * yet convert branches to strokes) -- this narrows the union so tests can
+ * read .x/.y off scene elements without a widened-type compile error. */
+function circlePositions(elements: SceneElement[]): { x: number; y: number }[] {
+  return elements.filter((e): e is Extract<SceneElement, { kind: 'circle' }> => e.kind === 'circle');
+}
 
 function makeParams(overrides: Partial<MovementParams> = {}): MovementParams {
   return { v: 1, expansion: 0.5, speed: 0.5, symmetry: 0.5, ...overrides };
@@ -203,8 +211,8 @@ describe('createBotanicalStyle — expansion widens spatial spread', () => {
     runTicks(low, 400, 200, lowParamsAt);
     runTicks(high, 400, 200, highParamsAt);
 
-    const lowSpread = boundingBoxSpread(low.scene().elements);
-    const highSpread = boundingBoxSpread(high.scene().elements);
+    const lowSpread = boundingBoxSpread(circlePositions(low.scene().elements));
+    const highSpread = boundingBoxSpread(circlePositions(high.scene().elements));
 
     expect(highSpread).toBeGreaterThan(lowSpread);
   });

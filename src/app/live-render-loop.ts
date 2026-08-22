@@ -13,6 +13,7 @@
  * doesn't keep quietly growing from stale held params.
  */
 import type { MovementParams, MovementSample } from '../adapters/movement-params';
+import { renderPaperGround } from '../compositor/paper-ground';
 import { renderScene, type CanvasLike, type CanvasSize } from '../compositor/render-scene';
 import { recordSample } from '../engine/recording';
 import { advanceTicks, SIMULATION_TICK_MS } from '../engine/replay';
@@ -70,6 +71,7 @@ export function createLiveRenderLoop(
       }
     }
 
+    renderPaperGround(ctx, canvasSize, world.worldSeed);
     renderScene(ctx, style.scene(), canvasSize);
     rafHandle = requestAnimationFrame(frame);
   }

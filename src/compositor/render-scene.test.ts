@@ -6,16 +6,26 @@ import { renderScene, type CanvasLike, type CanvasSize } from './render-scene';
 // assert both "what was drawn" and "in what order" without a real canvas.
 type RecordedCall =
   | { method: 'clearRect'; args: [number, number, number, number] }
+  | { method: 'fillRect'; args: [number, number, number, number] }
   | { method: 'setGlobalAlpha'; args: [number] }
   | { method: 'setFillStyle'; args: [string] }
+  | { method: 'setStrokeStyle'; args: [string] }
+  | { method: 'setLineWidth'; args: [number] }
+  | { method: 'setLineCap'; args: ['butt' | 'round' | 'square'] }
   | { method: 'beginPath'; args: [] }
   | { method: 'arc'; args: [number, number, number, number, number] }
-  | { method: 'fill'; args: [] };
+  | { method: 'moveTo'; args: [number, number] }
+  | { method: 'lineTo'; args: [number, number] }
+  | { method: 'fill'; args: [] }
+  | { method: 'stroke'; args: [] };
 
 function createMockCanvas(): CanvasLike & { calls: RecordedCall[] } {
   const calls: RecordedCall[] = [];
   let fillStyle = '';
+  let strokeStyle = '';
   let globalAlpha = 1;
+  let lineWidth = 1;
+  let lineCap: 'butt' | 'round' | 'square' = 'butt';
 
   return {
     calls,
@@ -26,6 +36,13 @@ function createMockCanvas(): CanvasLike & { calls: RecordedCall[] } {
       fillStyle = value;
       calls.push({ method: 'setFillStyle', args: [value] });
     },
+    get strokeStyle() {
+      return strokeStyle;
+    },
+    set strokeStyle(value: string) {
+      strokeStyle = value;
+      calls.push({ method: 'setStrokeStyle', args: [value] });
+    },
     get globalAlpha() {
       return globalAlpha;
     },
@@ -33,8 +50,25 @@ function createMockCanvas(): CanvasLike & { calls: RecordedCall[] } {
       globalAlpha = value;
       calls.push({ method: 'setGlobalAlpha', args: [value] });
     },
+    get lineWidth() {
+      return lineWidth;
+    },
+    set lineWidth(value: number) {
+      lineWidth = value;
+      calls.push({ method: 'setLineWidth', args: [value] });
+    },
+    get lineCap() {
+      return lineCap;
+    },
+    set lineCap(value: 'butt' | 'round' | 'square') {
+      lineCap = value;
+      calls.push({ method: 'setLineCap', args: [value] });
+    },
     clearRect(x, y, w, h) {
       calls.push({ method: 'clearRect', args: [x, y, w, h] });
+    },
+    fillRect(x, y, w, h) {
+      calls.push({ method: 'fillRect', args: [x, y, w, h] });
     },
     beginPath() {
       calls.push({ method: 'beginPath', args: [] });
@@ -42,14 +76,24 @@ function createMockCanvas(): CanvasLike & { calls: RecordedCall[] } {
     arc(x, y, radius, startAngle, endAngle) {
       calls.push({ method: 'arc', args: [x, y, radius, startAngle, endAngle] });
     },
+    moveTo(x, y) {
+      calls.push({ method: 'moveTo', args: [x, y] });
+    },
+    lineTo(x, y) {
+      calls.push({ method: 'lineTo', args: [x, y] });
+    },
     fill() {
       calls.push({ method: 'fill', args: [] });
+    },
+    stroke() {
+      calls.push({ method: 'stroke', args: [] });
     },
   };
 }
 
 function makeElement(overrides: Partial<SceneElement> = {}): SceneElement {
   return {
+    kind: 'circle',
     z: 0,
     x: 0.5,
     y: 0.5,
@@ -57,24 +101,10 @@ function makeElement(overrides: Partial<SceneElement> = {}): SceneElement {
     color: 'red',
     opacity: 1,
     ...overrides,
-  };
+  } as SceneElement;
 }
 
 const CANVAS_SIZE: CanvasSize = { width: 200, height: 100 };
-
-describe('renderScene — clearing', () => {
-  it('clears the full canvas bounds once, before any drawing', () => {
-    const canvas = createMockCanvas();
-    const scene: Scene = { elements: [makeElement()] };
-
-    renderScene(canvas, scene, CANVAS_SIZE);
-
-    const clearCalls = canvas.calls.filter((c) => c.method === 'clearRect');
-    expect(clearCalls).toHaveLength(1);
-    expect(clearCalls[0]).toEqual({ method: 'clearRect', args: [0, 0, 200, 100] });
-    expect(canvas.calls[0]).toEqual(clearCalls[0]);
-  });
-});
 
 describe('renderScene — depth ordering', () => {
   it('draws farthest (largest z) first, regardless of input order', () => {
@@ -93,6 +123,35 @@ describe('renderScene — depth ordering', () => {
       .filter((c) => c.method === 'setFillStyle')
       .map((c) => c.args[0]);
     expect(paintedColors).toEqual(['far', 'mid', 'near']);
+  });
+
+  it('sorts mixed circle and stroke elements farthest-z-first together', () => {
+    const canvas = createMockCanvas();
+    const scene: Scene = {
+      elements: [
+        makeElement({ z: 0.2, color: 'near-circle' }),
+        {
+          kind: 'stroke',
+          z: 0.9,
+          points: [
+            { x: 0.1, y: 0.1 },
+            { x: 0.5, y: 0.5 },
+          ],
+          baseWidth: 0.05,
+          taperExponent: 1,
+          color: 'far-stroke',
+          opacity: 1,
+        },
+        makeElement({ z: 0.5, color: 'mid-circle' }),
+      ],
+    };
+
+    renderScene(canvas, scene, CANVAS_SIZE);
+
+    const paintedColors = canvas.calls
+      .filter((c) => c.method === 'setFillStyle' || c.method === 'setStrokeStyle')
+      .map((c) => c.args[0]);
+    expect(paintedColors).toEqual(['far-stroke', 'mid-circle', 'near-circle']);
   });
 });
 
@@ -146,6 +205,123 @@ describe('renderScene — depth fade formula', () => {
     const arcCall = canvas.calls.find((c) => c.method === 'arc');
     expect(arcCall?.args[0]).toBeCloseTo(50, 10); // 0.25 * 200
     expect(arcCall?.args[1]).toBeCloseTo(75, 10); // 0.75 * 100
+  });
+});
+
+describe('renderScene — circle ring', () => {
+  it('a circle with ringColor produces an extra stroke() call beyond its fill()', () => {
+    const canvas = createMockCanvas();
+    const scene: Scene = {
+      elements: [makeElement({ ringColor: 'gold', ringOpacity: 0.5 })],
+    };
+
+    renderScene(canvas, scene, CANVAS_SIZE);
+
+    const fillCalls = canvas.calls.filter((c) => c.method === 'fill');
+    const strokeCalls = canvas.calls.filter((c) => c.method === 'stroke');
+    expect(fillCalls).toHaveLength(1);
+    expect(strokeCalls).toHaveLength(1);
+
+    const strokeStyleCall = canvas.calls.find((c) => c.method === 'setStrokeStyle');
+    expect(strokeStyleCall?.args[0]).toBe('gold');
+    const lineWidthCall = canvas.calls.find((c) => c.method === 'setLineWidth');
+    expect(lineWidthCall?.args[0]).toBe(1);
+  });
+
+  it('a circle without ringColor produces no stroke() call', () => {
+    const canvas = createMockCanvas();
+    const scene: Scene = { elements: [makeElement()] };
+
+    renderScene(canvas, scene, CANVAS_SIZE);
+
+    const strokeCalls = canvas.calls.filter((c) => c.method === 'stroke');
+    expect(strokeCalls).toHaveLength(0);
+  });
+});
+
+describe('renderScene — stroke elements', () => {
+  it('renders via moveTo/lineTo/stroke, not arc/fill', () => {
+    const canvas = createMockCanvas();
+    const scene: Scene = {
+      elements: [
+        {
+          kind: 'stroke',
+          z: 0,
+          points: [
+            { x: 0.1, y: 0.1 },
+            { x: 0.5, y: 0.5 },
+            { x: 0.9, y: 0.1 },
+          ],
+          baseWidth: 0.05,
+          taperExponent: 1,
+          color: 'blue',
+          opacity: 1,
+        },
+      ],
+    };
+
+    renderScene(canvas, scene, CANVAS_SIZE);
+
+    expect(canvas.calls.some((c) => c.method === 'arc')).toBe(false);
+    expect(canvas.calls.some((c) => c.method === 'fill')).toBe(false);
+    expect(canvas.calls.filter((c) => c.method === 'moveTo')).toHaveLength(2);
+    expect(canvas.calls.filter((c) => c.method === 'lineTo')).toHaveLength(2);
+    expect(canvas.calls.filter((c) => c.method === 'stroke')).toHaveLength(2);
+  });
+
+  it('tapers width: the first segment is wider than the last for taperExponent > 0', () => {
+    const canvas = createMockCanvas();
+    const scene: Scene = {
+      elements: [
+        {
+          kind: 'stroke',
+          z: 0,
+          points: [
+            { x: 0.1, y: 0.1 },
+            { x: 0.4, y: 0.4 },
+            { x: 0.7, y: 0.7 },
+            { x: 0.9, y: 0.9 },
+          ],
+          baseWidth: 0.1,
+          taperExponent: 2,
+          color: 'green',
+          opacity: 1,
+        },
+      ],
+    };
+
+    renderScene(canvas, scene, CANVAS_SIZE);
+
+    const lineWidths = canvas.calls
+      .filter((c) => c.method === 'setLineWidth')
+      .map((c) => c.args[0]);
+    expect(lineWidths.length).toBeGreaterThanOrEqual(3);
+    expect(lineWidths[0]!).toBeGreaterThan(lineWidths[lineWidths.length - 1]!);
+  });
+
+  it('clamps stroke width to a minimum of 0.5px', () => {
+    const canvas = createMockCanvas();
+    const scene: Scene = {
+      elements: [
+        {
+          kind: 'stroke',
+          z: 0,
+          points: [
+            { x: 0, y: 0 },
+            { x: 1, y: 1 },
+          ],
+          baseWidth: 0.00001,
+          taperExponent: 1,
+          color: 'blue',
+          opacity: 1,
+        },
+      ],
+    };
+
+    renderScene(canvas, scene, CANVAS_SIZE);
+
+    const lineWidthCall = canvas.calls.find((c) => c.method === 'setLineWidth');
+    expect(lineWidthCall?.args[0]).toBeGreaterThanOrEqual(0.5);
   });
 });
 

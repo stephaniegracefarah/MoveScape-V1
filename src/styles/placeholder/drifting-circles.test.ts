@@ -85,8 +85,11 @@ describe('createDriftingCirclesStyle — movement responsiveness', () => {
     styleLow.step(makeParams({ expansion: 0.1 }), 1234, 16);
     styleHigh.step(makeParams({ expansion: 0.9 }), 1234, 16);
 
-    const low = styleLow.scene().elements;
-    const high = styleHigh.scene().elements;
+    // drifting-circles.ts's step() only ever produces 'circle' elements, so
+    // this cast is safe -- narrows the widened SceneElement union back to
+    // the shape this test actually reads (.x/.y).
+    const low = styleLow.scene().elements as { x: number; y: number }[];
+    const high = styleHigh.scene().elements as { x: number; y: number }[];
     expect(low.length).toBe(high.length);
 
     const anyDifferent = low.some((element, i) => {
