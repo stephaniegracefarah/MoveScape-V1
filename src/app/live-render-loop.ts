@@ -17,6 +17,7 @@ import { renderPaperGround } from '../compositor/paper-ground';
 import { renderScene, type CanvasLike, type CanvasSize } from '../compositor/render-scene';
 import { recordSample } from '../engine/recording';
 import { advanceTicks, SIMULATION_TICK_MS } from '../engine/replay';
+import { createSessionParamsAccumulator } from '../engine/session-params';
 import type { StyleRenderer } from '../styles/style-renderer';
 import type { World } from '../world/world';
 
@@ -41,6 +42,7 @@ export function createLiveRenderLoop(
   let lastFrameTimestamp: number | null = null;
   let fromTick = 0;
   let fromSampleIndex = 0;
+  const accumulator = createSessionParamsAccumulator();
   let stopped = false;
   let rafHandle: number | null = null;
 
@@ -66,7 +68,7 @@ export function createLiveRenderLoop(
     if (recording.length > 0) {
       const toTick = Math.floor(sessionElapsedMs / SIMULATION_TICK_MS);
       if (toTick > fromTick) {
-        fromSampleIndex = advanceTicks(style, recording, fromTick, toTick, fromSampleIndex);
+        fromSampleIndex = advanceTicks(style, recording, fromTick, toTick, fromSampleIndex, accumulator);
         fromTick = toTick;
       }
     }

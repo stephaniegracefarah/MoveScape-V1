@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { MovementParams } from '../../adapters/movement-params';
+import { INITIAL_SESSION_PARAMS } from '../../engine/session-params';
 import { createWorld } from '../../world/world';
 import { createDriftingCirclesStyle } from './drifting-circles';
 
@@ -7,13 +8,14 @@ function makeParams(overrides: Partial<MovementParams> = {}): MovementParams {
   return { v: 1, expansion: 0.5, speed: 0.5, symmetry: 0.5, ...overrides };
 }
 
-// A representative sequence of (params, time, dt) calls, shared across
-// determinism tests so both instances see the exact same driving sequence.
+// A representative sequence of (params, sessionParams, time, dt) calls,
+// shared across determinism tests so both instances see the exact same
+// driving sequence.
 function runSequence(style: ReturnType<typeof createDriftingCirclesStyle>, params: MovementParams): void {
-  style.step(params, 0, 16);
-  style.step(params, 16, 16);
-  style.step(params, 32.5, 16.5);
-  style.step(params, 500, 16);
+  style.step(params, INITIAL_SESSION_PARAMS, 0, 16);
+  style.step(params, INITIAL_SESSION_PARAMS, 16, 16);
+  style.step(params, INITIAL_SESSION_PARAMS, 32.5, 16.5);
+  style.step(params, INITIAL_SESSION_PARAMS, 500, 16);
 }
 
 describe('createDriftingCirclesStyle — worldKnobs', () => {
@@ -48,7 +50,7 @@ describe('createDriftingCirclesStyle — determinism (invariant 4)', () => {
   it('scene() returns a fresh array each call, not a shared mutable reference', () => {
     const style = createDriftingCirclesStyle();
     style.init(createWorld('same-seed', 0));
-    style.step(makeParams(), 0, 16);
+    style.step(makeParams(), INITIAL_SESSION_PARAMS, 0, 16);
 
     const first = style.scene();
     first.elements.pop();
@@ -65,8 +67,8 @@ describe('createDriftingCirclesStyle — seed variation', () => {
     styleB.init(createWorld('world-seed-b', 0));
 
     const params = makeParams();
-    styleA.step(params, 0, 16);
-    styleB.step(params, 0, 16);
+    styleA.step(params, INITIAL_SESSION_PARAMS, 0, 16);
+    styleB.step(params, INITIAL_SESSION_PARAMS, 0, 16);
 
     expect(styleA.scene()).not.toEqual(styleB.scene());
   });
@@ -82,8 +84,8 @@ describe('createDriftingCirclesStyle — movement responsiveness', () => {
 
     // A time offset where sin/cos aren't at a degenerate zero, so a change
     // in amplitude (driven by expansion) actually moves the circle.
-    styleLow.step(makeParams({ expansion: 0.1 }), 1234, 16);
-    styleHigh.step(makeParams({ expansion: 0.9 }), 1234, 16);
+    styleLow.step(makeParams({ expansion: 0.1 }), INITIAL_SESSION_PARAMS, 1234, 16);
+    styleHigh.step(makeParams({ expansion: 0.9 }), INITIAL_SESSION_PARAMS, 1234, 16);
 
     // drifting-circles.ts's step() only ever produces 'circle' elements, so
     // this cast is safe -- narrows the widened SceneElement union back to

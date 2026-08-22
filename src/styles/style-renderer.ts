@@ -3,6 +3,7 @@
  * geometry; a separate compositor turns scenes into pixels.
  */
 import type { MovementParams } from '../adapters/movement-params';
+import type { SessionParams } from '../engine/session-params';
 import type { World } from '../world/world';
 
 export type AestheticFamily = 'organic' | 'cosmic' | 'ink';
@@ -62,7 +63,7 @@ export interface StyleRenderer {
   worldKnobs(): string[];
   init(world: World): void;
   /** Advance the living system one fixed tick (invariant 4). */
-  step(params: MovementParams, time: number, dt: number): void;
+  step(params: MovementParams, sessionParams: SessionParams, time: number, dt: number): void;
   scene(): Scene;
   /** Called at session end; returns the final scene. */
   finish(): Scene;

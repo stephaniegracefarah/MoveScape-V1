@@ -4,6 +4,7 @@
  * interesting.
  */
 import type { MovementParams } from '../../adapters/movement-params';
+import type { SessionParams } from '../../engine/session-params';
 import { clamp01 } from '../../shared/math';
 import { createLabeledStream } from '../../world/labeled-stream';
 import type { World } from '../../world/world';
@@ -77,7 +78,7 @@ export function createDriftingCirclesStyle(): StyleRenderer {
     // Invariant 4: a pure function of stored circle state plus (params,
     // time) -- no Math.random, no Date.now/performance.now, so identical
     // call sequences always reproduce the identical scene.
-    step(params: MovementParams, time: number): void {
+    step(params: MovementParams, _sessionParams: SessionParams, time: number): void {
       const expansionInfluence = 0.3 + params.expansion;
       const opacity = clamp01(BASE_OPACITY * (0.6 + params.speed * 0.4));
 

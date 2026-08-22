@@ -11,6 +11,7 @@ import { renderScene } from '../compositor/render-scene';
 import { cyrb53Bytes } from '../shared/hash';
 import type { MovementRecording } from './recording';
 import { advanceTicks, replay, SIMULATION_TICK_MS } from './replay';
+import { createSessionParamsAccumulator } from './session-params';
 import { createBotanicalStyle } from '../styles/botanical/botanical';
 import type { Scene } from '../styles/style-renderer';
 import { createWorld, type WorldOverrides } from '../world/world';
@@ -48,10 +49,11 @@ function replayChunked(worldSeed: string): Scene {
   style.init(world);
 
   const totalTicks = Math.ceil(DURATION_MS / SIMULATION_TICK_MS);
-  let sampleIndex = advanceTicks(style, RECORDING, 0, 37, 0);
-  sampleIndex = advanceTicks(style, RECORDING, 37, 211, sampleIndex);
-  sampleIndex = advanceTicks(style, RECORDING, 211, 500, sampleIndex);
-  advanceTicks(style, RECORDING, 500, totalTicks, sampleIndex);
+  const accumulator = createSessionParamsAccumulator();
+  let sampleIndex = advanceTicks(style, RECORDING, 0, 37, 0, accumulator);
+  sampleIndex = advanceTicks(style, RECORDING, 37, 211, sampleIndex, accumulator);
+  sampleIndex = advanceTicks(style, RECORDING, 211, 500, sampleIndex, accumulator);
+  advanceTicks(style, RECORDING, 500, totalTicks, sampleIndex, accumulator);
   return style.finish();
 }
 
