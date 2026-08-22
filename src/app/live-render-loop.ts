@@ -11,10 +11,19 @@
  * loop's own notion of elapsed time (`sessionElapsedMs`) simply stops
  * advancing while paused — ticks freeze along with it, so a paused session
  * doesn't keep quietly growing from stale held params.
+ *
+ * The Scroll (M5 Stage 2, spec Part 3 "Composition and canvas"): the canvas
+ * has a fixed height and grows rightward as the piece grows. This module
+ * owns that growth -- every frame, it asks the style for its current scene,
+ * computes the canvas size needed to fit it (compositor/render-scene.ts's
+ * computeCanvasSize), and calls the caller-supplied `resizeCanvas` before
+ * painting. `resizeCanvas` is injected (rather than this module reaching
+ * into a real HTMLCanvasElement directly) so it stays testable without a
+ * DOM, the same reasoning `ctx: CanvasLike` already uses.
  */
 import type { MovementParams, MovementSample } from '../adapters/movement-params';
 import { renderPaperGround } from '../compositor/paper-ground';
-import { renderScene, type CanvasLike, type CanvasSize } from '../compositor/render-scene';
+import { computeCanvasSize, renderScene, type CanvasLike, type CanvasSize } from '../compositor/render-scene';
 import { recordSample } from '../engine/recording';
 import { advanceTicks, SIMULATION_TICK_MS } from '../engine/replay';
 import { createSessionParamsAccumulator } from '../engine/session-params';
@@ -32,7 +41,10 @@ export function createLiveRenderLoop(
   style: StyleRenderer,
   world: World,
   ctx: CanvasLike,
-  canvasSize: CanvasSize,
+  /** The canvas's fixed height in pixels -- also the world-to-pixel scale (render-scene.ts's worldUnitPx). Never changes for the life of a session. */
+  fixedHeightPx: number,
+  /** Called every frame with the size the canvas needs to be to fit the current scene, before painting. The caller applies it to the real canvas (e.g. setting canvas.width/height). */
+  resizeCanvas: (size: CanvasSize) => void,
   isPaused: () => boolean,
 ): LiveRenderLoop {
   style.init(world);
@@ -73,8 +85,11 @@ export function createLiveRenderLoop(
       }
     }
 
+    const scene = style.scene();
+    const canvasSize = computeCanvasSize(scene, fixedHeightPx);
+    resizeCanvas(canvasSize);
     renderPaperGround(ctx, canvasSize, world.worldSeed);
-    renderScene(ctx, style.scene(), canvasSize);
+    renderScene(ctx, scene, canvasSize);
     rafHandle = requestAnimationFrame(frame);
   }
 

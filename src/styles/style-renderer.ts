@@ -10,20 +10,27 @@ export type AestheticFamily = 'organic' | 'cosmic' | 'ink';
 
 /**
  * One element of a style's scene. Every element carries depth (invariant 8).
- * Position/size are normalized 0-1 (canvas convention, resolution-independent
- * -- the compositor scales to actual canvas size), matching MovementParams'
- * own normalization convention. SceneElement is a discriminated union on
- * `kind`, so the compositor can render circles and tapered strokes with
- * distinct pixel logic while styles keep composing scenes as flat arrays.
+ *
+ * Position convention (spec Part 3, "Composition and canvas" -- "the
+ * Scroll"): `y` is normalized 0-1, a fraction of the canvas's fixed height,
+ * matching MovementParams' own normalization convention. `x` is different:
+ * it is in *world units*, where 1 world unit = 1 canvas height in pixels --
+ * unbounded rightward as a piece grows (0, 2, 20, ...), NOT normalized 0-1
+ * and NOT related to the canvas's width. The compositor (render-scene.ts)
+ * scales both axes by the canvas's fixed height; the canvas itself is
+ * resized to fit however far content has grown. SceneElement is a
+ * discriminated union on `kind`, so the compositor can render circles and
+ * tapered strokes with distinct pixel logic while styles keep composing
+ * scenes as flat arrays.
  */
 export interface CircleElement {
   kind: 'circle';
   /** Depth coordinate: 0 = nearest, 1 = farthest. */
   z: number;
-  /** Normalized position, 0-1 per axis; (0,0) = top-left. */
+  /** Position in world units on x (1 unit = 1 canvas height in pixels, unbounded rightward), normalized 0-1 on y (fraction of the canvas's fixed height); (0,0) = top-left. */
   x: number;
   y: number;
-  /** Base radius as a fraction of the canvas's shorter side (0-1), before depth scaling. */
+  /** Base radius as a fraction of the canvas's fixed height (the world-unit scale), before depth scaling. */
   radius: number;
   /** CSS color string. The compositor applies depth fade via globalAlpha and never reinterprets an alpha channel embedded here. */
   color: string;
@@ -39,9 +46,9 @@ export interface StrokeElement {
   kind: 'stroke';
   /** Depth coordinate: 0 = nearest, 1 = farthest. */
   z: number;
-  /** Ordered polyline, normalized 0-1 per axis, same convention as CircleElement.x/y. Must have at least 2 points. */
+  /** Ordered polyline; each point's x is in world units (1 unit = 1 canvas height in pixels, unbounded rightward), y is normalized 0-1 (fraction of the canvas's fixed height) -- same convention as CircleElement.x/y. Must have at least 2 points. */
   points: { x: number; y: number }[];
-  /** Width at the stroke's origin (t=0), normalized as a fraction of the canvas's shorter side, before depth scaling -- same convention as CircleElement.radius. */
+  /** Width at the stroke's origin (t=0), as a fraction of the canvas's fixed height (the world-unit scale), before depth scaling -- same convention as CircleElement.radius. */
   baseWidth: number;
   /** Exponent in width(t) = baseWidth * (1-t)^taperExponent, where t is the point's index fraction along the polyline (i / (points.length - 1)), matching docs/styles/botanical.md section 1's taper formula. */
   taperExponent: number;

@@ -12,12 +12,18 @@ import { createPauseGate } from './app/pause-gate';
 import { createActivationTokenSource } from './app/activation-token';
 import { getOrCreateUserId } from './app/user-identity';
 import { createLiveRenderLoop, type LiveRenderLoop } from './app/live-render-loop';
-import type { CanvasLike } from './compositor/render-scene';
+import type { CanvasLike, CanvasSize } from './compositor/render-scene';
 import { createWorld, type World, type WorldOverrides } from './world/world';
 import { deriveWorldSeed, formatLocalDate } from './world/seed';
 import { createBotanicalStyle } from './styles/botanical/botanical';
 import { BOTANICAL_PALETTE_PRESETS, type BotanicalPaletteId } from './styles/botanical/palettes';
 import { DEFAULT_BOTANICAL_TUNING_CONFIG, type BotanicalTuningConfig } from './styles/botanical/tuning-config';
+
+// The Scroll (M5 Stage 2, spec Part 3 "Composition and canvas"): the canvas
+// has this fixed height and grows rightward as the piece grows -- see
+// live-render-loop.ts's resizeCanvas callback below, which sets the real
+// canvas element's width every frame to fit the current scene.
+const CANVAS_HEIGHT_PX = 480;
 
 const app = document.querySelector<HTMLDivElement>('#app');
 
@@ -36,7 +42,9 @@ if (app) {
         <span id="ms-activating" class="ms-activating" hidden>Starting…</span>
       </div>
       <div class="ms-controls" id="ms-palette-controls"></div>
-      <canvas id="ms-canvas" class="ms-canvas" width="720" height="480"></canvas>
+      <div class="ms-canvas-wrap" id="ms-canvas-wrap">
+        <canvas id="ms-canvas" class="ms-canvas" width="${CANVAS_HEIGHT_PX}" height="${CANVAS_HEIGHT_PX}"></canvas>
+      </div>
       <p id="ms-error" class="ms-error" hidden></p>
       <div id="ms-readout"></div>
       <div id="ms-preview"></div>
@@ -56,8 +64,9 @@ if (app) {
     .ms-controls button:disabled { opacity: 0.5; cursor: default; }
     .ms-activating { font-size: 12px; opacity: 0.75; align-self: center; }
     .ms-error { color: #ff8080; font-size: 13px; }
-    .ms-canvas { display: block; width: 100%; max-width: 720px; height: auto;
-      aspect-ratio: 3 / 2; background: #f7f0e3; border-radius: 8px; margin: 4px 0 16px; }
+    .ms-canvas-wrap { overflow-x: auto; max-width: 100%; border-radius: 8px;
+      margin: 4px 0 16px; background: #f7f0e3; }
+    .ms-canvas { display: block; height: ${CANVAS_HEIGHT_PX}px; width: auto; }
     #ms-readout.ms-paused { opacity: 0.55; }
     .ms-preview-video { display: block; margin-top: 12px; max-width: 320px; width: 100%;
       border-radius: 8px; transform: scaleX(-1); background: #000; }
@@ -74,6 +83,7 @@ if (app) {
   const stopBtnRef = app.querySelector<HTMLButtonElement>('#ms-stop');
   const activatingElRef = app.querySelector<HTMLSpanElement>('#ms-activating');
   const canvasElRef = app.querySelector<HTMLCanvasElement>('#ms-canvas');
+  const canvasWrapElRef = app.querySelector<HTMLDivElement>('#ms-canvas-wrap');
   const paletteControlsElRef = app.querySelector<HTMLDivElement>('#ms-palette-controls');
 
   if (
@@ -87,6 +97,7 @@ if (app) {
     stopBtnRef &&
     activatingElRef &&
     canvasElRef &&
+    canvasWrapElRef &&
     paletteControlsElRef
   ) {
     // Re-bind to fresh consts so their (non-null) type is fixed at this
@@ -103,6 +114,7 @@ if (app) {
     const stopBtn = stopBtnRef;
     const activatingEl = activatingElRef;
     const canvasEl = canvasElRef;
+    const canvasWrapEl = canvasWrapElRef;
     const paletteControlsEl = paletteControlsElRef;
     // getContext('2d') is effectively never null for a freshly-created
     // <canvas> in a real browser; guarded rather than asserted so a
@@ -188,15 +200,38 @@ if (app) {
         // app ever assigns, so the cast is safe (same pattern already used
         // in src/engine/pixel-determinism.test.ts for @napi-rs/canvas).
         canvasCtx as unknown as CanvasLike,
-        { width: canvasEl.width, height: canvasEl.height },
+        CANVAS_HEIGHT_PX,
+        resizeCanvas,
         () => pauseGate.isPaused(),
       );
+    }
+
+    /**
+     * The Scroll (M5 Stage 2): called every frame by the live loop with the
+     * size the canvas needs to be to fit the current scene. Resizing a
+     * canvas element's width/height attributes clears its pixel contents,
+     * but that's harmless here -- the live loop already does a full
+     * clear-and-redraw (paper ground + renderScene) every frame regardless,
+     * so nothing relies on pixels persisting across a resize. Auto-scrolls
+     * the wrapper so the growth front (the canvas's right edge) stays in
+     * view as the canvas widens, rather than leaving the viewport parked at
+     * whatever it was scrolled to before the resize.
+     */
+    function resizeCanvas(size: CanvasSize): void {
+      canvasEl.width = size.width;
+      canvasEl.height = size.height;
+      canvasWrapEl.scrollLeft = canvasWrapEl.scrollWidth;
     }
 
     function stopLiveLoop(): void {
       liveLoop?.stop();
       liveLoop = null;
       canvasCtx?.clearRect(0, 0, canvasEl.width, canvasEl.height);
+      // Reset to the idle default size rather than leaving a session's full
+      // grown width on screen once it's stopped.
+      canvasEl.width = CANVAS_HEIGHT_PX;
+      canvasEl.height = CANVAS_HEIGHT_PX;
+      canvasWrapEl.scrollLeft = 0;
     }
 
     function showError(message: string): void {

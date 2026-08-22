@@ -3,6 +3,15 @@
  * loop, nothing fancier. No scene graphs, no per-layer accumulate/redraw
  * architecture -- that's deferred to whichever future milestone (Botanical)
  * actually needs it.
+ *
+ * Coordinate convention (spec Part 3, "Composition and canvas" -- "the
+ * Scroll"): a SceneElement's `y` is normalized 0-1, a fraction of the
+ * canvas's fixed height. Its `x` is different: it is in *world units*,
+ * where 1 world unit = 1 canvas height in pixels. `x` is unbounded
+ * rightward as a piece grows (0, 2, 20, whatever) and is NOT related to
+ * canvasSize.width at all -- the canvas is expected to be resized (by the
+ * caller, via computeCanvasSize below) to fit however far content has
+ * grown, not the other way around.
  */
 import { clamp01 } from '../shared/math';
 import type { Scene } from '../styles/style-renderer';
@@ -31,6 +40,20 @@ export interface CanvasLike {
   stroke(): void;
 }
 
+/**
+ * The pixel dimensions renderScene paints into.
+ *
+ * `height` is the fixed, permanent world-to-pixel scale (1 world unit = 1
+ * canvas height in pixels, see the coordinate-convention note above) -- it
+ * does not change as a piece grows, which is exactly what makes "permanent
+ * ink" (docs/styles/botanical.md section 7) possible: a mark's pixel
+ * position, once drawn, never moves.
+ *
+ * `width` is derived from content and unbounded: it is however wide the
+ * canvas currently needs to be to fit everything drawn so far, typically
+ * computed by computeCanvasSize below and grown by the caller as the piece
+ * expands rightward. It never participates in position or size scaling.
+ */
 export interface CanvasSize {
   width: number;
   height: number;
@@ -58,18 +81,23 @@ const MIN_STROKE_WIDTH_PX = 0.5;
 export function renderScene(ctx: CanvasLike, scene: Scene, canvasSize: CanvasSize): void {
   // Sort a copy -- never mutate the style's own scene.elements array.
   const farthestFirst = [...scene.elements].sort((a, b) => b.z - a.z);
-  const shorterSide = Math.min(canvasSize.width, canvasSize.height);
+  // The fixed world-to-pixel scale: 1 world unit = 1 canvas height in
+  // pixels. Deliberately keyed to height alone, never width -- width is
+  // derived from content and grows over a session, so scaling by it would
+  // make every existing mark's pixel position drift each time the canvas
+  // widens (breaking "permanent ink", docs/styles/botanical.md section 7).
+  const worldUnitPx = canvasSize.height;
 
   for (const element of farthestFirst) {
     const displayOpacity = clamp01(element.opacity * (1 - element.z * DEPTH_OPACITY_FALLOFF));
 
     if (element.kind === 'circle') {
-      const displayRadiusPx = element.radius * (1 - element.z * DEPTH_RADIUS_FALLOFF) * shorterSide;
+      const displayRadiusPx = element.radius * (1 - element.z * DEPTH_RADIUS_FALLOFF) * worldUnitPx;
 
       ctx.globalAlpha = displayOpacity;
       ctx.fillStyle = element.color;
       ctx.beginPath();
-      ctx.arc(element.x * canvasSize.width, element.y * canvasSize.height, displayRadiusPx, 0, 2 * Math.PI);
+      ctx.arc(element.x * worldUnitPx, element.y * canvasSize.height, displayRadiusPx, 0, 2 * Math.PI);
       ctx.fill();
 
       if (element.ringColor !== undefined) {
@@ -79,11 +107,11 @@ export function renderScene(ctx: CanvasLike, scene: Scene, canvasSize: CanvasSiz
         ctx.strokeStyle = element.ringColor;
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.arc(element.x * canvasSize.width, element.y * canvasSize.height, displayRadiusPx, 0, 2 * Math.PI);
+        ctx.arc(element.x * worldUnitPx, element.y * canvasSize.height, displayRadiusPx, 0, 2 * Math.PI);
         ctx.stroke();
       }
     } else {
-      const pixelPoints = element.points.map((p) => ({ x: p.x * canvasSize.width, y: p.y * canvasSize.height }));
+      const pixelPoints = element.points.map((p) => ({ x: p.x * worldUnitPx, y: p.y * canvasSize.height }));
       const lastIndex = pixelPoints.length - 1;
 
       ctx.globalAlpha = displayOpacity;
@@ -98,7 +126,7 @@ export function renderScene(ctx: CanvasLike, scene: Scene, canvasSize: CanvasSiz
         const segmentWidth = (widthStart + widthEnd) / 2;
         const displayWidthPx = Math.max(
           MIN_STROKE_WIDTH_PX,
-          segmentWidth * (1 - element.z * DEPTH_RADIUS_FALLOFF) * shorterSide,
+          segmentWidth * (1 - element.z * DEPTH_RADIUS_FALLOFF) * worldUnitPx,
         );
 
         const p0 = pixelPoints[i]!;
@@ -115,4 +143,33 @@ export function renderScene(ctx: CanvasLike, scene: Scene, canvasSize: CanvasSiz
 
   // Leave the context in a clean state for whatever draws next.
   ctx.globalAlpha = 1;
+}
+
+/** How far past the growth front to keep visible/exportable canvas, in world units (1 unit = 1 canvas height). */
+export const WORLD_WIDTH_PADDING_UNITS = 0.3;
+/** The canvas never starts (or shrinks to) narrower than it is tall. */
+export const MIN_WORLD_WIDTH_UNITS = 1;
+
+/**
+ * Computes the canvas pixel size needed to fit `scene` at a fixed height
+ * of `heightPx`. Finds the farthest-right point any element reaches (a
+ * circle's x + radius; a stroke's farthest point.x), in world units, and
+ * converts to a canvas width in pixels via the same worldUnitPx = heightPx
+ * scale renderScene itself uses -- so a Scene rendered through this
+ * computed CanvasSize always has room for everything in it, with a little
+ * padding past the growth front.
+ */
+export function computeCanvasSize(scene: Scene, heightPx: number): CanvasSize {
+  let maxX = 0;
+  for (const element of scene.elements) {
+    if (element.kind === 'circle') {
+      maxX = Math.max(maxX, element.x + element.radius);
+    } else {
+      for (const point of element.points) {
+        maxX = Math.max(maxX, point.x);
+      }
+    }
+  }
+  const worldWidthUnits = Math.max(MIN_WORLD_WIDTH_UNITS, maxX + WORLD_WIDTH_PADDING_UNITS);
+  return { width: Math.round(worldWidthUnits * heightPx), height: heightPx };
 }

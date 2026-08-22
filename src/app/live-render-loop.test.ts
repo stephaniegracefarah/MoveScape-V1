@@ -73,7 +73,7 @@ describe('createLiveRenderLoop — feed', () => {
   it('drops a sample whose elapsed time does not exceed the last recorded sample', () => {
     const raf = stubRaf();
     const { style } = createStubStyle();
-    const loop = createLiveRenderLoop(style, createStubWorld(), createStubCanvas(), { width: 10, height: 10 }, () => false);
+    const loop = createLiveRenderLoop(style, createStubWorld(), createStubCanvas(), 10, () => {}, () => false);
 
     // First frame establishes lastFrameTimestamp with no elapsed delta yet.
     raf.fireNextFrame(0);
@@ -81,6 +81,42 @@ describe('createLiveRenderLoop — feed', () => {
     // A second feed with no frame in between has the same sessionElapsedMs (0) --
     // must be dropped, not thrown.
     expect(() => loop.feed(PARAMS)).not.toThrow();
+
+    loop.stop();
+  });
+});
+
+describe('createLiveRenderLoop — the Scroll: dynamic canvas resizing', () => {
+  it('calls resizeCanvas every frame with a size that fits the style\'s current scene at the fixed height', () => {
+    const raf = stubRaf();
+    const resizeCalls: { width: number; height: number }[] = [];
+    const style: StyleRenderer = {
+      id: 'stub',
+      name: 'Stub',
+      aestheticFamily: 'organic',
+      worldKnobs: () => [],
+      init: () => {},
+      step: () => {},
+      scene: (): Scene => ({
+        elements: [{ kind: 'circle', z: 0, x: 2, y: 0.5, radius: 0.1, color: 'red', opacity: 1 }],
+      }),
+      finish: (): Scene => ({ elements: [] }),
+    };
+    const loop = createLiveRenderLoop(
+      style,
+      createStubWorld(),
+      createStubCanvas(),
+      100,
+      (size) => resizeCalls.push(size),
+      () => false,
+    );
+
+    raf.fireNextFrame(0);
+
+    expect(resizeCalls).toHaveLength(1);
+    // height is always the fixed 100; width fits x=2 + radius=0.1 + the
+    // 0.3-world-unit padding computeCanvasSize adds, i.e. (2.1 + 0.3) * 100.
+    expect(resizeCalls[0]).toEqual({ width: 240, height: 100 });
 
     loop.stop();
   });
@@ -95,7 +131,8 @@ describe('createLiveRenderLoop — pause freezes tick advancement', () => {
       style,
       createStubWorld(),
       createStubCanvas(),
-      { width: 10, height: 10 },
+      10,
+      () => {},
       () => paused,
     );
 

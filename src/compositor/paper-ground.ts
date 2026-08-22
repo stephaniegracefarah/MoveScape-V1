@@ -6,6 +6,18 @@
  * directories. Callers paint this *instead of* renderScene's old internal
  * clear (renderScene no longer clears -- see render-scene.ts), then call
  * renderScene on top to composite the actual scene.
+ *
+ * Note on positioning: this file has no concept of "world position" the
+ * way render-scene.ts's SceneElements do (see that file's coordinate
+ * convention doc comment). Its mottling/fine-grain texture positions are
+ * seeded once per `worldSeed` and drawn as fractions of whatever the
+ * current `canvasSize` is at repaint time -- it just fills whatever
+ * rectangle it's given. As the canvas widens over a session, this means
+ * the same ~15 mottle blobs and ~450 grain flecks spread across an
+ * ever-larger area, so the texture visually thins out toward the growth
+ * front rather than staying a constant density. That's a known, accepted
+ * first-pass limitation for this milestone (a real tiling texture system
+ * is out of scope here), not a bug.
  */
 import { cyrb53 } from '../shared/hash';
 import { createMulberry32 } from '../shared/prng';
