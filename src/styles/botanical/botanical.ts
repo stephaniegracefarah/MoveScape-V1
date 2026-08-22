@@ -369,6 +369,7 @@ function buildScene(state: BotanicalState): Scene {
       // visibleCount is always <= branch.segments.length (see visibleSegmentCount).
       const point = branch.segments[i]!;
       elements.push({
+        kind: 'circle',
         z: branch.z,
         x: point.x,
         y: point.y,
@@ -384,6 +385,7 @@ function buildScene(state: BotanicalState): Scene {
     if (!owner) continue;
     const shrinkFade = owner.lifecycle === 'shrinking' ? 1 - owner.shrinkProgress : 1;
     elements.push({
+      kind: 'circle',
       z: blossom.z,
       x: blossom.x,
       y: blossom.y,

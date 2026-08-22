@@ -32,11 +32,18 @@ function createStubStyle(): { style: StyleRenderer; stepCalls: number[] } {
 function createStubCanvas(): CanvasLike {
   return {
     fillStyle: '',
+    strokeStyle: '',
     globalAlpha: 1,
+    lineWidth: 1,
+    lineCap: 'butt',
     clearRect: () => {},
+    fillRect: () => {},
     beginPath: () => {},
     arc: () => {},
+    moveTo: () => {},
+    lineTo: () => {},
     fill: () => {},
+    stroke: () => {},
   };
 }
 

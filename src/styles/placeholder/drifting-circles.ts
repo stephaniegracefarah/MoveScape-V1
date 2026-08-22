@@ -86,6 +86,7 @@ export function createDriftingCirclesStyle(): StyleRenderer {
         const x = clamp01(circle.initialX + Math.sin(cycle) * DRIFT_AMPLITUDE * expansionInfluence);
         const y = clamp01(circle.initialY + Math.cos(cycle) * DRIFT_AMPLITUDE * expansionInfluence);
         return {
+          kind: 'circle',
           z: circle.z,
           x,
           y,
