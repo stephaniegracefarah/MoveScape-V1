@@ -21,4 +21,13 @@ export interface InputAdapter {
    * Returns null when the adapter is not running.
    */
   previewStream?(): MediaStream | null;
+  /**
+   * Optional: live-retunes the sensor-noise floor subtracted from the raw
+   * speed reading before it becomes MovementParams.speed (the webcam
+   * adapter only — POSE_PARAM_TUNING.SPEED_JITTER_FLOOR). Dev-only pose
+   * tuning affordance (main.ts): this constant can only really be
+   * calibrated against a real camera, not blind, so it's adjustable live
+   * instead of requiring a redeploy per guess. A no-op while not running.
+   */
+  setSpeedJitterFloor?(value: number): void;
 }

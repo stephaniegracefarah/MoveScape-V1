@@ -16,6 +16,7 @@ import type { OffscreenBuffer, OffscreenBufferFactory } from './compositor/live-
 import type { CanvasLike, CanvasSize } from './compositor/render-scene';
 import { createWorld, type World, type WorldOverrides } from './world/world';
 import { deriveWorldSeed, formatLocalDate } from './world/seed';
+import { POSE_PARAM_TUNING } from './adapters/webcam/params-from-landmarks';
 import { createBotanicalStyle } from './styles/botanical/botanical';
 import { BOTANICAL_PALETTE_PRESETS, type BotanicalPaletteId } from './styles/botanical/palettes';
 import { DEFAULT_BOTANICAL_TUNING_CONFIG, type BotanicalTuningConfig } from './styles/botanical/tuning-config';
@@ -120,6 +121,7 @@ if (app) {
         <p id="ms-session-end-status" class="ms-status" hidden></p>
       </div>
       <div id="ms-readout"></div>
+      <div id="ms-pose-tuning"></div>
       <div id="ms-preview"></div>
       <div class="ms-backup">
         <button id="ms-import-recipe" type="button">Import recipe backup…</button>
@@ -178,6 +180,7 @@ if (app) {
   const importRecipeBtnRef = app.querySelector<HTMLButtonElement>('#ms-import-recipe');
   const importRecipeFileRef = app.querySelector<HTMLInputElement>('#ms-import-recipe-file');
   const importStatusElRef = app.querySelector<HTMLParagraphElement>('#ms-import-status');
+  const poseTuningElRef = app.querySelector<HTMLDivElement>('#ms-pose-tuning');
 
   if (
     readoutContainerRef &&
@@ -199,7 +202,8 @@ if (app) {
     discardPieceBtnRef &&
     importRecipeBtnRef &&
     importRecipeFileRef &&
-    importStatusElRef
+    importStatusElRef &&
+    poseTuningElRef
   ) {
     // Re-bind to fresh consts so their (non-null) type is fixed at this
     // point — TypeScript would otherwise re-widen the outer refs to
@@ -225,6 +229,7 @@ if (app) {
     const importRecipeBtn = importRecipeBtnRef;
     const importRecipeFile = importRecipeFileRef;
     const importStatusEl = importStatusElRef;
+    const poseTuningEl = poseTuningElRef;
     // getContext('2d') is effectively never null for a freshly-created
     // <canvas> in a real browser; guarded rather than asserted so a
     // hypothetical unsupported environment degrades to "no art rendering"
@@ -255,6 +260,13 @@ if (app) {
     // one. Recomputing this per palette switch would be both wasteful (an
     // extra store query) and wrong once a save has happened mid-session.
     let currentSessionIndex = 0;
+    // Dev-only pose tuning (session 012): the webcam adapter's sensor-noise
+    // floor (POSE_PARAM_TUNING.SPEED_JITTER_FLOOR) can only really be
+    // calibrated against a real camera, not blind -- this tracks whatever
+    // the founder last set live via the dev-only slider below, so a
+    // re-tuned value survives a camera restart within the same page load
+    // instead of resetting to the shipped default every time.
+    let currentSpeedJitterFloor: number = POSE_PARAM_TUNING.SPEED_JITTER_FLOOR;
     // The exact WorldOverrides startLiveLoop last used to build currentWorld
     // -- captured so a saved recipe's userChoices matches what was actually
     // rendered, not recomputed from possibly-stale UI state.
@@ -629,6 +641,10 @@ if (app) {
         finishBtn.hidden = false;
         refreshPreviewAvailability();
         setStartButtonsDisabled(false);
+        // Carries a live-tuned pose-sensor value across a restart (dev-only
+        // slider, no-op via optional chaining on adapters that don't
+        // implement it, e.g. the slider adapter).
+        activeAdapter.setSpeedJitterFloor?.(currentSpeedJitterFloor);
         await beginSession();
       } catch (err) {
         if (!activation.isCurrent(token)) return; // stale failure; a newer activation already owns the UI
@@ -754,6 +770,46 @@ if (app) {
           }
         })();
       });
+    }
+
+    // Dev-only pose tuning (session 012): a single live slider for the
+    // webcam adapter's sensor-noise floor. This constant genuinely can't be
+    // calibrated blind (no camera in the coordinator's own dev environment)
+    // -- a real camera plus this slider is the only way to actually dial it
+    // in, watching the Speed readout react live while sitting still vs.
+    // moving. Every string/DOM node here lives only inside this
+    // import.meta.env.DEV branch, tree-shaken from production the same way
+    // as the two blocks above/below it.
+    if (import.meta.env.DEV) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex; align-items:center; gap:8px; margin:8px 0; font-size:12px;';
+
+      const label = document.createElement('label');
+      label.textContent = 'Speed jitter floor (dev)';
+      label.style.cssText = 'width:190px; flex-shrink:0;';
+
+      const input = document.createElement('input');
+      input.type = 'range';
+      input.min = '0';
+      input.max = '2';
+      input.step = '0.01';
+      input.value = String(currentSpeedJitterFloor);
+      input.style.cssText = 'flex: 1 1 auto; min-width: 0; max-width: 260px;';
+
+      const valueEl = document.createElement('span');
+      valueEl.textContent = currentSpeedJitterFloor.toFixed(2);
+      valueEl.style.cssText = 'width:48px; text-align:right;';
+
+      input.addEventListener('input', () => {
+        currentSpeedJitterFloor = Number(input.value);
+        valueEl.textContent = currentSpeedJitterFloor.toFixed(2);
+        activeAdapter?.setSpeedJitterFloor?.(currentSpeedJitterFloor);
+      });
+
+      row.appendChild(label);
+      row.appendChild(input);
+      row.appendChild(valueEl);
+      poseTuningEl.appendChild(row);
     }
 
     // Dev-only: the "backend knobs" tuning panel (M4x). Every DOM node,

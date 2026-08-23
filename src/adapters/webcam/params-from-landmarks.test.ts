@@ -116,8 +116,11 @@ describe('computeMovementParams — speed', () => {
     const frameIntervalMs = 1000 / 30;
     const still = buildLandmarks();
     // A small, consistent per-landmark shift -- plausible MediaPipe
-    // inference jitter magnitude, well below any intentional movement.
-    const jittered = jitterAllSpeedLandmarks(still, 0.002);
+    // inference jitter magnitude, well below any intentional movement and
+    // below SPEED_JITTER_FLOOR's threshold (session 012 lowered the floor
+    // from 0.85 to 0.15 after it overshot and suppressed real movement too
+    // -- see POSE_PARAM_TUNING's own comment).
+    const jittered = jitterAllSpeedLandmarks(still, 0.0004);
 
     const frame1 = computeMovementParams(still, 0, null);
     const frame2 = computeMovementParams(jittered, frameIntervalMs, frame1.state);
