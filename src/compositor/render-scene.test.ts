@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { Scene, SceneElement } from '../styles/style-renderer';
-import { renderScene, type CanvasLike, type CanvasSize } from './render-scene';
+import {
+  computeCanvasSize,
+  MIN_WORLD_WIDTH_UNITS,
+  renderScene,
+  WORLD_WIDTH_PADDING_UNITS,
+  type CanvasLike,
+  type CanvasSize,
+} from './render-scene';
 
 // A single ordered trace of every CanvasLike interaction, so tests can
 // assert both "what was drawn" and "in what order" without a real canvas.
@@ -156,7 +163,7 @@ describe('renderScene — depth ordering', () => {
 });
 
 describe('renderScene — depth fade formula', () => {
-  // shorterSide = min(200, 100) = 100.
+  // worldUnitPx = canvasSize.height = 100 (width no longer participates in radius or x-position scaling)
   it('z=0 renders at full opacity and full radius', () => {
     const canvas = createMockCanvas();
     const scene: Scene = { elements: [makeElement({ z: 0, opacity: 1, radius: 0.1 })] };
@@ -167,7 +174,7 @@ describe('renderScene — depth fade formula', () => {
     // alphaSets[0] is the per-element alpha; the final reset-to-1 comes after.
     expect(alphaSets[0]?.args[0]).toBeCloseTo(1, 10);
     const arcCall = canvas.calls.find((c) => c.method === 'arc');
-    expect(arcCall?.args[2]).toBeCloseTo(10, 10); // 0.1 * (1 - 0) * 100
+    expect(arcCall?.args[2]).toBeCloseTo(10, 10); // 0.1 * (1 - 0) * worldUnitPx(100)
   });
 
   it('z=1 fades opacity to 15% and radius to 40% of base', () => {
@@ -179,7 +186,7 @@ describe('renderScene — depth fade formula', () => {
     const alphaSets = canvas.calls.filter((c) => c.method === 'setGlobalAlpha');
     expect(alphaSets[0]?.args[0]).toBeCloseTo(0.15, 10);
     const arcCall = canvas.calls.find((c) => c.method === 'arc');
-    expect(arcCall?.args[2]).toBeCloseTo(4, 10); // 0.1 * (1 - 0.6) * 100
+    expect(arcCall?.args[2]).toBeCloseTo(4, 10); // 0.1 * (1 - 0.6) * worldUnitPx(100)
   });
 
   it('z=0.5 lands at the linear midpoint of the fade formula', () => {
@@ -192,19 +199,28 @@ describe('renderScene — depth fade formula', () => {
     // 1 * (1 - 0.5 * 0.85) = 0.575
     expect(alphaSets[0]?.args[0]).toBeCloseTo(0.575, 10);
     const arcCall = canvas.calls.find((c) => c.method === 'arc');
-    // 0.1 * (1 - 0.5 * 0.6) * 100 = 7
+    // 0.1 * (1 - 0.5 * 0.6) * worldUnitPx(100) = 7
     expect(arcCall?.args[2]).toBeCloseTo(7, 10);
   });
 
-  it('positions elements scaled by canvas width/height, not the shorter side', () => {
+  it('positions both axes using canvas height as the world-unit scale -- canvas width has no effect on position', () => {
     const canvas = createMockCanvas();
     const scene: Scene = { elements: [makeElement({ x: 0.25, y: 0.75, z: 0 })] };
 
     renderScene(canvas, scene, CANVAS_SIZE);
 
     const arcCall = canvas.calls.find((c) => c.method === 'arc');
-    expect(arcCall?.args[0]).toBeCloseTo(50, 10); // 0.25 * 200
+    expect(arcCall?.args[0]).toBeCloseTo(25, 10); // 0.25 * worldUnitPx(100), NOT 0.25 * width(200)
     expect(arcCall?.args[1]).toBeCloseTo(75, 10); // 0.75 * 100
+
+    // Permanent ink: the same element rendered against a wider canvas of
+    // the same height must produce the exact same pixel position. Growing
+    // the canvas's width must never move an already-placed mark.
+    const widerCanvas = createMockCanvas();
+    renderScene(widerCanvas, scene, { width: 800, height: 100 });
+    const widerArcCall = widerCanvas.calls.find((c) => c.method === 'arc');
+    expect(widerArcCall?.args[0]).toBe(arcCall?.args[0]);
+    expect(widerArcCall?.args[1]).toBe(arcCall?.args[1]);
   });
 });
 
@@ -357,5 +373,46 @@ describe('renderScene — non-mutation', () => {
     renderScene(createMockCanvas(), { elements }, CANVAS_SIZE);
 
     expect(elements.map((e) => e.color)).toEqual(originalOrder);
+  });
+});
+
+describe('computeCanvasSize', () => {
+  const HEIGHT_PX = 100;
+
+  it('an empty scene returns the minimum world width', () => {
+    const size = computeCanvasSize({ elements: [] }, HEIGHT_PX);
+    expect(size).toEqual({ width: HEIGHT_PX * MIN_WORLD_WIDTH_UNITS, height: HEIGHT_PX });
+  });
+
+  it('a single circle sizes width to its farthest-right extent plus padding', () => {
+    const scene: Scene = { elements: [makeElement({ x: 2, radius: 0.1 })] };
+    const size = computeCanvasSize(scene, HEIGHT_PX);
+    expect(size.width).toBeCloseTo((2 + 0.1 + WORLD_WIDTH_PADDING_UNITS) * HEIGHT_PX, 10);
+  });
+
+  it('a stroke sizes width to its farthest point plus padding', () => {
+    const scene: Scene = {
+      elements: [
+        {
+          kind: 'stroke',
+          z: 0,
+          points: [
+            { x: 0.5, y: 0.5 },
+            { x: 3, y: 0.2 },
+          ],
+          baseWidth: 0.05,
+          taperExponent: 1,
+          color: 'blue',
+          opacity: 1,
+        },
+      ],
+    };
+    const size = computeCanvasSize(scene, HEIGHT_PX);
+    expect(size.width).toBeCloseTo((3 + WORLD_WIDTH_PADDING_UNITS) * HEIGHT_PX, 10);
+  });
+
+  it('height in the result always exactly equals the heightPx argument', () => {
+    expect(computeCanvasSize({ elements: [] }, 100).height).toBe(100);
+    expect(computeCanvasSize({ elements: [makeElement({ x: 5 })] }, 337).height).toBe(337);
   });
 });
