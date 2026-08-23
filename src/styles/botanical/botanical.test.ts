@@ -7,11 +7,13 @@ import type { SceneElement } from '../style-renderer';
 import { angleDifference, growthStepFor } from './branch';
 import type { Blossom } from './blossom';
 import {
-  computeGrowingRootStartMinX,
+  computeBakeThreats,
   createBotanicalInternal,
   createBotanicalStyle,
+  isAncestorOrDescendant,
   isSafeToBake,
-  type RootBakeSafetySystem,
+  type BakeSafetySystem,
+  type BakeThreatEntry,
 } from './botanical';
 import { BOTANICAL_PALETTE_PRESETS } from './palettes';
 import { DEFAULT_BOTANICAL_TUNING_CONFIG } from './tuning-config';
@@ -68,14 +70,31 @@ function curvatureSum(segments: { x: number; y: number }[]): number {
   return sum;
 }
 
-/** A large synthetic blossom cluster's already-generated members, for tests that inject a `PendingBlossomCluster` directly (bypassing organic branch growth) to isolate revealPendingBlossoms's pacing math. Large enough that it never fully drains within any of these tests' tick budgets, so it's never pruned out from `pendingClusters`. Field values are irrelevant here -- only array length/order (via revealedCount) is exercised. */
+/**
+ * A large synthetic blossom cluster's already-generated members, for tests
+ * that inject a `PendingBlossomCluster` directly (bypassing organic branch
+ * growth) to isolate revealPendingBlossoms's pacing math from everything
+ * else -- including, now, the bake-order safety gate (session 018's
+ * branch-level generalization made this an explicit new confound: these
+ * synthetic blossoms carry a `branchId` ('synthetic') that never matches
+ * any real branch's lineage, so isSafeToBake never treats them as
+ * ancestor/descendant of anything real). `z: 1` (the max, after clamp01)
+ * is deliberate, not arbitrary -- isSafeToBake only gates against entries
+ * with `entry.z > ownZ`, and no real branch's z can ever exceed 1, so this
+ * guarantees the safety gate can never withhold these synthetic blossoms,
+ * exactly reproducing the pre-generalization single-root bypass these
+ * tests were originally written against. Large enough that it never fully
+ * drains within any of these tests' tick budgets, so it's never pruned out
+ * from `pendingClusters`. Every other field is irrelevant here -- only
+ * array length/order (via revealedCount) is exercised.
+ */
 function makeBigBlossoms(count = 1000): Blossom[] {
   return Array.from({ length: count }, () => ({
     branchId: 'synthetic',
     rootIndex: 0,
     x: 0.5,
     y: 0.5,
-    z: 0,
+    z: 1,
     color: '#000000',
     radius: 0.01,
     baseOpacity: 0.5,
@@ -258,6 +277,31 @@ describe('createBotanicalStyle — expansion widens spatial spread', () => {
   });
 });
 
+/**
+ * Total decided blossom membership for `system` -- every blossom any
+ * matured cluster has ever generated (spawnBlossomsFor), whether or not it
+ * has been REVEALED into `system.blossoms` yet. Before session 018's
+ * branch-level generalization, `blossomRevealIntervalMs: 0` was enough on
+ * its own to guarantee `system.blossoms.length` equaled decided membership
+ * within a short tick window, because the single-root case was a complete
+ * bypass of the (then cross-root-only) bake-safety gate. That's no longer
+ * true: the gate is now branch-level and applies even at rootCount=1
+ * whenever a farther, unrelated (non-ancestor/descendant) branch is still
+ * growing nearby -- entirely realistic under this project's default
+ * tuning, where forking is on by default (forkCountMin/Span) and
+ * childZJitter is nonzero, so a same-root cousin can legitimately hold a
+ * few of a cluster's blossoms pending even with pacing itself disabled.
+ * That's the fix working as intended, not a regression -- so this helper
+ * measures the quantity the test actually cares about (decided membership)
+ * directly, unconfounded by reveal-gating: `system.blossoms.length` (already
+ * revealed) plus, for each still-open pendingCluster, however many of its
+ * fixed, already-decided membership haven't been revealed yet.
+ */
+function decidedBlossomCount(system: { blossoms: unknown[]; pendingClusters: { blossoms: unknown[]; revealedCount: number }[] }): number {
+  const pendingRemainder = system.pendingClusters.reduce((sum, p) => sum + (p.blossoms.length - p.revealedCount), 0);
+  return system.blossoms.length + pendingRemainder;
+}
+
 describe('createBotanicalStyle — expansion scales blossom cluster size', () => {
   it('a branch that matures during expansion=1 gets a bigger cluster than one maturing during expansion=0, else identical', () => {
     // visual spec section 7: "expansion maps to spread/reach of new growth
@@ -265,10 +309,12 @@ describe('createBotanicalStyle — expansion scales blossom cluster size', () =>
     // cluster's own count, not a sum across a variable number of roots.
     const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0 };
 
-    // blossomRevealIntervalMs: 0 bypasses reveal-pacing entirely (see the
-    // "watercolor reveal" describe block below) -- this test measures
-    // decided cluster MEMBERSHIP size (spawnBlossomsFor), not reveal speed,
-    // so it must not be sensitive to the tuning defaults' reveal-rate cap.
+    // blossomRevealIntervalMs: 0 bypasses the leaky-bucket PACING timer
+    // entirely (see the "watercolor reveal" describe block below) -- this
+    // test measures decided cluster MEMBERSHIP size (spawnBlossomsFor), not
+    // reveal speed, via decidedBlossomCount (see its own doc comment for why
+    // raw `blossoms.length` is no longer a safe stand-in for that after the
+    // bake-safety generalization).
     const low = createBotanicalInternal({ blossomRevealIntervalMs: 0 });
     const high = createBotanicalInternal({ blossomRevealIntervalMs: 0 });
     low.renderer.init(createWorld('cluster-size-seed', 0, overrides));
@@ -285,9 +331,11 @@ describe('createBotanicalStyle — expansion scales blossom cluster size', () =>
     runTicks(low.renderer, 500, 16.67, lowParamsAt);
     runTicks(high.renderer, 500, 16.67, highParamsAt);
 
-    expect(low.state.foregroundSystems[0]!.blossoms.length).toBeGreaterThan(0);
-    expect(high.state.foregroundSystems[0]!.blossoms.length).toBeGreaterThan(0);
-    expect(high.state.foregroundSystems[0]!.blossoms.length).toBeGreaterThan(low.state.foregroundSystems[0]!.blossoms.length);
+    const lowCount = decidedBlossomCount(low.state.foregroundSystems[0]!);
+    const highCount = decidedBlossomCount(high.state.foregroundSystems[0]!);
+    expect(lowCount).toBeGreaterThan(0);
+    expect(highCount).toBeGreaterThan(0);
+    expect(highCount).toBeGreaterThan(lowCount);
   });
 });
 
@@ -337,26 +385,34 @@ describe('createBotanicalStyle — gradual "watercolor" blossom reveal', () => {
     expect(risingTicks.size).toBeGreaterThan(3);
   });
 
-  it('blossomRevealIntervalMs=0 reproduces the old instant-reveal behavior exactly (every cluster fully drains the same tick it is queued)', () => {
+  it('blossomRevealIntervalMs=0 disables the pacing TIMER; the bake-safety gate can still legitimately hold a cluster open temporarily, but everything drains by the end', () => {
+    // Reframed from the pre-generalization version of this test (which
+    // asserted pendingClusters was empty after EVERY single step()) --
+    // that assumed intervalMs=0 was the only thing that could ever leave a
+    // cluster pending, true under the old single-root bake-safety bypass,
+    // false now that the gate is branch-level: even at rootCount=1, a real
+    // cluster's remaining blossoms can be legitimately withheld for a
+    // while by a farther, unrelated (non-ancestor/descendant), still-
+    // growing sibling/cousin branch -- default tuning forks by default, so
+    // this is a real, expected occurrence, not a bug. This is the fix
+    // working as intended (docs/HANDOFF.md session 018), not a regression.
+    // What intervalMs=0 still guarantees, and what this test now checks:
+    // the PACING TIMER itself never adds delay -- any blossom that IS safe
+    // reveals immediately -- so every cluster still fully drains given
+    // enough ticks for the canvas to spread out and any holds to clear.
     const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0 };
     const { renderer, state } = createBotanicalInternal({ blossomRevealIntervalMs: 0 });
     renderer.init(createWorld('instant-reveal-seed', 0, overrides));
 
     const paramsAt = () => makeParams({ speed: 0.9, expansion: 0.9, symmetry: 0.5 });
     let time = 0;
-    // With intervalMs=0, revealPendingBlossoms drains and prunes a cluster
-    // fully within the same stepGrowthSystem call that queued it -- so the
-    // real invariant is that pendingClusters is always empty right after
-    // step() returns, never holding a lingering (let alone partial) entry.
-    for (let tick = 0; tick < 400; tick++) {
+    for (let tick = 0; tick < 1200; tick++) {
       renderer.step(paramsAt(), INITIAL_SESSION_PARAMS, time, 16.67);
       time += 16.67;
-      for (const system of state.foregroundSystems) {
-        expect(system.pendingClusters.length).toBe(0);
-      }
     }
 
     expect(state.foregroundSystems[0]!.blossoms.length).toBeGreaterThan(0);
+    expect(state.foregroundSystems[0]!.pendingClusters.length).toBe(0); // fully drained by the end, despite any temporary safety holds along the way
   });
 
   it('speed=0 still creeps forward (never fully stalls) but reveals far slower than speed=1, roughly proportional to blossomRevealSpeedFloor', () => {
@@ -777,225 +833,278 @@ describe('BotanicalTuningConfig — override plumbing (M4x tuning panel)', () =>
   });
 });
 
-// --- fix-cross-root-bake-order: computeRootFrontierMaxX / isSafeToBake pure
+// --- fix-cross-root-bake-order (generalized session 018 to branch-level):
+// computeBakeThreats / isAncestorOrDescendant / isSafeToBake pure
 // functions, plus end-to-end wiring tests. See docs/HANDOFF.md -- confirmed
-// bug: a root's z is fixed by its own index (initGrowthSystem's
-// `z = clamp01((i + zJitter) / rootCount)`), so within one growth system a
-// higher-rootIndex root is ALWAYS farther, yet both roots start bunched
-// close together near the left edge (ROOT_X_MIN/ROOT_X_SPAN) before the
-// canvas has spread out -- if the nearer root's branch matures and bakes
-// first, a farther root arriving later at the same screen position
-// permanently overwrites it (the live compositor's own within-frame z-sort
-// can't reconcile bakes across different frames).
+// bug (original scope): a root's z is fixed by its own index
+// (initGrowthSystem's `z = clamp01((i + zJitter) / rootCount)`), so within
+// one growth system a higher-rootIndex root is ALWAYS farther, yet both
+// roots start bunched close together near the left edge
+// (ROOT_X_MIN/ROOT_X_SPAN) before the canvas has spread out -- if the
+// nearer root's branch matures and bakes first, a farther root arriving
+// later at the same screen position permanently overwrites it (the live
+// compositor's own within-frame z-sort can't reconcile bakes across
+// different frames). Session 018's real pixel-level evidence (a
+// renderScene() vs live-compositor diff) showed the identical overwrite can
+// happen between forked SIBLING/COUSIN branches within a single root's own
+// lineage too (childZJitter gives each fork its own z, independent of fork
+// maturation order) -- so the mechanism below is now branch-level, not
+// root-level; the original cross-root case is just one instance of it.
 
 function strokeFinalFlags(elements: SceneElement[]): boolean[] {
   return elements.filter((e) => e.kind === 'stroke').map((e) => e.final === true);
 }
 
-describe('computeGrowingRootStartMinX — per-root growing-branch start tracking', () => {
-  it('tracks the min rootX among GROWING branches per (systemId, rootIndex) key, ignoring mature ones', () => {
-    const systems: RootBakeSafetySystem[] = [
+/** A `BakeSafetySystem` branch fixture with `reachX` defaulted equal to `rootX` (the common case for these tests -- a branch whose full-path reach hasn't grown past its own start), spreadable to override just `reachX` when a test specifically needs the two to differ. */
+function fixtureBranch(
+  b: { id: string; rootX: number; z: number; lifecycle: 'growing' | 'mature'; reachX?: number },
+): { id: string; rootX: number; reachX: number; z: number; lifecycle: 'growing' | 'mature' } {
+  return { reachX: b.rootX, ...b };
+}
+
+describe('computeBakeThreats — resolved live-threat list (growing + mature-but-blocked)', () => {
+  it('collects {id, z, rootX} for every currently-GROWING branch across all given systems, ignoring RESOLVED-SAFE mature ones', () => {
+    const systems: BakeSafetySystem[] = [
       {
-        systemId: 'fg0',
-        roots: [
-          { x: 0.1, z: 0.2 },
-          { x: 0.15, z: 0.8 },
-        ],
         branches: [
-          { rootIndex: 0, rootX: 0.3, lifecycle: 'mature' }, // mature -- excluded, no future bake risk
-          { rootIndex: 0, rootX: 0.32, lifecycle: 'growing' },
-          { rootIndex: 0, rootX: 0.28, lifecycle: 'growing' }, // smaller rootX -- this is the min
-          { rootIndex: 1, rootX: 0.2, lifecycle: 'growing' },
+          // mature, reach=0.3 -- fg0:root1:0's own rootX (0.5) is beyond
+          // 0.3 + margin (0.15) = 0.45, so it doesn't block this one either;
+          // resolves safe, excluded.
+          fixtureBranch({ id: 'fg0:root0:0', rootX: 0.3, z: 0.2, lifecycle: 'mature' }),
+          fixtureBranch({ id: 'fg0:root0:0/child0', rootX: 0.32, z: 0.22, lifecycle: 'growing' }),
+          fixtureBranch({ id: 'fg0:root1:0', rootX: 0.5, z: 0.8, lifecycle: 'growing' }),
         ],
       },
     ];
-    const minX = computeGrowingRootStartMinX(systems);
-    expect(minX.get('fg0:0')).toBe(0.28);
-    expect(minX.get('fg0:1')).toBe(0.2);
+    expect(computeBakeThreats(systems, 0.15)).toEqual([
+      { id: 'fg0:root1:0', z: 0.8, rootX: 0.5 }, // farthest-first processing order
+      { id: 'fg0:root0:0/child0', z: 0.22, rootX: 0.32 },
+    ]);
   });
 
-  it('keys are namespaced per systemId, so two systems both having a rootIndex 0 stay independent', () => {
-    const systems: RootBakeSafetySystem[] = [
-      { systemId: 'fg0', roots: [{ x: 0, z: 0.5 }], branches: [{ rootIndex: 0, rootX: 1.2, lifecycle: 'growing' }] },
-      { systemId: 'fg1', roots: [{ x: 1.2, z: 0.5 }], branches: [{ rootIndex: 0, rootX: 1.25, lifecycle: 'growing' }] },
+  it('flattens across multiple systems (no more per-system/per-root keying -- a flat, z-sorted list of every live threat)', () => {
+    const systems: BakeSafetySystem[] = [
+      { branches: [fixtureBranch({ id: 'fg0:root0:0', rootX: 0.1, z: 0.5, lifecycle: 'growing' })] },
+      { branches: [fixtureBranch({ id: 'fg1:root0:0', rootX: 0.2, z: 0.6, lifecycle: 'growing' })] },
     ];
-    const minX = computeGrowingRootStartMinX(systems);
-    expect(minX.get('fg0:0')).toBe(1.2);
-    expect(minX.get('fg1:0')).toBe(1.25);
+    expect(computeBakeThreats(systems, 0.15).map((e) => e.id)).toEqual(['fg1:root0:0', 'fg0:root0:0']); // farther (z=0.6) first
   });
 
-  it('has no entry for a lineage with no branches, or whose branches are all mature', () => {
-    const systems: RootBakeSafetySystem[] = [
-      { systemId: 'fg0', roots: [{ x: 0, z: 0.5 }], branches: [] },
-      { systemId: 'fg1', roots: [{ x: 0, z: 0.5 }], branches: [{ rootIndex: 0, rootX: 0.1, lifecycle: 'mature' }] },
+  it('returns an empty list when there are no branches, or every branch resolves safe', () => {
+    const systems: BakeSafetySystem[] = [
+      { branches: [] },
+      { branches: [fixtureBranch({ id: 'fg1:root0:0', rootX: 0.1, z: 0.5, lifecycle: 'mature' })] },
     ];
-    const minX = computeGrowingRootStartMinX(systems);
-    expect(minX.size).toBe(0);
+    expect(computeBakeThreats(systems, 0.15)).toEqual([]);
+  });
+
+  // --- The third correction found through this generalization's own
+  // integration sweep (docs/HANDOFF.md session 018), alongside the two
+  // preserved from the original root-level fix: a MATURE branch is not
+  // automatically excluded just because it's mature -- it must itself
+  // resolve safe first. Found via a real 5-seed/1200-tick sweep turning up
+  // 5 genuine violations (one per seed) all sharing this exact shape: a
+  // nearer branch baked while an unrelated, farther, MATURE-BUT-ITSELF-
+  // STILL-BLOCKED sibling sat unbaked nearby, then baked later and painted
+  // over it -- undetectable by the old "lifecycle === 'growing' only"
+  // threat definition, since the blocking branch had already finished
+  // GROWING (just not yet finished BAKING) by the time the nearer one was
+  // checked.
+  it('keeps a MATURE branch in the threat list when it is itself still blocked by a farther, unrelated branch, and that propagates as a real threat to a nearer branch it directly reaches', () => {
+    // c (farthest, z=0.9, growing, rootX=0.68) blocks b (z=0.7, mature,
+    // rootX=0.5, reachX=0.55) from resolving safe: c.rootX (0.68) <=
+    // b.reachX (0.55) + margin (0.15) = 0.7. b, still unresolved/unbaked,
+    // therefore stays in the threat list under its OWN rootX (0.5) --
+    // exactly the "will still cover its full path once it finally bakes"
+    // reasoning growing branches get, now correctly extended to a mature
+    // branch that hasn't actually finished BAKING yet either (only
+    // finished GROWING). Coordinates deliberately keep c FAR ENOUGH from a
+    // that c never threatens a directly (c.rootX 0.68 > a.reachX 0.5 +
+    // margin 0.15 = 0.65) -- isolating that a's withholding can only come
+    // from b's own retained threat status, not a direct c-to-a effect.
+    const systems: BakeSafetySystem[] = [
+      {
+        branches: [
+          fixtureBranch({ id: 'b', rootX: 0.5, reachX: 0.55, z: 0.7, lifecycle: 'mature' }),
+          fixtureBranch({ id: 'c', rootX: 0.68, z: 0.9, lifecycle: 'growing' }),
+        ],
+      },
+    ];
+    const threats = computeBakeThreats(systems, 0.15);
+    expect(threats).toEqual([
+      { id: 'c', z: 0.9, rootX: 0.68 },
+      { id: 'b', z: 0.7, rootX: 0.5 }, // mature, but still blocked by c -- correctly retained as a threat
+    ]);
+
+    expect(isSafeToBake({ id: 'c', z: 0.9, tipX: 0.68, threats, margin: 0.15 })).toBe(true); // sanity: nothing farther than c itself
+    // 'a', a nearer, unrelated branch reaching to 0.5, is not directly
+    // reachable by c (0.68 > 0.65) but IS reachable by b (0.5 <= 0.65) --
+    // proving b's retained threat status is what withholds a, not c.
+    expect(isSafeToBake({ id: 'a', z: 0.3, tipX: 0.5, threats, margin: 0.15 })).toBe(false);
+  });
+
+  it('once the blocker clears (its own farther threat moves past), the previously-blocked mature branch resolves safe and stops being a threat itself', () => {
+    const systems: BakeSafetySystem[] = [
+      {
+        branches: [
+          fixtureBranch({ id: 'b', rootX: 0.5, reachX: 0.55, z: 0.7, lifecycle: 'mature' }),
+          fixtureBranch({ id: 'c', rootX: 0.9, z: 0.9, lifecycle: 'growing' }), // c's own rootX now well past b's reach (0.55) + margin (0.15) = 0.7
+        ],
+      },
+    ];
+    const threats = computeBakeThreats(systems, 0.15);
+    expect(threats).toEqual([{ id: 'c', z: 0.9, rootX: 0.9 }]); // b now resolves safe on its own -- no longer in the threat list
+    expect(isSafeToBake({ id: 'a', z: 0.3, tipX: 0.5, threats, margin: 0.15 })).toBe(true); // and no longer withholds 'a' either
   });
 });
 
-describe('isSafeToBake — cross-root bake-order safety predicate', () => {
-  it('is a complete no-op when the only system has exactly one root (the single-root regression guarantee)', () => {
-    const singleRootSystem: RootBakeSafetySystem = {
-      systemId: 'fg0',
-      roots: [{ x: 0.1, z: 0.37 }],
-      branches: [{ rootIndex: 0, rootX: 0.1, lifecycle: 'growing' }],
-    };
-    const growingRootStartMinX = computeGrowingRootStartMinX([singleRootSystem]);
-    for (const ownZ of [0, 0.1, 0.37, 0.9, 1]) {
-      expect(
-        isSafeToBake({
-          ownSystemId: 'fg0',
-          ownRootIndex: 0,
-          ownZ,
-          ownTipX: 0.9,
-          allSystems: [singleRootSystem],
-          growingRootStartMinX,
-          margin: 0.15,
-        }),
-      ).toBe(true);
-    }
+describe('isAncestorOrDescendant — fork-lineage id-prefix relationship', () => {
+  it('is true for identical ids', () => {
+    expect(isAncestorOrDescendant('fg0:root1:0', 'fg0:root1:0')).toBe(true);
   });
 
-  it('is a no-op across multiple single-root foreground systems (the growth-plateau hand-off case)', () => {
-    // fg1's root happens to land at a HIGHER z than fg0's root, and fg1's
-    // sole branch is still growing right near fg0's own territory -- if
-    // single-root systems were treated as mutual threats, this would
-    // (wrongly) gate fg0's content: neither system ever had more than one
-    // root, so there is no structural nearer/farther guarantee between them.
-    const fg0: RootBakeSafetySystem = {
-      systemId: 'fg0',
-      roots: [{ x: 0.1, z: 0.2 }],
-      branches: [{ rootIndex: 0, rootX: 0.1, lifecycle: 'mature' }],
-    };
-    const fg1: RootBakeSafetySystem = {
-      systemId: 'fg1',
-      roots: [{ x: 0.12, z: 0.8 }],
-      branches: [{ rootIndex: 0, rootX: 0.12, lifecycle: 'growing' }],
-    };
-    const growingRootStartMinX = computeGrowingRootStartMinX([fg0, fg1]);
-    expect(
-      isSafeToBake({
-        ownSystemId: 'fg0',
-        ownRootIndex: 0,
-        ownZ: 0.2,
-        ownTipX: 0.9,
-        allSystems: [fg0, fg1],
-        growingRootStartMinX,
-        margin: 0.15,
-      }),
-    ).toBe(true);
+  it('is true for a direct parent/child pair, in either argument order', () => {
+    expect(isAncestorOrDescendant('fg0:root1:0', 'fg0:root1:0/child0')).toBe(true);
+    expect(isAncestorOrDescendant('fg0:root1:0/child0', 'fg0:root1:0')).toBe(true);
   });
 
-  it('never gates against a nearer or equal-z other root (nearer/equal painting on top is already correct)', () => {
-    const system: RootBakeSafetySystem = {
-      systemId: 'fg0',
-      roots: [
-        { x: 0.1, z: 0.6 },
-        { x: 0.12, z: 0.6 }, // equal z to root0
-      ],
-      branches: [
-        { rootIndex: 0, rootX: 0.1, lifecycle: 'mature' },
-        { rootIndex: 1, rootX: 0.12, lifecycle: 'growing' }, // root1 still growing right nearby -- would gate if z were treated as farther
-      ],
-    };
-    const growingRootStartMinX = computeGrowingRootStartMinX([system]);
-    expect(
-      isSafeToBake({ ownSystemId: 'fg0', ownRootIndex: 0, ownZ: 0.6, ownTipX: 0.9, allSystems: [system], growingRootStartMinX, margin: 0.15 }),
-    ).toBe(true);
+  it('is true for a multi-generation descendant', () => {
+    expect(isAncestorOrDescendant('fg0:root1:0', 'fg0:root1:0/child0/child1/child0')).toBe(true);
   });
 
-  it('withholds (false) when a farther root has a currently-growing branch starting at or before ownTipX + margin', () => {
-    // The exact violation shape found via integration testing: root0
-    // (nearer, z=0.2) has a branch that reached far ahead (tipX=0.5); root1
-    // (farther, z=0.8) has a branch STILL GROWING, spawned back at its own
-    // anchor (rootX=0.06) -- root1's eventual bake (whenever it matures)
-    // will still cover that whole path from 0.06 onward, so it could still
-    // arrive later and paint over root0's content near there.
-    const system: RootBakeSafetySystem = {
-      systemId: 'fg0',
-      roots: [
-        { x: 0.05, z: 0.2 },
-        { x: 0.06, z: 0.8 },
-      ],
-      branches: [
-        { rootIndex: 0, rootX: 0.05, lifecycle: 'mature' },
-        { rootIndex: 1, rootX: 0.06, lifecycle: 'growing' },
-      ],
-    };
-    const growingRootStartMinX = computeGrowingRootStartMinX([system]);
-    expect(
-      isSafeToBake({ ownSystemId: 'fg0', ownRootIndex: 0, ownZ: 0.2, ownTipX: 0.5, allSystems: [system], growingRootStartMinX, margin: 0.15 }),
-    ).toBe(false);
+  it('is false for true siblings/cousins forked from a common ancestor at different points -- the exact real-evidence shape', () => {
+    // fg0:root1:0/child0/child1 vs fg0:root1:0/child0/child0/child0/child0/child0
+    // (docs/HANDOFF.md session 018's own traced example): both descend from
+    // fg0:root1:0/child0, but neither is an ancestor of the other.
+    expect(isAncestorOrDescendant('fg0:root1:0/child0/child1', 'fg0:root1:0/child0/child0/child0/child0/child0')).toBe(false);
   });
 
-  it('allows (true) once that farther root\'s growing branch has moved its own start well past ownTipX + margin', () => {
-    // A forked child of root1, spawned once root1's own growth had already
-    // swept well past root0's tipX + margin (0.5 + 0.15 = 0.65) -- its own
-    // rootX (0.7) is already beyond that, so its future bake can never
-    // retroactively cover root0's territory back at 0.5.
-    const system: RootBakeSafetySystem = {
-      systemId: 'fg0',
-      roots: [
-        { x: 0.05, z: 0.2 },
-        { x: 0.06, z: 0.8 },
-      ],
-      branches: [
-        { rootIndex: 0, rootX: 0.05, lifecycle: 'mature' },
-        { rootIndex: 1, rootX: 0.06, lifecycle: 'mature' }, // root1's own root branch already resolved
-        { rootIndex: 1, rootX: 0.7, lifecycle: 'growing' }, // its child, forked far out, still growing
-      ],
-    };
-    const growingRootStartMinX = computeGrowingRootStartMinX([system]);
-    expect(
-      isSafeToBake({ ownSystemId: 'fg0', ownRootIndex: 0, ownZ: 0.2, ownTipX: 0.5, allSystems: [system], growingRootStartMinX, margin: 0.15 }),
-    ).toBe(true);
+  it('is false for ids that merely share a string prefix without a "/" boundary', () => {
+    expect(isAncestorOrDescendant('fg0:root1:0', 'fg0:root10:0')).toBe(false);
   });
 
-  it('treats a root with no currently-growing branch (all mature) as having no active threat', () => {
-    const system: RootBakeSafetySystem = {
-      systemId: 'fg0',
-      roots: [
-        { x: 0.05, z: 0.2 },
-        { x: 0.06, z: 0.8 },
-      ],
-      branches: [
-        { rootIndex: 0, rootX: 0.05, lifecycle: 'mature' },
-        { rootIndex: 1, rootX: 0.06, lifecycle: 'mature' }, // root1's only branch so far -- already mature
-      ],
-    };
-    const growingRootStartMinX = computeGrowingRootStartMinX([system]);
-    expect(growingRootStartMinX.has('fg0:1')).toBe(false); // sanity: no entry, "no active threat" path is what's under test
-    expect(
-      isSafeToBake({ ownSystemId: 'fg0', ownRootIndex: 0, ownZ: 0.2, ownTipX: 0.5, allSystems: [system], growingRootStartMinX, margin: 0.15 }),
-    ).toBe(true);
-  });
-
-  it('never gates against its own root (same systemId + rootIndex pair is always skipped)', () => {
-    const system: RootBakeSafetySystem = {
-      systemId: 'fg0',
-      roots: [
-        { x: 0.05, z: 0.2 },
-        { x: 0.06, z: 0.8 },
-      ],
-      branches: [{ rootIndex: 1, rootX: 0.06, lifecycle: 'growing' }],
-    };
-    const growingRootStartMinX = computeGrowingRootStartMinX([system]);
-    expect(
-      isSafeToBake({ ownSystemId: 'fg0', ownRootIndex: 1, ownZ: 0.8, ownTipX: 0.9, allSystems: [system], growingRootStartMinX, margin: 0.15 }),
-    ).toBe(true);
+  it('is false for a different root of the same system', () => {
+    expect(isAncestorOrDescendant('fg0:root0:0', 'fg0:root1:0')).toBe(false);
   });
 });
 
-describe('createBotanicalStyle — cross-root bake-order safety: single-root regression (must be a complete no-op)', () => {
-  it('final is exactly `lifecycle === "mature"` for every fg0 branch in a single-root session, byte-for-byte the pre-fix formula', () => {
+describe('isSafeToBake — bake-order safety predicate (branch-level)', () => {
+  it('withholds (false) when an unrelated farther-z branch starts at or before tipX + margin', () => {
+    // The exact violation shape found via integration testing: this
+    // content (nearer, z=0.2) reached far ahead (tipX=0.5); the other
+    // branch (farther, z=0.8) is STILL GROWING, spawned back at its own
+    // anchor (rootX=0.06) -- its eventual bake (whenever it matures) will
+    // still cover that whole path from 0.06 onward, so it could still
+    // arrive later and paint over this content near there.
+    const threats: BakeThreatEntry[] = [{ id: 'fg0:root1:0', z: 0.8, rootX: 0.06 }];
+    expect(isSafeToBake({ id: 'fg0:root0:0', z: 0.2, tipX: 0.5, threats, margin: 0.15 })).toBe(false);
+  });
+
+  it("allows (true) once that farther branch's own start has moved well past tipX + margin", () => {
+    // A forked child, spawned once its lineage's own growth had already
+    // swept well past this content's tipX + margin (0.5 + 0.15 = 0.65) --
+    // its own rootX (0.7) is already beyond that, so its future bake can
+    // never retroactively cover this content's territory back at 0.5.
+    const threats: BakeThreatEntry[] = [{ id: 'fg0:root1:0/child0', z: 0.8, rootX: 0.7 }];
+    expect(isSafeToBake({ id: 'fg0:root0:0', z: 0.2, tipX: 0.5, threats, margin: 0.15 })).toBe(true);
+  });
+
+  it('never gates against a nearer or equal-z growing branch (nearer/equal painting on top is already correct)', () => {
+    const threats: BakeThreatEntry[] = [
+      { id: 'fg0:root1:0', z: 0.6, rootX: 0.12 }, // equal z
+      { id: 'fg0:root2:0', z: 0.1, rootX: 0.12 }, // nearer z, right nearby -- would gate if treated as farther
+    ];
+    expect(isSafeToBake({ id: 'fg0:root0:0', z: 0.6, tipX: 0.9, threats, margin: 0.15 })).toBe(true);
+  });
+
+  it('treats "no growing branches at all" as no active threat', () => {
+    expect(isSafeToBake({ id: 'fg0:root0:0', z: 0.2, tipX: 0.5, threats: [], margin: 0.15 })).toBe(true);
+  });
+
+  it('never gates against itself (same id can appear at most as z<=ownZ, and is excluded by ancestor/descendant anyway)', () => {
+    const threats: BakeThreatEntry[] = [{ id: 'fg0:root1:0', z: 0.8, rootX: 0.06 }];
+    expect(isSafeToBake({ id: 'fg0:root1:0', z: 0.8, tipX: 0.9, threats, margin: 0.15 })).toBe(true);
+  });
+
+  // --- The ancestor-exclusion deadlock-avoidance case -- the single most
+  // important behavior in this file. Without excluding a branch's own
+  // still-growing descendants, a branch would ALWAYS see its own child as a
+  // threat: a forked child's rootX always falls on its own parent's
+  // already-grown path, by construction (spawnChildBranch's
+  // `rootX: parent.tipX`), so "child.rootX <= parent's own reach + margin"
+  // would always hold -- permanently blocking that branch from ever going
+  // final for as long as it keeps producing children, likely forever in
+  // practice.
+  it('is NOT blocked by its own actively-growing, farther-z child (the deadlock case)', () => {
+    // Parent 'fg0:root0:0' reached tipX=0.5; its own child forked off at
+    // that exact point (rootX: parent.tipX), drew a FARTHER z via
+    // childZJitter, and is still growing.
+    const threats: BakeThreatEntry[] = [{ id: 'fg0:root0:0/child0', z: 0.6, rootX: 0.5 }];
+    expect(isSafeToBake({ id: 'fg0:root0:0', z: 0.3, tipX: 0.5, threats, margin: 0.15 })).toBe(true);
+  });
+
+  it('is NOT blocked by a farther-z multi-generation descendant either', () => {
+    const threats: BakeThreatEntry[] = [{ id: 'fg0:root0:0/child0/child1/child0', z: 0.9, rootX: 0.55 }];
+    expect(isSafeToBake({ id: 'fg0:root0:0', z: 0.3, tipX: 0.5, threats, margin: 0.15 })).toBe(true);
+  });
+
+  it("is symmetric: a growing child is likewise not blocked by its own farther-z, still-growing ANCESTOR", () => {
+    const threats: BakeThreatEntry[] = [{ id: 'fg0:root0:0', z: 0.6, rootX: 0.1 }];
+    expect(isSafeToBake({ id: 'fg0:root0:0/child0', z: 0.3, tipX: 0.6, threats, margin: 0.15 })).toBe(true);
+  });
+
+  // --- The true sibling/cousin conflict: mirrors the real pixel-level
+  // evidence exactly (docs/HANDOFF.md session 018) -- two branches forked
+  // from a COMMON ancestor, at different fork points, ending up with
+  // different z, neither an ancestor of the other.
+  it('withholds a nearer cousin when a farther, unrelated cousin is still growing nearby, then allows once it passes', () => {
+    const nearerCousinId = 'fg0:root1:0/child0/child1';
+    const fartherCousinId = 'fg0:root1:0/child0/child0/child0/child0/child0'; // true cousin: shares only 'fg0:root1:0/child0', neither is the other's ancestor
+    expect(isAncestorOrDescendant(nearerCousinId, fartherCousinId)).toBe(false); // sanity
+
+    const stillNearby: BakeThreatEntry[] = [{ id: fartherCousinId, z: 0.7, rootX: 0.5 }];
+    expect(isSafeToBake({ id: nearerCousinId, z: 0.3, tipX: 0.5, threats: stillNearby, margin: 0.15 })).toBe(false);
+
+    const alreadyPast: BakeThreatEntry[] = [{ id: fartherCousinId, z: 0.7, rootX: 0.7 }];
+    expect(isSafeToBake({ id: nearerCousinId, z: 0.3, tipX: 0.5, threats: alreadyPast, margin: 0.15 })).toBe(true);
+  });
+
+  it('still gates correctly for the original cross-root case (a special case of the general branch-level check)', () => {
+    const threats: BakeThreatEntry[] = [{ id: 'fg0:root1:0', z: 0.8, rootX: 0.06 }];
+    expect(isSafeToBake({ id: 'fg0:root0:0', z: 0.2, tipX: 0.5, threats, margin: 0.15 })).toBe(false);
+  });
+});
+
+describe('createBotanicalStyle — bake-order safety: single-root, no-forking regression (must be a complete no-op)', () => {
+  // IMPORTANT (session 018): this describe block's title/scope narrowed
+  // deliberately from the original fix's "single-root = complete no-op"
+  // guarantee. The generalized, branch-level check can now legitimately
+  // gate a single-root session's `final` flags too, whenever forking
+  // produces a farther-z cousin close enough to conflict -- that's the
+  // fix's whole point, not a regression (see the next describe block,
+  // "single-root WITH forking", for a test proving that legitimate gating
+  // actually happens). The bar that DOES still hold unconditionally is
+  // narrower and structural: a session where NO branch ever forks at all
+  // has no way to ever produce two unrelated branches with differing z
+  // (spawnRootBranch's resprouts all share their root's own fixed z,
+  // never jittered -- only spawnChildBranch's childZJitter introduces z
+  // variation), so it genuinely can never have a real conflict to gate
+  // against, at any rootCount. `forkCountMin: 0, forkCountSpan: 0` forces
+  // `drawForkFractions`'s draw to always resolve to a fork count of 0
+  // (botanical.ts), which computeForkFractions/checkCrossedForks (branch.ts)
+  // turn into "this branch never forks, ever" -- a real, not simulated,
+  // guarantee of zero forking for the whole test.
+  const NO_FORK_OVERRIDES = { forkCountMin: 0, forkCountSpan: 0 };
+
+  it('final is exactly `lifecycle === "mature"` for every fg0 branch in a single-root, no-forking session, byte-for-byte the pre-fix formula', () => {
     const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0 }; // -> 1 root
-    const { renderer, state } = createBotanicalInternal();
+    const { renderer, state } = createBotanicalInternal(NO_FORK_OVERRIDES);
     renderer.init(createWorld('single-root-noop-seed', 0, overrides));
 
     runTicks(renderer, 800, 16.67, () => makeParams({ speed: 0.8, expansion: 0.6, symmetry: 0.4 }));
 
     expect(state.foregroundSystems[0]!.branches.some((b) => b.lifecycle === 'mature')).toBe(true); // sanity: real maturity happened
+    expect(state.foregroundSystems[0]!.branches.every((b) => b.generation === 0)).toBe(true); // sanity: no forking actually occurred
 
     const layer = (renderer.sceneLayers?.() ?? []).find((l) => l.layerId === 'fg0')!;
     const branches = state.foregroundSystems[0]!.branches.filter((b) => b.segments.length >= 2);
@@ -1007,9 +1116,9 @@ describe('createBotanicalStyle — cross-root bake-order safety: single-root reg
     });
   });
 
-  it('scene() and sceneLayers() agree with each other in the single-root case too (no divergence introduced by the fix)', () => {
+  it('scene() and sceneLayers() agree with each other in the single-root, no-forking case too (no divergence introduced by the fix)', () => {
     const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0 };
-    const renderer = createBotanicalStyle();
+    const renderer = createBotanicalStyle(NO_FORK_OVERRIDES);
     renderer.init(createWorld('single-root-consistency-seed', 0, overrides));
     runTicks(renderer, 500, 16.67, () => makeParams({ speed: 0.7, expansion: 0.5, symmetry: 0.5 }));
 
@@ -1019,10 +1128,57 @@ describe('createBotanicalStyle — cross-root bake-order safety: single-root reg
   });
 });
 
-describe('createBotanicalStyle — cross-root bake-order safety: forced two-root integration', () => {
+describe('createBotanicalStyle — bake-order safety: single-root WITH forking (new coverage, session 018)', () => {
+  it("withholds a mature branch's final flag when its own unrelated, farther-z cousin is still growing nearby, even with only one root", () => {
+    // The exact real-world gap the branch-level generalization closes: a
+    // single-root session (rootCount forced to 1) using DEFAULT tuning
+    // (forking on, childZJitter nonzero) -- if the old root-level-only
+    // check were still in place, this would never gate anything (a system
+    // with roots.length <= 1 was skipped entirely). A large margin makes
+    // withholding easy to observe within a bounded tick budget, same
+    // technique as the two-root "withholds" test below.
+    const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0 }; // -> 1 root
+    const { renderer, state } = createBotanicalInternal({ crossRootBakeSafetyMargin: 0.4 });
+    renderer.init(createWorld('single-root-forking-withhold-seed', 0, overrides));
+
+    const paramsAt = () => makeParams({ speed: 0.6, expansion: 0.6, symmetry: 0.4 });
+    let sawMatureNotYetFinal = false;
+    let sawFork = false;
+    let time = 0;
+    for (let t = 0; t < 800 && !sawMatureNotYetFinal; t++) {
+      renderer.step(paramsAt(), INITIAL_SESSION_PARAMS, time, 16.67);
+      time += 16.67;
+
+      expect(state.foregroundSystems[0]!.roots.length).toBe(1); // sanity: genuinely single-root throughout
+      if (state.foregroundSystems[0]!.branches.some((b) => b.generation > 0)) sawFork = true;
+
+      const layer = (renderer.sceneLayers?.() ?? []).find((l) => l.layerId === 'fg0')!;
+      const branches = state.foregroundSystems[0]!.branches.filter((b) => b.segments.length >= 2);
+      strokeFinalFlags(layer.elements).forEach((final, i) => {
+        if (branches[i]!.lifecycle === 'mature' && !final) sawMatureNotYetFinal = true;
+      });
+    }
+
+    expect(sawFork).toBe(true); // sanity: forking actually happened -- this is what makes the conflict possible at all
+    expect(sawMatureNotYetFinal).toBe(true);
+  });
+});
+
+describe('createBotanicalStyle — bake-order safety: forced two-root integration', () => {
   const TWO_ROOT_OVERRIDES: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0.75 }; // -> 1 + floor(0.75*2) = 2 roots
 
-  it('no baked-order violation occurs between different-root branches, across many ticks and several seeds', () => {
+  it('no baked-order violation occurs between any two UNRELATED branches -- cross-root or same-root cousins alike -- across many ticks and several seeds', () => {
+    // Generalized (session 018) from a cross-root-only sweep: with default
+    // tuning, forking is on (forkCountMin/Span) and childZJitter is nonzero,
+    // so this now also naturally exercises same-root sibling/cousin
+    // conflicts, not just cross-root ones -- the same brute-force pixel-
+    // proximity check now covers the whole generalized bug class in one
+    // sweep. Ancestor/descendant pairs are deliberately excluded from the
+    // violation count: the safety mechanism intentionally never gates a
+    // branch against its own lineage (isAncestorOrDescendant's own doc
+    // comment -- excluding it is required to avoid a permanent deadlock),
+    // so a child baking farther-z over its own parent's territory is
+    // expected, accepted behavior, not a bug this check should flag.
     const CLOSE_THRESHOLD = 0.04; // world units -- roughly a branch stroke width or two
     const dt = 16.67;
     const TICKS = 1200;
@@ -1051,7 +1207,7 @@ describe('createBotanicalStyle — cross-root bake-order safety: forced two-root
           if (i === j) continue;
           const a = branches[i]!;
           const b = branches[j]!;
-          if (a.rootIndex === b.rootIndex) continue;
+          if (isAncestorOrDescendant(a.id, b.id)) continue;
           const tickA = firstFinalTick.get(i);
           const tickB = firstFinalTick.get(j);
           if (tickA === undefined || tickB === undefined) continue;

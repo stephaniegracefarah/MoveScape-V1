@@ -45,6 +45,23 @@ export interface Branch {
   lifecycleTimer: number;
   matureDurationMs: number;
 
+  /**
+   * True once this branch's bake-order safety has been permanently resolved
+   * safe (botanical.ts's resolveBakeThreats/isSafeToBake) -- meaning it has
+   * effectively already baked into the live compositor's persistent buffer,
+   * correctly z-ordered, and can never again be a threat to anything else
+   * (docs/HANDOFF.md session 018's bake-order fix generalization). Starts
+   * false and, once flipped true, stays true forever -- this is what lets
+   * resolveBakeThreats skip already-resolved branches on every later tick
+   * instead of re-examining the whole session's ever-growing branch history
+   * each time (see resolveBakeThreats's own doc comment for why that bound
+   * matters: without it, this fix would reintroduce the exact unbounded
+   * per-frame cost shape docs/HANDOFF.md session 013's frame-rate-collapse
+   * fix eliminated). Meaningless for echo branches (never gated, never set)
+   * and for a branch still `growing` (can't have resolved yet either way).
+   */
+  bakeResolved: boolean;
+
   forkFractions: number[];
   forkedFractions: boolean[];
 }
@@ -171,6 +188,7 @@ export function spawnBranch(args: SpawnBranchArgs): Branch {
     lifecycle: 'growing',
     lifecycleTimer: 0,
     matureDurationMs: 0,
+    bakeResolved: false,
     forkFractions: args.forkFractions,
     forkedFractions: args.forkFractions.map(() => false),
   };

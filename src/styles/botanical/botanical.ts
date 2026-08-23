@@ -142,174 +142,296 @@ function createEmptyGrowthSystem(systemId: string): GrowthSystemState {
 }
 
 /**
- * The minimal shape computeGrowingRootStartMinX/isSafeToBake need from a
- * growth system -- a structural subset of GrowthSystemState (which
- * satisfies this automatically, so callers pass state.foregroundSystems
- * directly with no cast) kept separate so both functions stay easily
- * unit-testable with small hand-built fixtures instead of full
- * GrowthSystemState objects (resproutCounters/pendingClusters/etc. are
- * irrelevant to this check).
+ * The minimal shape computeBakeThreats/isSafeToBake need from a growth
+ * system -- a structural subset of GrowthSystemState (which satisfies this
+ * automatically, so callers pass state.foregroundSystems directly with no
+ * cast, after mapping in `reachX`) kept separate so both functions stay
+ * easily unit-testable with small hand-built fixtures instead of full
+ * GrowthSystemState objects (resproutCounters/pendingClusters/roots/etc.
+ * are irrelevant to this check). `reachX` is `branchMaxReachX(branch)` --
+ * the branch's own full-path max-x, needed (see computeBakeThreats's own
+ * doc comment) to resolve whether a MATURE branch is itself still blocked.
  */
-export interface RootBakeSafetySystem {
-  systemId: string;
-  roots: { x: number; z: number }[];
-  branches: { rootIndex: number; rootX: number; lifecycle: 'growing' | 'mature' }[];
+export interface BakeSafetySystem {
+  branches: { id: string; rootX: number; reachX: number; z: number; lifecycle: 'growing' | 'mature' }[];
+}
+
+/** One currently-live bake threat, as far as isSafeToBake needs to know about it: its own id (for the ancestor/descendant exclusion), its own z, and its own rootX (see computeBakeThreats's own doc comment for why rootX, not tipX/reachX, is the right quantity here). */
+export interface BakeThreatEntry {
+  id: string;
+  z: number;
+  rootX: number;
 }
 
 /**
- * For every (systemId, rootIndex) lineage, the smallest rootX among its
- * currently-STILL-GROWING branches -- keyed `${systemId}:${rootIndex}`.
- * This (not a "how far has it grown" frontier) is the quantity
- * isSafeToBake actually needs, for a subtle but important reason: the live
+ * Resolves every currently-live bake threat across every given system, into
+ * one flat list -- generalized (session 018) from an earlier, too-narrow
+ * version of this fix (`computeGrowingRootStartMinX`) that only tracked a
+ * per-(systemId, rootIndex) lineage minimum among GROWING branches. Real
+ * pixel-level evidence (a renderScene() vs live-compositor diff,
+ * docs/HANDOFF.md session 018) showed the bug this guards against is NOT
+ * bounded to different roots of the same system: a forked child gets its
+ * own z jitter relative to its parent (spawnChildBranch's childZJitter), so
+ * two SIBLING/COUSIN forked branches within the very same root's lineage
+ * can end up with meaningfully different z and mature (bake) out of order
+ * while physically overlapping -- the identical bug class, just one level
+ * down from roots.
+ *
+ * A branch still GROWING is unconditionally a threat, exactly as in the
+ * original root-level fix: it hasn't matured, so it can't have baked yet,
+ * full stop. Each such entry's `rootX` (not a "how far has it grown"
+ * frontier) is the quantity isSafeToBake actually needs: the live
  * compositor bakes a stroke whole, in one shot, only once it matures
  * (live-compositor.ts's drawStrokeElementFully bakes every segment from
  * index 0), covering its ENTIRE path from its own rootX (fixed at spawn,
- * never moves) onward. A branch's CURRENT tipX while still growing says
- * nothing about that future bake -- it will still include everything back
- * to its own rootX once it finally matures, however much further it grows
- * meanwhile. So a NOT-YET-MATURE branch is a live threat to any nearby
- * content with x >= its rootX, for as long as it keeps growing; a MATURE
- * branch, by contrast, poses no threat at all regardless of its tipX --
- * once mature it either already baked (an earlier frame) or is baking
- * THIS frame, sorted correctly by z alongside whatever else bakes this
- * same frame (live-compositor.ts's collectAndBakeBucket) -- either way its
- * bake-order relative to anything checking safety now is already resolved
- * correctly. (An earlier version of this fix tracked "max tipX reached by
- * any mature branch" instead; testing found it insufficient -- a fast,
- * shallow FORKED CHILD of the farther root can mature and report a
- * generous tipX while that root's own slower, root-covering branch is
- * still growing and will still bake later, still covering the origin
+ * never moves) onward -- a branch's CURRENT tipX while still growing says
+ * nothing about that future bake. (An earlier version of the ORIGINAL
+ * root-level fix tracked "max tipX reached by any mature branch" instead;
+ * testing found it insufficient -- a fast, shallow forked child can mature
+ * and report a generous tipX while its own slower, root-covering ancestor
+ * is still growing and will still bake later, still covering the origin
  * region. Gating on growing branches' own rootX instead of mature
- * branches' tipX closes that gap directly.)
+ * branches' tipX closed that gap.)
  *
- * A lineage with no currently-growing branch at all (every branch mature,
- * or --degenerate/test-fixture only, since a real root always has >=1
- * branch from init onward -- no branches yet) has no entry here;
- * isSafeToBake's own fallback distinguishes "definitely no threat right
- * now" from "never grew, worst case" (see its own doc comment).
+ * A MATURE branch is only excluded from the threat list once it is itself
+ * genuinely resolved safe -- NOT simply because `lifecycle === 'mature'`.
+ * This is the critical correction session 018's own integration sweep found
+ * (a third correction, alongside the two preserved from the original fix,
+ * both documented above/in isSafeToBake): a mature branch can itself still
+ * be BLOCKED, waiting on some farther, unrelated branch of its own -- and
+ * while it waits, it hasn't baked yet either, so it remains exactly as much
+ * a threat to nearer content as a still-growing branch does (once it
+ * finally does bake, it'll cover its own full path from its own rootX
+ * onward, same as any other branch). The ORIGINAL root-level fix's doc
+ * comment claimed "a mature branch poses no threat at all... once mature it
+ * either already baked or is baking THIS frame" -- true there only because
+ * that fix's own scope (roots.length <= 1 skipped, only ever 2 roots tops)
+ * structurally guaranteed a root's own farthest branch could never itself
+ * be blocked by anything (nothing was ever farther than it within its own
+ * skip-single-root-systems scope), so "mature" and "already resolved safe"
+ * were always the same thing there. Branch-level generalization breaks that
+ * guarantee -- z is now a continuum across arbitrarily many fork
+ * generations, not a two-level hierarchy -- so "mature" alone no longer
+ * implies "resolved."
+ *
+ * Resolving this requires knowing each mature branch's OWN safety before
+ * deciding whether it belongs in the list other branches check against --
+ * a mutual-dependency-shaped problem, solved here without recursion or any
+ * persisted state by processing FARTHEST-FIRST: sort every branch (growing
+ * and mature alike) by z descending, then walk in that order accumulating
+ * `threats`. By the time any given mature branch is reached, every entry
+ * already in `threats` is guaranteed to be farther than it (or, from an
+ * ancestor/descendant, correctly excluded by isSafeToBake itself) and
+ * already fully resolved -- so checking that branch's own safety against
+ * the threats accumulated SO FAR is exactly correct, no forward references
+ * needed. If it resolves safe, it's excluded (it bakes now, this pass,
+ * correctly z-sorted alongside whatever else resolves safe in the same
+ * pass -- live-compositor.ts's collectAndBakeBucket). If not, it's pushed
+ * onto `threats` too, using its own `rootX` (not `reachX`) for the exact
+ * same "will cover its full path once it finally does bake" reason growing
+ * branches use `rootX` -- a mature-but-blocked branch's eventual bake is
+ * just as complete as any other's.
+ *
+ * No branch anywhere (every system empty, a degenerate/test-fixture case)
+ * simply means an empty threat list, so isSafeToBake finds nothing to gate
+ * against for any candidate.
  */
-export function computeGrowingRootStartMinX(systems: RootBakeSafetySystem[]): Map<string, number> {
-  const minX = new Map<string, number>();
-  for (const system of systems) {
-    for (const branch of system.branches) {
-      if (branch.lifecycle !== 'growing') continue;
-      const key = `${system.systemId}:${branch.rootIndex}`;
-      const current = minX.get(key);
-      if (current === undefined || branch.rootX < current) {
-        minX.set(key, branch.rootX);
-      }
+export function computeBakeThreats(systems: BakeSafetySystem[], margin: number): BakeThreatEntry[] {
+  const all = systems.flatMap((system) => system.branches);
+  all.sort((a, b) => b.z - a.z); // farthest first, so every branch's own check sees only already-resolved farther entries
+
+  const threats: BakeThreatEntry[] = [];
+  for (const branch of all) {
+    if (branch.lifecycle === 'growing') {
+      threats.push({ id: branch.id, z: branch.z, rootX: branch.rootX });
+      continue;
+    }
+    const resolvedSafe = isSafeToBake({ id: branch.id, z: branch.z, tipX: branch.reachX, threats, margin });
+    if (!resolvedSafe) {
+      threats.push({ id: branch.id, z: branch.z, rootX: branch.rootX });
     }
   }
-  return minX;
+  return threats;
+}
+
+const CHILD_PATH_SEPARATOR_CHAR_CODE = 47; // '/'
+
+/**
+ * True iff `a` and `b` are the same branch, or one is a direct ancestor of
+ * the other in the fork lineage -- a forked child's id is always
+ * `${parent.id}/child${n}` (spawnChildBranch), all the way down, so
+ * ancestry is exactly the id-prefix relationship. Exported for direct unit
+ * testing (this exclusion is the single most important thing this file
+ * gets right or wrong -- see isSafeToBake's own doc comment for why).
+ *
+ * Written to avoid ever allocating a concatenated string (equivalent to,
+ * but deliberately not written as, `b.startsWith(a + '/')` /
+ * `a.startsWith(b + '/')`) -- computeBakeThreats calls this up to O(k^2)
+ * times per tick (k = currently-unresolved branch count), and profiling a
+ * long (2000-tick) session found the naive concatenating version alone
+ * responsible for multi-second slowdowns purely from allocation/GC churn,
+ * not the underlying comparison logic -- a real, measured perf regression
+ * this fix's own long-running tests caught, not a micro-optimization taken
+ * on faith.
+ */
+export function isAncestorOrDescendant(a: string, b: string): boolean {
+  if (a === b) return true;
+  if (b.length > a.length && b.charCodeAt(a.length) === CHILD_PATH_SEPARATOR_CHAR_CODE && b.startsWith(a)) return true;
+  if (a.length > b.length && a.charCodeAt(b.length) === CHILD_PATH_SEPARATOR_CHAR_CODE && a.startsWith(b)) return true;
+  return false;
 }
 
 /**
- * The cross-root bake-order safety check (docs/HANDOFF.md, cross-root
- * paint-order bug): a piece of content at (ownSystemId, ownRootIndex, ownZ,
- * ownTipX) is safe to permanently bake (or, for a blossom, to be revealed
- * into the scene) only if, for every OTHER root sharing the same
- * compositor bucket that is currently FARTHER (larger z -- nearer-z roots
- * painting over farther-z roots is already correct, expected behavior),
- * NO currently-growing branch of that root starts (`rootX`) at or before
- * this content's own x position plus `margin` -- see
- * computeGrowingRootStartMinX's own doc comment for why growing branches'
- * OWN start point, not how far anything has grown, is what actually
- * determines future bake-order risk.
+ * The bake-order safety check (docs/HANDOFF.md, cross-root paint-order bug
+ * and its session-018 generalization): a piece of content -- a branch going
+ * `final`, or a blossom about to be revealed -- at (id, z, tipX) is safe to
+ * permanently bake into the live compositor's persistent buffer only if, for
+ * every entry in the given resolved `threats` list (see computeBakeThreats
+ * -- every still-growing branch, PLUS every mature-but-still-blocked one)
+ * that is currently FARTHER (larger z -- nearer-z content painting over
+ * farther-z content is already correct, expected behavior) and NOT in a
+ * direct ancestor/descendant relationship with this content, that threat's
+ * own start point (`rootX`) is strictly beyond this content's own x position
+ * plus `margin` -- see computeBakeThreats's own doc comment for why a
+ * threat's OWN start point, not how far anything has grown, is what
+ * actually determines future bake-order risk.
  *
- * A root with no growing-branch entry (computeGrowingRootStartMinX) --
- * every one of its branches mature, the ordinary case whenever a root
- * happens to be between one branch maturing and its next resprout starting
- * -- has no active threat right now and is treated as infinitely safe.
+ * This is BRANCH-level, not root-level (generalized from the original fix,
+ * which only ever compared different roots of the same system): real
+ * pixel-level evidence showed the same overwrite bug happens between
+ * sibling/cousin forked branches within a single root's own lineage too --
+ * forking gives each child its own z jitter relative to its parent
+ * (spawnChildBranch's childZJitter), with no guarantee a nearer-z cousin
+ * matures before a farther-z one, even when they never span more than one
+ * root. So every live threat across every foreground system is a potential
+ * threat to every other piece of content, full stop -- EXCEPT its own
+ * ancestors/descendants, per the exclusion below.
  *
- * Only ever needs to consider OTHER roots -- a root can never threaten its
- * own content (same lineage always bakes in its own arrival order, which is
- * already correct within one root), so same-(systemId,rootIndex) pairs are
- * always skipped.
+ * The ancestor/descendant exclusion is required, not optional -- without
+ * it, this function would deadlock every branch that ever forks. A forked
+ * child's id is always `${parent.id}/child${n}` (spawnChildBranch), and it
+ * spawns at the parent's CURRENT tip (`rootX: parent.tipX`) -- meaning a
+ * child's own rootX always falls somewhere along its own parent's already-
+ * grown path, by construction. Left unexcluded, a branch would always see
+ * its own still-growing child as a threat (the child's rootX will always
+ * satisfy "rootX <= parent's own reach + margin", since it forked from a
+ * point on that very path), permanently blocking that branch from ever
+ * going final for as long as it keeps producing children -- likely forever
+ * in practice. `isAncestorOrDescendant` (id-prefix check) is exactly what
+ * excludes this: a branch's own lineage can never threaten itself, only
+ * genuinely unrelated siblings/cousins/other roots can.
  *
- * Only a system with MORE THAN ONE root can ever supply a threatening
- * "other root": the confirmed bug's whole precondition is the structural
- * guarantee that within one system, a higher rootIndex is ALWAYS farther
- * (initGrowthSystem's `z = clamp01((i + zJitter) / rootCount)`), so a
- * higher-index root can genuinely still be catching up to a lower-index
- * root's own content. A system with exactly one root carries no such
- * guarantee at all -- that lone root's z is just one arbitrary draw
- * (rootCount=1 collapses the same formula to `clamp01(zJitter)`, uniform
- * over the whole depth range), unrelated by construction to any other
- * system's own root(s). This matters in practice: the growth-plateau
- * hand-off (maybeSpawnNextForegroundSystem) appends a new always-single-root
- * foreground system once an earlier one fills up, so a long session
- * ordinarily has several single-root systems live in the same 'foreground'
- * compositor bucket at once even when every individual system only ever had
- * 1 root -- treating those as mutual threats would gate on a coincidental,
- * meaningless z relationship instead of the real bug, with no way to ever
- * resolve (two single-root systems' roots don't converge the way two roots
- * racing down the same system's shared sweep do). Skipping single-root
- * systems entirely keeps the single-root case a true no-op end-to-end, at
- * any number of foreground systems, exactly matching this fix's own
- * regression requirement.
+ * (Resprouts at the same root are not a source of new risk here, and don't
+ * need special-casing: spawnRootBranch always uses `z: root.z` -- the
+ * root's own fixed z, never jittered per-resprout -- so two different
+ * resprouts of the same root can never have different z, and thus can
+ * never threaten each other. `childZJitter` at fork points is the only
+ * source of z variation within one root's lineage.)
+ *
+ * An empty `threats` list (every branch already resolved safe, or a
+ * degenerate/test-fixture system with no branches at all) simply means
+ * this loop finds nothing to gate against, so the content is safe.
  */
 export function isSafeToBake(args: {
-  ownSystemId: string;
-  ownRootIndex: number;
-  ownZ: number;
-  ownTipX: number;
-  allSystems: RootBakeSafetySystem[];
-  growingRootStartMinX: Map<string, number>;
+  id: string;
+  z: number;
+  tipX: number;
+  threats: BakeThreatEntry[];
   margin: number;
 }): boolean {
-  for (const system of args.allSystems) {
-    if (system.roots.length <= 1) continue;
-    for (let rootIndex = 0; rootIndex < system.roots.length; rootIndex++) {
-      if (system.systemId === args.ownSystemId && rootIndex === args.ownRootIndex) continue;
-      const otherZ = system.roots[rootIndex]!.z;
-      if (otherZ <= args.ownZ) continue; // only a FARTHER root can later paint over this content
-      const key = `${system.systemId}:${rootIndex}`;
-      // No entry -> no currently-growing branch for this root -> no active
-      // threat right now (Infinity, never <= anything finite).
-      const threatStartX = args.growingRootStartMinX.get(key) ?? Infinity;
-      if (threatStartX <= args.ownTipX + args.margin) return false;
-    }
+  for (const entry of args.threats) {
+    if (entry.z <= args.z) continue; // only a FARTHER threat can later paint over this content
+    if (isAncestorOrDescendant(entry.id, args.id)) continue; // own lineage can never threaten itself
+    if (entry.rootX <= args.tipX + args.margin) return false;
   }
   return true;
 }
 
 /**
- * Bundles everything isSafeToBake needs about the current cross-root
- * foreground state -- computed once per tick (stepState, for blossom-reveal
- * gating) or once per scene emission (buildScene/buildSceneLayers, for
- * stroke finality gating), then threaded down to each individual branch's
- * or blossom's own isSafeToBake call rather than recomputed per-element.
- * `allSystems` is always `state.foregroundSystems` -- echoes are each their
- * own separate compositor bucket (live-compositor.ts's bucketFor), so they
- * neither need this check applied to them nor participate as an "other
- * root" in anyone else's check (see stepState/buildScene: echo calls pass
- * `undefined` for this instead of a CrossRootBakeSafety).
+ * Bundles everything isSafeToBake needs about the current foreground state
+ * -- computed once per tick (stepState, for blossom-reveal gating) or once
+ * per scene emission (buildScene/buildSceneLayers, for stroke finality
+ * gating), then threaded down to each individual branch's or blossom's own
+ * isSafeToBake call rather than recomputed per-element. `threats` is always
+ * built from `state.foregroundSystems` via computeBakeThreats -- echoes are
+ * each their own separate compositor bucket (live-compositor.ts's
+ * bucketFor), so they neither need this check applied to them nor
+ * participate as a threat in anyone else's check (see stepState/buildScene:
+ * echo calls pass `undefined` for this instead of a BakeSafety).
  */
-interface CrossRootBakeSafety {
-  growingRootStartMinX: Map<string, number>;
-  allSystems: GrowthSystemState[];
+interface BakeSafety {
+  threats: BakeThreatEntry[];
   margin: number;
 }
 
-function computeCrossRootBakeSafety(state: BotanicalState): CrossRootBakeSafety {
-  return {
-    growingRootStartMinX: computeGrowingRootStartMinX(state.foregroundSystems),
-    allSystems: state.foregroundSystems,
-    margin: state.tuning.crossRootBakeSafetyMargin,
-  };
+/**
+ * Resolves bake-order safety for every currently UNRESOLVED branch (still
+ * `growing`, or `mature` but not yet `bakeResolved`) across all foreground
+ * systems, permanently marking `branch.bakeResolved = true` on each mature
+ * one that newly resolves safe (see Branch.bakeResolved's own doc comment
+ * for why this is safe to never revisit), and returns the resulting
+ * threats list (every entry still open -- growing, or mature-and-still-
+ * blocked) for blossom-reveal gating this same tick.
+ *
+ * PERFORMANCE, not just correctness (session 018's third correction, found
+ * the same way as the other two -- by testing, not assumed up front): this
+ * is deliberately NOT "call computeBakeThreats over every branch, every
+ * tick." `system.branches` only ever grows for the life of a session
+ * (permanent ink, docs/styles/botanical.md section 7) -- feeding computeBake
+ * Threats's O(n log n + n^2) resolution pass (n = branch count) the FULL
+ * cumulative branch history every single tick would reintroduce exactly the
+ * unbounded-per-frame-cost shape this project has explicitly guarded
+ * against before (docs/HANDOFF.md session 013's frame-rate-collapse fix;
+ * the "Option 1" full-bucket-rebuild false start this fix's own predecessor
+ * retracted for the identical reason). The first version of this
+ * generalization did exactly that and made two long-running tests
+ * (unrelated to this fix -- "bounded branch/element count" and the
+ * growth-plateau hand-off determinism check, both running thousands of
+ * ticks) time out.
+ *
+ * The fix: once a branch resolves safe, it has effectively already baked,
+ * permanently, correctly ordered -- nothing that happens later can ever
+ * retroactively make an already-baked bake unsafe, so it can be permanently
+ * excluded from every future tick's input set (the `!branch.bakeResolved`
+ * filter below). This bounds each call's real work to "branches still
+ * growing or still blocked right now," which -- like `maxConcurrentBranches`
+ * itself -- stays roughly constant regardless of how long the session has
+ * run, instead of scaling with the session's entire history.
+ */
+function resolveBakeThreats(state: BotanicalState): BakeSafety {
+  const margin = state.tuning.crossRootBakeSafetyMargin;
+  const systems: BakeSafetySystem[] = state.foregroundSystems.map((system) => ({
+    branches: system.branches
+      .filter((branch) => branch.lifecycle === 'growing' || !branch.bakeResolved)
+      .map((branch) => ({
+        id: branch.id,
+        rootX: branch.rootX,
+        reachX: branchMaxReachX(branch),
+        z: branch.z,
+        lifecycle: branch.lifecycle,
+      })),
+  }));
+  const threats = computeBakeThreats(systems, margin);
+  const stillBlockedIds = new Set(threats.map((t) => t.id));
+  for (const system of state.foregroundSystems) {
+    for (const branch of system.branches) {
+      if (branch.lifecycle === 'mature' && !branch.bakeResolved && !stillBlockedIds.has(branch.id)) {
+        branch.bakeResolved = true;
+      }
+    }
+  }
+  return { threats, margin };
 }
 
-/** True if the next not-yet-revealed blossom in `pending` (if any) is safe to reveal right now per the cross-root bake-order check -- `safety === undefined` (echo systems, which never need this check) always returns true. */
-function isNextBlossomSafe(pending: PendingBlossomCluster, systemId: string, safety: CrossRootBakeSafety | undefined): boolean {
+/** True if the next not-yet-revealed blossom in `pending` (if any) is safe to reveal right now per the bake-order safety check -- `safety === undefined` (echo systems, which never need this check) always returns true. The blossom's own "id" for the ancestor/descendant exclusion is its owning branch's id (`branchId`) -- a blossom is never a threat to its own owning branch's lineage, same logic as a branch never threatening its own lineage. */
+function isNextBlossomSafe(pending: PendingBlossomCluster, safety: BakeSafety | undefined): boolean {
   if (safety === undefined) return true;
   const next = pending.blossoms[pending.revealedCount]!;
   return isSafeToBake({
-    ownSystemId: systemId,
-    ownRootIndex: next.rootIndex,
-    ownZ: next.z,
-    ownTipX: next.x,
-    allSystems: safety.allSystems,
-    growingRootStartMinX: safety.growingRootStartMinX,
+    id: next.branchId,
+    z: next.z,
+    tipX: next.x,
+    threats: safety.threats,
     margin: safety.margin,
   });
 }
@@ -329,7 +451,7 @@ function isNextBlossomSafe(pending: PendingBlossomCluster, systemId: string, saf
  * is itself deterministic.
  *
  * A blossom that is otherwise due (the timer condition holds) but not yet
- * safe to bake per isNextBlossomSafe (cross-root bake-order check) is left
+ * safe to bake per isNextBlossomSafe (bake-order safety check) is left
  * pending: the timer is NOT decremented and the blossom is NOT pushed, so
  * `revealTimerMs` keeps accumulating (already incremented this tick, above
  * the while loop) and gets rechecked next tick without losing progress or
@@ -338,12 +460,11 @@ function isNextBlossomSafe(pending: PendingBlossomCluster, systemId: string, saf
  */
 function revealPendingBlossoms(
   system: GrowthSystemState,
-  systemId: string,
   dt: number,
   intervalMs: number,
   speed: number,
   speedFloor: number,
-  safety: CrossRootBakeSafety | undefined,
+  safety: BakeSafety | undefined,
 ): void {
   const effectiveDt = dt * (speedFloor + speed * (1 - speedFloor));
   let anyFullyRevealed = false;
@@ -356,7 +477,7 @@ function revealPendingBlossoms(
     while (
       pending.revealTimerMs >= intervalMs &&
       pending.revealedCount < pending.blossoms.length &&
-      isNextBlossomSafe(pending, systemId, safety)
+      isNextBlossomSafe(pending, safety)
     ) {
       system.blossoms.push(pending.blossoms[pending.revealedCount]!);
       pending.revealedCount++;
@@ -602,7 +723,7 @@ function stepGrowthSystem(
   params: MovementParams,
   dt: number,
   maxGenerationForSystem: number,
-  bakeSafety: CrossRootBakeSafety | undefined,
+  bakeSafety: BakeSafety | undefined,
 ): void {
   const newBranches: Branch[] = [];
   const liveCount = () => system.branches.length + newBranches.length;
@@ -673,7 +794,6 @@ function stepGrowthSystem(
 
   revealPendingBlossoms(
     system,
-    systemId,
     dt,
     state.tuning.blossomRevealIntervalMs,
     params.speed,
@@ -761,12 +881,14 @@ function stepState(state: BotanicalState, params: MovementParams, sessionParams:
   state.latestParams = params;
   state.latestSessionParams = sessionParams;
 
-  // Computed once per tick, before the per-system loop -- doesn't depend on
+  // Resolved once per tick, before the per-system loop -- doesn't depend on
   // which system/branch/blossom is being checked, so every foreground
-  // system this tick shares the same snapshot (docs/HANDOFF.md cross-root
-  // bake-order fix). Echoes never receive this (see CrossRootBakeSafety's
-  // own doc comment) -- each echo is its own separate compositor bucket.
-  const bakeSafety = computeCrossRootBakeSafety(state);
+  // system this tick shares the same snapshot for blossom-reveal gating
+  // (docs/HANDOFF.md bake-order fix). This reflects state as of the END of
+  // the PREVIOUS tick (nothing has grown yet this tick). Echoes never
+  // receive this (see BakeSafety's own doc comment) -- each echo is its own
+  // separate compositor bucket.
+  const bakeSafety = resolveBakeThreats(state);
 
   for (const system of state.foregroundSystems) {
     stepGrowthSystem(state, system, system.systemId, params, dt, state.tuning.maxGeneration, bakeSafety);
@@ -784,6 +906,16 @@ function stepState(state: BotanicalState, params: MovementParams, sessionParams:
       undefined,
     );
   });
+
+  // Resolved AGAIN here, after this tick's own growth/forking/maturation
+  // and the growth-plateau hand-off -- so any branch that newly matured (or
+  // newly forked) THIS tick gets its bake-safety resolved immediately,
+  // rather than lagging one tick behind. Cheap: resolveBakeThreats only
+  // ever examines currently-unresolved branches (see its own doc comment),
+  // and this call's mutations are exactly what buildScene/buildSceneLayers
+  // (via emitGrowthSystem) read `branch.bakeResolved` from -- no separate
+  // isSafeToBake recomputation happens at scene-emission time anymore.
+  resolveBakeThreats(state);
 }
 
 /** Emits one growth system's branches/blossoms as scene elements, applying its z-offset (depth-echo placement) and opacity multiplier (depth-echo paleness) on top of each element's own values. zOffset=0/opacityMultiplier=1 for the foreground system is a no-op. */
@@ -792,16 +924,18 @@ function stepState(state: BotanicalState, params: MovementParams, sessionParams:
  * NOT necessarily its current `tipX`. Wander can occasionally curve a
  * branch's direction enough that it ends up net-negative relative to where
  * it started, or otherwise finishes to the left of an earlier point along
- * its own path (docs/HANDOFF.md cross-root bake-order fix: found via the
- * fix's own wide-seed verification sweep). isSafeToBake's `ownTipX` is
- * meant to answer "how far right does this content's own path actually
- * reach" (the relevant question for whether a farther root's still-growing
- * branch could still catch up and overlap it) -- using the raw, possibly
- * backward-drifted `tipX` there would understate that reach and let content
- * bake before it's genuinely safe. Only relevant for this safety check;
- * every other use of `tipX` in this file (front-driven resprout position,
- * growth-plateau hand-off anchoring, wherever a branch actually IS right
- * now) intentionally means the literal current tip, not this.
+ * its own path (docs/HANDOFF.md bake-order fix: found via the original
+ * root-level fix's own wide-seed verification sweep, still true unchanged
+ * after the session-018 branch-level generalization). isSafeToBake's `tipX`
+ * is meant to answer "how far right does this content's own path actually
+ * reach" (the relevant question for whether a farther, unrelated
+ * still-growing branch could still catch up and overlap it) -- using the
+ * raw, possibly backward-drifted `tipX` there would understate that reach
+ * and let content bake before it's genuinely safe. Only relevant for this
+ * safety check; every other use of `tipX` in this file (front-driven
+ * resprout position, growth-plateau hand-off anchoring, wherever a branch
+ * actually IS right now) intentionally means the literal current tip, not
+ * this.
  */
 function branchMaxReachX(branch: Branch): number {
   let max = branch.rootX;
@@ -817,29 +951,25 @@ function emitGrowthSystem(
   system: GrowthSystemState,
   zOffset: number,
   opacityMultiplier: number,
-  bakeSafety?: CrossRootBakeSafety,
+  applyBakeSafety = false,
 ): void {
   for (const branch of system.branches) {
     if (branch.segments.length < 2) continue; // a stroke needs at least 2 points
 
     // A mature branch is only reported final (and therefore only baked by
-    // the live compositor -- docs/HANDOFF.md cross-root bake-order fix) once
-    // it's also safe: no other, farther root sharing this bucket could
-    // still arrive later and permanently paint over it. bakeSafety is
-    // undefined for echo systems (their own separate compositor bucket --
-    // no cross-root risk there), where this is exactly the pre-fix check.
-    const final =
-      branch.lifecycle === 'mature' &&
-      (bakeSafety === undefined ||
-        isSafeToBake({
-          ownSystemId: system.systemId,
-          ownRootIndex: branch.rootIndex,
-          ownZ: branch.z,
-          ownTipX: branchMaxReachX(branch),
-          allSystems: bakeSafety.allSystems,
-          growingRootStartMinX: bakeSafety.growingRootStartMinX,
-          margin: bakeSafety.margin,
-        }));
+    // the live compositor -- docs/HANDOFF.md bake-order fix) once it's also
+    // safe: no other, farther, unrelated (not its own ancestor/descendant)
+    // live threat (still-growing, or itself mature-but-still-blocked -- see
+    // computeBakeThreats) sharing this bucket could still arrive later and
+    // permanently paint over it. Resolved once already, per tick, by
+    // resolveBakeThreats (stepState) -- `branch.bakeResolved` is simply read
+    // here, not recomputed, which is also what keeps scene()/sceneLayers()
+    // trivially, always in agreement (both just read the same persisted
+    // field). `applyBakeSafety` is false for echo systems (their own
+    // separate compositor bucket -- no such risk there, and bakeResolved is
+    // never set for echo branches in the first place), where this is
+    // exactly the pre-fix check.
+    const final = branch.lifecycle === 'mature' && (!applyBakeSafety || branch.bakeResolved);
 
     elements.push({
       kind: 'stroke',
@@ -878,14 +1008,14 @@ function emitGrowthSystem(
 
 function buildScene(state: BotanicalState): Scene {
   const elements: SceneElement[] = [];
-  // Computed once per call, not per branch -- doesn't depend on which
-  // branch is being checked (docs/HANDOFF.md cross-root bake-order fix).
-  // Applies only to foreground systems; echoes are each their own separate
-  // compositor bucket, so they're emitted exactly as before (no bakeSafety).
-  const bakeSafety = computeCrossRootBakeSafety(state);
-
+  // `applyBakeSafety: true` for foreground systems only -- bake-order
+  // safety is already fully resolved per tick by resolveBakeThreats
+  // (stepState), so this just reads each branch's own persisted
+  // `bakeResolved` flag (docs/HANDOFF.md bake-order fix); no per-call
+  // computation happens here anymore. Echoes are each their own separate
+  // compositor bucket, so they're emitted exactly as before (unGATED).
   for (const system of state.foregroundSystems) {
-    emitGrowthSystem(elements, state, system, 0, 1, bakeSafety);
+    emitGrowthSystem(elements, state, system, 0, 1, true);
   }
   ECHO_CONFIGS.forEach((echoConfig, i) => {
     emitGrowthSystem(elements, state, state.echoes[i]!, echoConfig.zOffset, echoConfig.opacityMultiplier);
@@ -907,16 +1037,15 @@ function buildScene(state: BotanicalState): Scene {
  */
 function buildSceneLayers(state: BotanicalState): SceneLayer[] {
   const layers: SceneLayer[] = [];
-  // Same bakeSafety contract as buildScene above -- computed once per call,
-  // applies only to foreground systems, so this stays byte-for-byte
+  // Same bakeResolved-reading contract as buildScene above -- both just
+  // read each branch's own persisted flag, so this stays byte-for-byte
   // consistent with buildScene's own `final` values for the same state
   // (sceneLayers' own doc comment / the "never silently out of sync with
-  // scene()" test both require this).
-  const bakeSafety = computeCrossRootBakeSafety(state);
-
+  // scene()" test both require this) with no risk of divergence, since
+  // neither call site recomputes anything.
   for (const system of state.foregroundSystems) {
     const elements: SceneElement[] = [];
-    emitGrowthSystem(elements, state, system, 0, 1, bakeSafety);
+    emitGrowthSystem(elements, state, system, 0, 1, true);
     layers.push({ layerId: system.systemId, elements });
   }
   ECHO_CONFIGS.forEach((echoConfig, i) => {
