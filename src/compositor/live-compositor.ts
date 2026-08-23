@@ -239,18 +239,41 @@ function collectAndBakeBucket(bucketLayers: SceneLayer[], getLayerState: (layerI
 }
 
 /**
- * Redraws every still-growing (`final` absent/false) stroke element in
- * `layer` fully, fresh, directly onto `destCtx` -- exactly what
- * renderScene() would do for that one element. Cheap: concurrently-growing
- * strokes are a small, bounded set per growth system (capped by
+ * Redraws every still-growing (`final` absent/false) stroke element across
+ * ALL of `bucketLayers` fully, fresh, directly onto `destCtx` -- exactly
+ * what renderScene() would do for those elements. Cheap: concurrently-
+ * growing strokes are a small, bounded set per growth system (capped by
  * maxConcurrentBranches), unlike the unboundedly-accumulating mature
  * content collectAndBakeBucket handles above.
+ *
+ * Paint-order fix (docs/HANDOFF.md, session 018's render-diff evidence):
+ * this used to draw each layer's own live strokes independently, one layer
+ * at a time, in `layer.elements` array order -- NOT sorted by z at all,
+ * unlike collectAndBakeBucket's bake path (which already z-sorts its own
+ * batch, since PR #14). Multiple branches can be growing CONCURRENTLY within
+ * one bucket (maxConcurrentBranches allows many at once), each with its own
+ * z -- with no sort, a farther-z branch could paint over a nearer-z one
+ * every single frame this condition holds, for as long as both stay
+ * unresolved (which, per this fix's own bake-order gate, can now be many
+ * frames). Fixed the same way collectAndBakeBucket already is: collect every
+ * live stroke across every layer in this bucket first, sort by z descending
+ * (farthest first, same convention as renderScene/collectAndBakeBucket), THEN
+ * draw. Never baked, so this has zero effect on the permanent-bake
+ * correctness fix above -- purely the live (never-yet-final) redraw's own
+ * paint order within a single frame.
  */
-function drawLiveStrokes(layer: SceneLayer, destCtx: CanvasLike, worldUnitPx: number): void {
-  for (const element of layer.elements) {
-    if (element.kind === 'stroke' && element.final !== true) {
-      drawStrokeElementFully(destCtx, element, worldUnitPx);
+function drawLiveStrokes(bucketLayers: SceneLayer[], destCtx: CanvasLike, worldUnitPx: number): void {
+  const pending: StrokeElement[] = [];
+  for (const layer of bucketLayers) {
+    for (const element of layer.elements) {
+      if (element.kind === 'stroke' && element.final !== true) {
+        pending.push(element);
+      }
     }
+  }
+  pending.sort((a, b) => b.z - a.z);
+  for (const element of pending) {
+    drawStrokeElementFully(destCtx, element, worldUnitPx);
   }
 }
 
@@ -320,10 +343,10 @@ export function createLiveCompositor(bufferFactory: OffscreenBufferFactory): Liv
 
         // Still-growing strokes for this bucket paint on top of this
         // bucket's own just-blitted content, but before the NEXT bucket
-        // (nearer to the viewer) gets composited over them.
-        for (const layer of bucketLayers) {
-          drawLiveStrokes(layer, destCtx, worldUnitPx);
-        }
+        // (nearer to the viewer) gets composited over them. z-sorted across
+        // the whole bucket, not per-layer -- see drawLiveStrokes's own doc
+        // comment.
+        drawLiveStrokes(bucketLayers, destCtx, worldUnitPx);
       }
     },
     reset(): void {
