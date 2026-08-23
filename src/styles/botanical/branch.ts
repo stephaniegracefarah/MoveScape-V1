@@ -213,7 +213,14 @@ export function tickGrowing(
 
   branch.grownLength += growthStep;
   branch.direction += directionDelta;
-  branch.tipX = clamp01(branch.tipX + Math.cos(branch.direction) * growthStep);
+  // x is world-space and unbounded (the Scroll: the canvas grows to fit
+  // whatever x content reaches -- see compositor/render-scene.ts's
+  // computeCanvasSize), so only y -- the canvas's fixed height -- stays
+  // clamped to [0,1]. Clamping x here would hard-cap every branch's growth
+  // at world x=1 regardless of how wide the canvas has grown, which is
+  // exactly the "extended canvas has no art" bug this comment now guards
+  // against (docs/HANDOFF.md, session 011 fold).
+  branch.tipX = branch.tipX + Math.cos(branch.direction) * growthStep;
   branch.tipY = clamp01(branch.tipY + Math.sin(branch.direction) * growthStep);
   branch.segments.push({ x: branch.tipX, y: branch.tipY });
 
