@@ -487,6 +487,134 @@ describe('createLiveCompositor — layer-to-bucket mapping and paint order', () 
   });
 });
 
+describe('createLiveCompositor — z-order paint fix (docs/HANDOFF.md: "branches poof disappear" / "blossoms burst all at once")', () => {
+  // Order-of-drawing is inferred from `setStrokeStyle`/`setFillStyle` calls
+  // recorded on the shared foreground buffer -- each element below uses a
+  // distinct color/tag so the trace unambiguously shows which element's
+  // paint calls happened first.
+
+  it('two elements from DIFFERENT layers sharing the foreground bucket, with different z, newly-bakeable in the same frame, are baked farthest-z-first regardless of which layer is listed first', () => {
+    const nearStroke = makeStroke(
+      [
+        { x: 0, y: 0.5 },
+        { x: 0.1, y: 0.5 },
+      ],
+      { final: true, z: 0.1, color: 'near' },
+    );
+    const farStroke = makeStroke(
+      [
+        { x: 0, y: 0.6 },
+        { x: 0.1, y: 0.6 },
+      ],
+      { final: true, z: 0.9, color: 'far' },
+    );
+
+    // Pass 1: far-z layer listed FIRST.
+    {
+      const factory = createFakeBufferFactory();
+      const compositor = createLiveCompositor(factory);
+      compositor.renderFrame(
+        [
+          { layerId: 'fg1', elements: [farStroke] },
+          { layerId: 'fg0', elements: [nearStroke] },
+        ],
+        DEST(),
+        CANVAS_SIZE,
+        'seed-z-order-a',
+      );
+      const foregroundBuffer = factory.createdBuffers[2]!;
+      const strokeStyles = foregroundBuffer.calls
+        .filter((c) => c.method === 'setStrokeStyle')
+        .map((c) => c.args[0]);
+      expect(strokeStyles).toEqual(['far', 'near']);
+    }
+
+    // Pass 2: near-z layer listed FIRST -- must draw in the same z-order
+    // regardless, proving it's not an array-order coincidence.
+    {
+      const factory = createFakeBufferFactory();
+      const compositor = createLiveCompositor(factory);
+      compositor.renderFrame(
+        [
+          { layerId: 'fg0', elements: [nearStroke] },
+          { layerId: 'fg1', elements: [farStroke] },
+        ],
+        DEST(),
+        CANVAS_SIZE,
+        'seed-z-order-b',
+      );
+      const foregroundBuffer = factory.createdBuffers[2]!;
+      const strokeStyles = foregroundBuffer.calls
+        .filter((c) => c.method === 'setStrokeStyle')
+        .map((c) => c.args[0]);
+      expect(strokeStyles).toEqual(['far', 'near']);
+    }
+  });
+
+  it('two elements WITHIN the same layer (e.g. two forked strokes with different childZJitter), newly-bakeable in the same frame, are baked farthest-z-first', () => {
+    const nearStroke = makeStroke(
+      [
+        { x: 0, y: 0.5 },
+        { x: 0.1, y: 0.5 },
+      ],
+      { final: true, z: 0.2, color: 'near-child' },
+    );
+    const farStroke = makeStroke(
+      [
+        { x: 0, y: 0.6 },
+        { x: 0.1, y: 0.6 },
+      ],
+      { final: true, z: 0.8, color: 'far-child' },
+    );
+
+    const factory = createFakeBufferFactory();
+    const compositor = createLiveCompositor(factory);
+    // near-child listed FIRST in the layer's own elements array -- if paint
+    // order still followed raw iteration order, 'near-child' would draw
+    // before 'far-child', which would be wrong (near should paint LAST/on
+    // top of far, i.e. far must draw first).
+    compositor.renderFrame(
+      [{ layerId: 'fg0', elements: [nearStroke, farStroke] }],
+      DEST(),
+      CANVAS_SIZE,
+      'seed-z-order-same-layer',
+    );
+
+    const foregroundBuffer = factory.createdBuffers[2]!;
+    const strokeStyles = foregroundBuffer.calls.filter((c) => c.method === 'setStrokeStyle').map((c) => c.args[0]);
+    expect(strokeStyles).toEqual(['far-child', 'near-child']);
+  });
+
+  it('a stroke and a circle newly-bakeable in the same frame with different z are baked together in z-order, not strokes-then-circles or circles-then-strokes', () => {
+    const nearCircle = makeCircle({ z: 0.1, color: 'near-circle' });
+    const farStroke = makeStroke(
+      [
+        { x: 0, y: 0.5 },
+        { x: 0.1, y: 0.5 },
+      ],
+      { final: true, z: 0.9, color: 'far-stroke' },
+    );
+
+    const factory = createFakeBufferFactory();
+    const compositor = createLiveCompositor(factory);
+    // Circle listed first in the layer's elements array (Botanical's own
+    // stroke-then-circle emission shape is inverted here on purpose) -- the
+    // farther stroke must still draw before the nearer circle.
+    compositor.renderFrame(
+      [{ layerId: 'fg0', elements: [nearCircle, farStroke] }],
+      DEST(),
+      CANVAS_SIZE,
+      'seed-z-order-mixed',
+    );
+
+    const foregroundBuffer = factory.createdBuffers[2]!;
+    const paintEvents = foregroundBuffer.calls
+      .filter((c) => c.method === 'setStrokeStyle' || c.method === 'setFillStyle')
+      .map((c) => c.args[0]);
+    expect(paintEvents).toEqual(['far-stroke', 'near-circle']);
+  });
+});
+
 describe('createLiveCompositor — reset', () => {
   it('clears tracked bake-state and persistent buffers, so a re-appearing final stroke gets baked again (simulating a fresh session)', () => {
     const factory = createFakeBufferFactory();
