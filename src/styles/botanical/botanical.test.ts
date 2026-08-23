@@ -146,11 +146,11 @@ describe('createBotanicalStyle — speed drives growth honestly (invariant 6)', 
     runTicks(high.renderer, 50, 16.67, highParamsAt);
 
     const sumGrown = (branches: { grownLength: number }[]) => branches.reduce((s, b) => s + b.grownLength, 0);
-    const lowTotal = sumGrown(low.state.foreground.branches);
-    const highTotal = sumGrown(high.state.foreground.branches);
+    const lowTotal = sumGrown(low.state.foregroundSystems[0]!.branches);
+    const highTotal = sumGrown(high.state.foregroundSystems[0]!.branches);
 
-    expect(low.state.foreground.branches.every((b) => b.lifecycle === 'growing')).toBe(true);
-    expect(high.state.foreground.branches.every((b) => b.lifecycle === 'growing')).toBe(true);
+    expect(low.state.foregroundSystems[0]!.branches.every((b) => b.lifecycle === 'growing')).toBe(true);
+    expect(high.state.foregroundSystems[0]!.branches.every((b) => b.lifecycle === 'growing')).toBe(true);
     expect(highTotal).toBeGreaterThan(lowTotal);
   });
 
@@ -160,9 +160,9 @@ describe('createBotanicalStyle — speed drives growth honestly (invariant 6)', 
     renderer.init(createWorld('honesty-seed', 0, overrides));
 
     // rootCount=0 (raw) still maps to 1 root (ROOT_COUNT_MIN=1), spawned as
-    // the foreground system's first root branch: 'fg:root0:0'.
-    const branch = state.foreground.branches.find((b) => b.id === 'fg:root0:0');
-    if (!branch) throw new Error('expected fg:root0:0 to exist right after init()');
+    // the first foreground system's first root branch: 'fg0:root0:0'.
+    const branch = state.foregroundSystems[0]!.branches.find((b) => b.id === 'fg0:root0:0');
+    if (!branch) throw new Error('expected fg0:root0:0 to exist right after init()');
     const targetLength = branch.targetLength;
     const baseGrowthPerTick = state.baseGrowthPerTick;
 
@@ -207,15 +207,15 @@ describe('createBotanicalStyle — expansion widens spatial spread', () => {
     runTicks(low.renderer, 400, 200, lowParamsAt);
     runTicks(high.renderer, 400, 200, highParamsAt);
 
-    // Measured on the foreground system alone (state.foreground), not the
+    // Measured on the foreground system alone (state.foregroundSystems[0]), not the
     // merged scene() output: depth echoes (a separate, mostly
     // expansion-invariant "atmosphere" layer -- their own root positions are
     // seed-derived, not expansion-driven) add a large shared point-count
     // "noise floor" to the combined scene that swamps this specific,
     // foreground-only signal once included.
     const foregroundPositions = (state: (typeof low)['state']) => [
-      ...state.foreground.branches.flatMap((b) => b.segments),
-      ...state.foreground.blossoms.map((b) => ({ x: b.x, y: b.y })),
+      ...state.foregroundSystems[0]!.branches.flatMap((b) => b.segments),
+      ...state.foregroundSystems[0]!.blossoms.map((b) => ({ x: b.x, y: b.y })),
     ];
     const lowSpread = boundingBoxSpread(foregroundPositions(low.state));
     const highSpread = boundingBoxSpread(foregroundPositions(high.state));
@@ -247,9 +247,9 @@ describe('createBotanicalStyle — expansion scales blossom cluster size', () =>
     runTicks(low.renderer, 500, 16.67, lowParamsAt);
     runTicks(high.renderer, 500, 16.67, highParamsAt);
 
-    expect(low.state.foreground.blossoms.length).toBeGreaterThan(0);
-    expect(high.state.foreground.blossoms.length).toBeGreaterThan(0);
-    expect(high.state.foreground.blossoms.length).toBeGreaterThan(low.state.foreground.blossoms.length);
+    expect(low.state.foregroundSystems[0]!.blossoms.length).toBeGreaterThan(0);
+    expect(high.state.foregroundSystems[0]!.blossoms.length).toBeGreaterThan(0);
+    expect(high.state.foregroundSystems[0]!.blossoms.length).toBeGreaterThan(low.state.foregroundSystems[0]!.blossoms.length);
   });
 });
 
@@ -283,13 +283,13 @@ describe('createBotanicalStyle — symmetry calms wander', () => {
     runTicks(low.renderer, 700, 16.67, lowParamsAt);
     runTicks(high.renderer, 700, 16.67, highParamsAt);
 
-    expect(low.state.foreground.branches.length).toBeGreaterThan(5); // sanity: many independent branches spawned
-    expect(high.state.foreground.branches.length).toBeGreaterThan(5);
+    expect(low.state.foregroundSystems[0]!.branches.length).toBeGreaterThan(5); // sanity: many independent branches spawned
+    expect(high.state.foregroundSystems[0]!.branches.length).toBeGreaterThan(5);
 
     const totalCurvature = (branches: { segments: { x: number; y: number }[] }[]) =>
       branches.reduce((sum, b) => sum + curvatureSum(b.segments), 0);
 
-    expect(totalCurvature(high.state.foreground.branches)).toBeLessThan(totalCurvature(low.state.foreground.branches));
+    expect(totalCurvature(high.state.foregroundSystems[0]!.branches)).toBeLessThan(totalCurvature(low.state.foregroundSystems[0]!.branches));
   });
 });
 
@@ -320,13 +320,13 @@ describe('createBotanicalStyle — session movementVariance widens wander', () =
     runTicks(low.renderer, 700, 16.67, paramsAt, lowSessionParams);
     runTicks(high.renderer, 700, 16.67, paramsAt, highSessionParams);
 
-    expect(low.state.foreground.branches.length).toBeGreaterThan(5); // sanity: many independent branches spawned
-    expect(high.state.foreground.branches.length).toBeGreaterThan(5);
+    expect(low.state.foregroundSystems[0]!.branches.length).toBeGreaterThan(5); // sanity: many independent branches spawned
+    expect(high.state.foregroundSystems[0]!.branches.length).toBeGreaterThan(5);
 
     const totalCurvature = (branches: { segments: { x: number; y: number }[] }[]) =>
       branches.reduce((sum, b) => sum + curvatureSum(b.segments), 0);
 
-    expect(totalCurvature(high.state.foreground.branches)).toBeGreaterThan(totalCurvature(low.state.foreground.branches));
+    expect(totalCurvature(high.state.foregroundSystems[0]!.branches)).toBeGreaterThan(totalCurvature(low.state.foregroundSystems[0]!.branches));
   });
 });
 
@@ -375,6 +375,72 @@ describe('createBotanicalStyle — branchDensity knob changes steady-state eleme
   });
 });
 
+describe('createBotanicalStyle — growth-plateau fix: seamless successor foreground system', () => {
+  // A low branchDensity (0 -> the minimum, 15) combined with fast growth
+  // (FAST_CYCLE_OVERRIDES) fills the foreground system's maxConcurrentBranches
+  // budget quickly, forcing maybeSpawnNextForegroundSystem to fire well
+  // within a bounded number of ticks.
+  const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, branchDensity: 0 };
+
+  it('spawns a second system anchored exactly at the first system\'s growth front (largest tipX), not a fresh random position', () => {
+    const { renderer, state } = createBotanicalInternal();
+    renderer.init(createWorld('handoff-seed', 0, overrides));
+
+    const paramsAt = () => makeParams({ speed: 0.9, expansion: 0.6, symmetry: 0.3 });
+
+    // Captured the instant foregroundSystems grows past length 1, before any
+    // further ticks let the old system's frontier branch move on -- this is
+    // what makes the comparison below an exact-position check, not a fuzzy one.
+    let frontierTipX: number | undefined;
+    let frontierTipY: number | undefined;
+    let newRootX: number | undefined;
+    let newRootY: number | undefined;
+
+    let tick = 0;
+    let time = 0;
+    const dt = 200;
+    while (state.foregroundSystems.length < 2 && tick < 3000) {
+      const beforeCount = state.foregroundSystems.length;
+      renderer.step(paramsAt(), INITIAL_SESSION_PARAMS, time, dt);
+      time += dt;
+      tick++;
+
+      if (state.foregroundSystems.length > beforeCount) {
+        const oldSystem = state.foregroundSystems[state.foregroundSystems.length - 2]!;
+        const frontier = oldSystem.branches.reduce((furthest, b) => (b.tipX > furthest.tipX ? b : furthest));
+        const newBranch = state.foregroundSystems[state.foregroundSystems.length - 1]!.branches[0]!;
+        frontierTipX = frontier.tipX;
+        frontierTipY = frontier.tipY;
+        newRootX = newBranch.rootX;
+        newRootY = newBranch.rootY;
+      }
+    }
+
+    expect(tick).toBeLessThan(3000); // sanity: a hand-off actually happened within budget
+    expect(state.foregroundSystems.length).toBeGreaterThan(1);
+    expect(state.foregroundSystems[0]!.branches.length).toBeGreaterThanOrEqual(state.maxConcurrentBranches);
+    // The new system's first branch starts exactly where the old system's
+    // growth front was -- a genuine hand-off, not a fresh root planted
+    // elsewhere on the canvas.
+    expect(newRootX).toBe(frontierTipX);
+    expect(newRootY).toBe(frontierTipY);
+  });
+
+  it('same seed, run twice, produces an identical foregroundSystems hand-off (determinism)', () => {
+    const a = createBotanicalInternal();
+    const b = createBotanicalInternal();
+    a.renderer.init(createWorld('handoff-determinism-seed', 0, overrides));
+    b.renderer.init(createWorld('handoff-determinism-seed', 0, overrides));
+
+    const paramsAt = () => makeParams({ speed: 0.9, expansion: 0.6, symmetry: 0.3 });
+    runTicks(a.renderer, 3000, 200, paramsAt);
+    runTicks(b.renderer, 3000, 200, paramsAt);
+
+    expect(a.state.foregroundSystems.length).toBeGreaterThan(1); // sanity: the fix actually engaged
+    expect(a.renderer.scene()).toEqual(b.renderer.scene());
+  });
+});
+
 describe('BOTANICAL_PALETTE_PRESETS — paletteIndex knob resolves the intended preset', () => {
   it('each preset index round-trips through the paletteIndex world knob, landing mid-bucket', () => {
     BOTANICAL_PALETTE_PRESETS.forEach((preset, index) => {
@@ -411,13 +477,13 @@ describe('BotanicalTuningConfig — override plumbing (M4x tuning panel)', () =>
 
     const paramsAt = () => makeParams({ speed: 0.9, expansion: 0.5, symmetry: 0.5 });
     let tick = 0;
-    while (state.foreground.blossoms.length === 0 && tick < 2000) {
+    while (state.foregroundSystems[0]!.blossoms.length === 0 && tick < 2000) {
       renderer.step(paramsAt(), INITIAL_SESSION_PARAMS, tick * 16.67, 16.67);
       tick++;
     }
 
-    expect(state.foreground.blossoms.length).toBeGreaterThan(0);
-    for (const blossom of state.foreground.blossoms) {
+    expect(state.foregroundSystems[0]!.blossoms.length).toBeGreaterThan(0);
+    for (const blossom of state.foregroundSystems[0]!.blossoms) {
       // blossomRadiusSmallSpan: 0 and blossomLargeFraction: 0 make the
       // formula deterministic: radius === blossomRadiusSmallMin exactly.
       expect(blossom.radius).toBeCloseTo(0.2, 10);
