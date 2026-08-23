@@ -38,9 +38,24 @@
  * would let a still-growing ECHO branch incorrectly paint on top of
  * already-composited FOREGROUND content.
  *
- * Circles (blossoms) are unaffected by any of the above: a blossom is whole
- * the instant it appears (no growing-width concept), so it's still baked
- * once, in full, the first frame it's seen.
+ * Circles (blossoms), through session 020: a blossom is whole the instant
+ * it appears (no growing-width concept), so it was baked once, in full, the
+ * first frame it's seen -- REVEAL and BAKE-SAFETY were the same event back
+ * then, since a blossom's reveal was itself gated on bake-order safety
+ * (sessions 017-020's isNextBlossomSafe).
+ *
+ * Session 021 (docs/HANDOFF.md): that coupling caused a real, founder-
+ * reported regression -- session 020's more conservative (correctly so)
+ * bake-safety bound made a blocked blossom's INVISIBILITY window large
+ * enough that blossoms "mostly reveal only after their area scrolls out of
+ * view." Reveal timing and bake-order safety are now decoupled: a blossom
+ * becomes visible purely on the founder-tuned watercolor timer
+ * (botanical.ts's revealPendingBlossoms), independent of whether it's safe
+ * to bake yet. A revealed-but-not-yet-safe blossom (StyleRenderer.
+ * sceneLayers' CircleElement.final absent/false) is therefore now, exactly
+ * like a still-growing or still-blocked STROKE, redrawn fresh every frame
+ * instead of baked -- see drawLiveElements below (renamed from
+ * drawLiveStrokes, since it now handles both kinds).
  *
  * Scope: this is ONLY the on-screen live-preview path
  * (src/app/live-render-loop.ts). render-scene.ts's renderScene() -- the
@@ -128,7 +143,29 @@ function bucketFor(layerId: string): Bucket {
 interface LayerBakeState {
   /** Per-kind indices of strokes that have already been baked (once, in full, the frame they turned final). A stroke's own index is never in this set until `element.final === true`. */
   bakedStrokeIndices: Set<number>;
-  /** How many of this layer's circle-kind elements (in their own kind-relative order) have been baked in full so far. */
+  /**
+   * How many of this layer's circle-kind elements, counting a CONTIGUOUS
+   * PREFIX from the start of this layer's own circle-kind sequence, have
+   * been baked in full so far -- a plain count (not a Set, unlike strokes),
+   * so it can only ever advance through an unbroken run of already-final
+   * circles. This was a harmless simplification through session 020, when
+   * every circle was baked unconditionally the instant it appeared (no
+   * `final` concept existed for circles at all, so there was never a gap to
+   * skip over). Session 021 gave circles a real `final` flag (blossom
+   * reveal and bake-order safety are now decoupled -- see this file's own
+   * top doc comment), so a circle CAN now be revealed-but-blocked -- and if
+   * one is, this plain-count design means every LATER circle in this
+   * layer's own sequence stays un-baked too (redrawn live instead, per
+   * drawLiveElements below), even one that's individually already safe,
+   * until the blocking one clears. This is a real, reported (not silently
+   * absorbed) latency trade-off, not a correctness bug: a Set-based "which
+   * specific circles are baked" design would let later-safe circles bake
+   * out of order, but would also let a farther-z later circle bake before
+   * a nearer-z earlier one that's still blocked -- reintroducing exactly
+   * the paint-order bug this file's bake-order machinery exists to
+   * prevent. Kept in-order deliberately, matching collectAndBakeBucket's
+   * own circle-baking gate.
+   */
   circlesBaked: number;
 }
 
@@ -153,14 +190,18 @@ interface PendingBakeItem {
 /** Per-layer bookkeeping collected during the collect pass, applied to that layer's LayerBakeState only after every pending item across the whole bucket has actually been drawn (see collectAndBakeBucket below). */
 interface LayerBakeUpdate {
   newlyBakedStrokeIndices: number[];
-  newCircleCount: number;
+  /** The layer's new `circlesBaked` value (the contiguous-prefix count after this pass's newly-safe-and-in-order circles, if any) -- see LayerBakeState.circlesBaked's own doc comment. */
+  newCircleBakedCount: number;
 }
 
 /**
  * Bakes every newly-final, not-yet-baked stroke element (each in full, at its
- * true final points.length) plus every newly-appeared circle element, across
- * ALL of `bucketLayers` (every layer sharing one depth bucket -- see
- * bucketFor above), onto `bucketCtx` (that bucket's persistent buffer).
+ * true final points.length) plus every newly-final, in-order circle element
+ * (session 021: a circle can now be revealed but not yet final, exactly like
+ * a stroke -- see LayerBakeState.circlesBaked's own doc comment for the
+ * in-order constraint), across ALL of `bucketLayers` (every layer sharing
+ * one depth bucket -- see bucketFor above), onto `bucketCtx` (that bucket's
+ * persistent buffer).
  *
  * Paint-order fix (docs/HANDOFF.md, "branches poof disappear" /
  * "blossoms burst all at once"): a bucket's bake pass used to draw each
@@ -190,6 +231,7 @@ function collectAndBakeBucket(bucketLayers: SceneLayer[], getLayerState: (layerI
     const newlyBakedStrokeIndices: number[] = [];
     let strokeIndex = 0;
     let circleIndex = 0;
+    let newCircleBakedCount = state.circlesBaked;
 
     for (const element of layer.elements) {
       if (element.kind === 'stroke') {
@@ -199,17 +241,23 @@ function collectAndBakeBucket(bucketLayers: SceneLayer[], getLayerState: (layerI
         }
         strokeIndex++;
       } else {
-        if (circleIndex >= state.circlesBaked) {
+        // In-order bake gate (session 021, since circles can now be
+        // revealed-but-blocked -- see LayerBakeState.circlesBaked's own
+        // doc comment): only the NEXT circle after the already-baked
+        // prefix can extend it, and only if it's itself final. A later
+        // circle that happens to already be final is deliberately left
+        // for a future frame if an earlier one is still blocking the
+        // prefix -- `circleIndex === newCircleBakedCount` is false for it
+        // once that happens, so it's simply skipped (not pushed) this pass.
+        if (circleIndex === newCircleBakedCount && element.final === true) {
           pending.push({ z: element.z, element });
+          newCircleBakedCount++;
         }
         circleIndex++;
       }
     }
 
-    // Elements are append-only (see LayerBakeState's doc comment), so
-    // circleIndex (this frame's total circle count) is always >= the
-    // previous count; Math.max is defensive, not load-bearing.
-    updates.set(layer.layerId, { newlyBakedStrokeIndices, newCircleCount: circleIndex });
+    updates.set(layer.layerId, { newlyBakedStrokeIndices, newCircleBakedCount });
   }
 
   // Farthest (largest z) first, so nearer elements draw last and end up on
@@ -234,17 +282,20 @@ function collectAndBakeBucket(bucketLayers: SceneLayer[], getLayerState: (layerI
     for (const strokeIndex of update.newlyBakedStrokeIndices) {
       state.bakedStrokeIndices.add(strokeIndex);
     }
-    state.circlesBaked = Math.max(state.circlesBaked, update.newCircleCount);
+    state.circlesBaked = update.newCircleBakedCount;
   }
 }
 
 /**
- * Redraws every still-growing (`final` absent/false) stroke element across
- * ALL of `bucketLayers` fully, fresh, directly onto `destCtx` -- exactly
- * what renderScene() would do for those elements. Cheap: concurrently-
- * growing strokes are a small, bounded set per growth system (capped by
- * maxConcurrentBranches), unlike the unboundedly-accumulating mature
- * content collectAndBakeBucket handles above.
+ * Redraws every still-growing-or-not-yet-safe (`final` absent/false)
+ * element -- strokes AND, since session 021, circles too -- across ALL of
+ * `bucketLayers` fully, fresh, directly onto `destCtx` -- exactly what
+ * renderScene() would do for those elements. Cheap: concurrently-live
+ * elements are a small, bounded set (strokes: capped per growth system by
+ * maxConcurrentBranches; circles: bounded the same way a blocked stroke
+ * already was -- see the perf measurement in docs/HANDOFF.md session 021),
+ * unlike the unboundedly-accumulating mature/baked content
+ * collectAndBakeBucket handles above.
  *
  * Paint-order fix (docs/HANDOFF.md, session 018's render-diff evidence):
  * this used to draw each layer's own live strokes independently, one layer
@@ -256,24 +307,63 @@ function collectAndBakeBucket(bucketLayers: SceneLayer[], getLayerState: (layerI
  * every single frame this condition holds, for as long as both stay
  * unresolved (which, per this fix's own bake-order gate, can now be many
  * frames). Fixed the same way collectAndBakeBucket already is: collect every
- * live stroke across every layer in this bucket first, sort by z descending
- * (farthest first, same convention as renderScene/collectAndBakeBucket), THEN
- * draw. Never baked, so this has zero effect on the permanent-bake
- * correctness fix above -- purely the live (never-yet-final) redraw's own
- * paint order within a single frame.
+ * live element (of EITHER kind, since session 021 -- a revealed-but-
+ * unsafe blossom is exactly as much a live paint-order risk as a still-
+ * growing branch) across every layer in this bucket first, sort by z
+ * descending (farthest first, same convention as renderScene/
+ * collectAndBakeBucket), THEN draw each with its own kind's draw function.
+ * Never baked, so this has zero effect on the permanent-bake correctness
+ * fix above -- purely the live (never-yet-final) redraw's own paint order
+ * within a single frame. Renamed from drawLiveStrokes (session 021) now
+ * that it handles both kinds.
+ *
+ * "Live" for a STROKE means `element.final !== true` -- always accurate,
+ * since collectAndBakeBucket bakes every final stroke immediately, the
+ * same frame it turns final (bakedStrokeIndices is a Set, no ordering
+ * dependency between strokes). "Live" for a CIRCLE is NOT simply
+ * `element.final !== true`, though -- the in-order bake constraint
+ * (LayerBakeState.circlesBaked's own doc comment) can leave an
+ * individually-final circle un-baked for a frame or more if an earlier
+ * circle in the same layer's own circle sequence is still blocking the
+ * contiguous baked prefix. Checking `element.final` for circles here would
+ * make such a circle neither baked NOR drawn live -- invisible, exactly
+ * the class of bug this whole session exists to fix. So a circle's
+ * liveness is instead determined the same way collectAndBakeBucket decides
+ * bakeability: by its own kind-relative index against `state.circlesBaked`
+ * (read AFTER collectAndBakeBucket has already run this frame, via the
+ * same `getLayerState`) -- genuinely NOT-yet-baked, regardless of what its
+ * own `final` flag says.
  */
-function drawLiveStrokes(bucketLayers: SceneLayer[], destCtx: CanvasLike, worldUnitPx: number): void {
-  const pending: StrokeElement[] = [];
+function drawLiveElements(
+  bucketLayers: SceneLayer[],
+  getLayerState: (layerId: string) => LayerBakeState,
+  destCtx: CanvasLike,
+  worldUnitPx: number,
+): void {
+  const pending: SceneElement[] = [];
   for (const layer of bucketLayers) {
+    const state = getLayerState(layer.layerId);
+    let circleIndex = 0;
     for (const element of layer.elements) {
-      if (element.kind === 'stroke' && element.final !== true) {
-        pending.push(element);
+      if (element.kind === 'stroke') {
+        if (element.final !== true) {
+          pending.push(element);
+        }
+      } else {
+        if (circleIndex >= state.circlesBaked) {
+          pending.push(element);
+        }
+        circleIndex++;
       }
     }
   }
   pending.sort((a, b) => b.z - a.z);
   for (const element of pending) {
-    drawStrokeElementFully(destCtx, element, worldUnitPx);
+    if (element.kind === 'stroke') {
+      drawStrokeElementFully(destCtx, element, worldUnitPx);
+    } else {
+      drawCircleElement(destCtx, element, worldUnitPx);
+    }
   }
 }
 
@@ -341,12 +431,13 @@ export function createLiveCompositor(bufferFactory: OffscreenBufferFactory): Liv
 
         bucketBuffers[bucket].blitTo(destCtx);
 
-        // Still-growing strokes for this bucket paint on top of this
+        // Still-growing/still-unsafe live elements (strokes AND, since
+        // session 021, circles) for this bucket paint on top of this
         // bucket's own just-blitted content, but before the NEXT bucket
         // (nearer to the viewer) gets composited over them. z-sorted across
-        // the whole bucket, not per-layer -- see drawLiveStrokes's own doc
+        // the whole bucket, not per-layer -- see drawLiveElements's own doc
         // comment.
-        drawLiveStrokes(bucketLayers, destCtx, worldUnitPx);
+        drawLiveElements(bucketLayers, getLayerState, destCtx, worldUnitPx);
       }
     },
     reset(): void {

@@ -21,6 +21,23 @@ export interface Blossom {
   ringOpacity?: number;
   radius: number;
   baseOpacity: number;
+  /**
+   * True once this ALREADY-REVEALED blossom has been resolved safe to
+   * permanently bake into the live compositor's persistent buffer
+   * (botanical.ts's resolveBucketBakeThreats/isSafeToBake) -- mirrors
+   * Branch.bakeResolved exactly, but starts meaningful only once a blossom
+   * is revealed (botanical.ts's revealPendingBlossoms; a still-pending,
+   * not-yet-revealed blossom isn't part of the scene at all, so this field
+   * is irrelevant, though always present, for those). Session 021
+   * (docs/HANDOFF.md): reveal timing and bake-order safety were decoupled
+   * -- a blossom becomes VISIBLE purely on the founder-tuned watercolor
+   * timer, independent of this flag; this flag only controls whether it's
+   * baked once, permanently, or redrawn live every frame in the meantime
+   * (exactly the growing-vs-mature-and-safe distinction a Branch already
+   * has). Starts false and, once flipped true, stays true forever -- same
+   * "never revisited" performance shape Branch.bakeResolved documents.
+   */
+  bakeResolved: boolean;
 }
 
 // Internal tuning constants formerly hardcoded here (BLOSSOM_RADIUS_MIN/SPAN,
@@ -134,6 +151,7 @@ export function spawnBlossomCluster(args: SpawnBlossomClusterArgs): Blossom[] {
       color,
       radius,
       baseOpacity,
+      bakeResolved: false,
     };
 
     if (hasRing) {

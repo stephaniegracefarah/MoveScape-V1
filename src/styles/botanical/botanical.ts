@@ -133,12 +133,39 @@ interface GrowthSystemState {
   roots: RootPoint[];
   branches: Branch[];
   blossoms: Blossom[];
+  /**
+   * Every revealed blossom (a subset of `blossoms`, same object references)
+   * that hasn't yet resolved `bakeResolved = true` -- tracked separately,
+   * and PRUNED as blossoms resolve (resolveBucketBakeThreats), so per-tick
+   * resolution work stays proportional to "how many revealed blossoms are
+   * CURRENTLY unresolved," not "how many blossoms this session has ever
+   * revealed." `blossoms` itself is permanent-ink append-only and can grow
+   * into the thousands over a long session (docs/styles/botanical.md
+   * section 7), so scanning all of it every tick just to find the still-
+   * unresolved handful would reintroduce the exact unbounded-per-tick-cost
+   * shape session 013's frame-rate-collapse fix (and session 018's own
+   * first, too-naive branch-level attempt) already fought -- this list is
+   * what keeps blossom bake-safety resolution (added session 021) bounded
+   * the same way branch resolution already is (there, `maxConcurrentBranches`
+   * keeps any ONE system's own `branches` small; blossoms have no such
+   * per-system cap, so this list exists specifically to give them the same
+   * shape).
+   */
+  unresolvedBlossoms: Blossom[];
   resproutCounters: Map<number, number>;
   pendingClusters: PendingBlossomCluster[];
 }
 
 function createEmptyGrowthSystem(systemId: string): GrowthSystemState {
-  return { systemId, roots: [], branches: [], blossoms: [], resproutCounters: new Map(), pendingClusters: [] };
+  return {
+    systemId,
+    roots: [],
+    branches: [],
+    blossoms: [],
+    unresolvedBlossoms: [],
+    resproutCounters: new Map(),
+    pendingClusters: [],
+  };
 }
 
 /**
@@ -502,9 +529,7 @@ interface BakeSafetyByBucket {
  * `growing`, or `mature` but not yet `bakeResolved`) within `systems`,
  * permanently marking `branch.bakeResolved = true` on each mature one that
  * newly resolves safe (see Branch.bakeResolved's own doc comment for why
- * this is safe to never revisit), and returns the resulting threats list
- * (every entry still open -- growing, or mature-and-still-blocked) for
- * blossom-reveal gating this same tick. `systems` is always exactly one
+ * this is safe to never revisit). `systems` is always exactly one
  * compositor bucket's worth of growth systems (see resolveBakeThreats,
  * BakeSafety's own doc comment) -- this function itself has no notion of
  * "foreground" or "echo," it just resolves whatever systems it's handed
@@ -536,6 +561,31 @@ interface BakeSafetyByBucket {
  * growing or still blocked right now," which -- like `maxConcurrentBranches`
  * itself -- stays roughly constant regardless of how long the session has
  * run, instead of scaling with the session's entire history.
+ *
+ * BLOSSOMS TOO, as of session 021 (docs/HANDOFF.md): a revealed blossom
+ * (already visible, per revealPendingBlossoms' own doc comment -- reveal
+ * itself is no longer gated on this) resolves its OWN `bakeResolved` flag
+ * the same way, against the SAME `threats` list already computed from
+ * branches -- a blossom is a fixed point (unlike a branch, it never grows
+ * or forks, so it never needs a forward-looking effectiveThreatZ bound of
+ * its own; it only ever needs checking against what's already threatening
+ * everything else in this bucket). `blossom.branchId` is used as its own
+ * "id" for the ancestor/descendant exclusion (isSafeToBake), exactly as
+ * the old isNextBlossomSafe did -- a blossom is never a threat to its own
+ * owning branch's lineage. Scoped as narrowly as branches, via
+ * `system.unresolvedBlossoms` (see that field's own doc comment for why a
+ * dedicated, pruned list is needed here specifically -- unlike branches,
+ * blossoms have no per-system population cap to keep `system.blossoms`
+ * itself small, so scanning THAT every tick would NOT have been bounded).
+ * NOTE (reported, not fixed, per this session's own contract): a revealed-
+ * but-not-yet-resolved blossom does NOT itself get
+ * added to `threats` for OTHER content to check against -- only branches
+ * do. A blossom's own position is fixed the instant it's revealed (no
+ * growing frontier), so the specific overwrite risk this file's threat
+ * mechanism guards against (a farther-z unrelated thing baking AFTER a
+ * nearer one already baked) is structurally narrower for blossom-vs-
+ * blossom or blossom-vs-branch than for branch-vs-branch -- but it is not
+ * proven impossible here, just out of this session's scope.
  */
 function resolveBucketBakeThreats(systems: GrowthSystemState[], margin: number, forkZBound: ForkZBound): BakeSafety {
   const bakeSystems: BakeSafetySystem[] = systems.map((system) => ({
@@ -557,6 +607,22 @@ function resolveBucketBakeThreats(systems: GrowthSystemState[], margin: number, 
       if (branch.lifecycle === 'mature' && !branch.bakeResolved && !stillBlockedIds.has(branch.id)) {
         branch.bakeResolved = true;
       }
+    }
+    // Iterates `unresolvedBlossoms` (bounded: currently-unresolved revealed
+    // blossoms only), NOT `system.blossoms` (permanent-ink append-only,
+    // unbounded over a long session) -- see GrowthSystemState.
+    // unresolvedBlossoms' own doc comment for why this distinction is load-
+    // bearing, not stylistic: scanning the full blossom history every tick
+    // just to skip already-resolved ones was measured to reintroduce
+    // session 013's frame-rate-collapse cost shape (found via this exact
+    // fix's own test suite timing out -- see docs/HANDOFF.md session 021).
+    for (const blossom of system.unresolvedBlossoms) {
+      if (isSafeToBake({ id: blossom.branchId, z: blossom.z, tipX: blossom.x, threats, margin })) {
+        blossom.bakeResolved = true;
+      }
+    }
+    if (system.unresolvedBlossoms.length > 0) {
+      system.unresolvedBlossoms = system.unresolvedBlossoms.filter((b) => !b.bakeResolved);
     }
   }
   return { threats, margin };
@@ -594,19 +660,6 @@ function resolveBakeThreats(state: BotanicalState): BakeSafetyByBucket {
   return { foreground, echoes };
 }
 
-/** True if the next not-yet-revealed blossom in `pending` (if any) is safe to reveal right now per the bake-order safety check -- `safety === undefined` always returns true (no gating), a defensive fallback rather than a real call shape: every real call site (stepState, for both foreground and echo systems since session 019) always passes its own bucket-scoped BakeSafety now. The blossom's own "id" for the ancestor/descendant exclusion is its owning branch's id (`branchId`) -- a blossom is never a threat to its own owning branch's lineage, same logic as a branch never threatening its own lineage. */
-function isNextBlossomSafe(pending: PendingBlossomCluster, safety: BakeSafety | undefined): boolean {
-  if (safety === undefined) return true;
-  const next = pending.blossoms[pending.revealedCount]!;
-  return isSafeToBake({
-    id: next.branchId,
-    z: next.z,
-    tipX: next.x,
-    threats: safety.threats,
-    margin: safety.margin,
-  });
-}
-
 /**
  * Advances every not-yet-fully-revealed cluster's leaky-bucket timer by an
  * effective dt (dt scaled by how fast the user is actually moving, same
@@ -621,24 +674,30 @@ function isNextBlossomSafe(pending: PendingBlossomCluster, safety: BakeSafety | 
  * starts rendering, so no new randomness is introduced here and reveal order
  * is itself deterministic.
  *
- * A blossom that is otherwise due (the timer condition holds) but not yet
- * safe to bake per isNextBlossomSafe (bake-order safety check) is left
- * pending: the timer is NOT decremented and the blossom is NOT pushed, so
- * `revealTimerMs` keeps accumulating (already incremented this tick, above
- * the while loop) and gets rechecked next tick without losing progress or
- * double-counting. Since session 019, this applies to echo systems' clusters
- * too (each gated against its own echo's own bucket-scoped BakeSafety, not
- * foreground's) -- `safety === undefined` is a defensive fallback only, not
- * a real call shape (see isNextBlossomSafe's own doc comment).
+ * PACED ONLY BY THE FOUNDER-TUNED WATERCOLOR TIMER (session 021,
+ * docs/HANDOFF.md) -- no longer gated on bake-order safety at all. Sessions
+ * 017-020 gated REVEAL itself on isSafeToBake, on the theory that "not safe
+ * to bake" and "not safe to show" were the same question -- they are not: a
+ * blocked mature STROKE was always still drawn live every frame while
+ * blocked (never invisible), but a blocked blossom under the old design was
+ * invisible outright until it resolved safe, and session 020's more
+ * conservative (correctly so) threat-z bound made that invisibility window
+ * large enough that the founder's live testing found blossoms "mostly
+ * reveal only after their area scrolls out of view" -- a real, reported
+ * regression, not a synthetic-stress artifact. The fix decouples the ART
+ * EVENT (when a blossom becomes visible -- purely this timer, exactly PR
+ * #15's original behavior) from the RENDERING OPTIMIZATION (when it's safe
+ * to permanently bake it into the persistent buffer instead of redrawing it
+ * live every frame -- resolveBucketBakeThreats now resolves each already-
+ * REVEALED blossom's own `bakeResolved` flag the same way it already
+ * resolves branches', consumed by emitGrowthSystem to compute the
+ * CircleElement's own `final` flag, mirroring StrokeElement.final exactly).
+ * A blossom is therefore visible the instant this function reveals it,
+ * baked or not -- the live compositor's live-redraw pass (live-
+ * compositor.ts) now draws non-final circles every frame, the same way it
+ * already draws non-final (still-growing or still-blocked) strokes.
  */
-function revealPendingBlossoms(
-  system: GrowthSystemState,
-  dt: number,
-  intervalMs: number,
-  speed: number,
-  speedFloor: number,
-  safety: BakeSafety | undefined,
-): void {
+function revealPendingBlossoms(system: GrowthSystemState, dt: number, intervalMs: number, speed: number, speedFloor: number): void {
   const effectiveDt = dt * (speedFloor + speed * (1 - speedFloor));
   let anyFullyRevealed = false;
   for (const pending of system.pendingClusters) {
@@ -647,12 +706,14 @@ function revealPendingBlossoms(
       continue;
     }
     pending.revealTimerMs += effectiveDt;
-    while (
-      pending.revealTimerMs >= intervalMs &&
-      pending.revealedCount < pending.blossoms.length &&
-      isNextBlossomSafe(pending, safety)
-    ) {
-      system.blossoms.push(pending.blossoms[pending.revealedCount]!);
+    while (pending.revealTimerMs >= intervalMs && pending.revealedCount < pending.blossoms.length) {
+      const revealed = pending.blossoms[pending.revealedCount]!;
+      system.blossoms.push(revealed);
+      // Same object reference in both arrays -- resolveBucketBakeThreats
+      // flips `revealed.bakeResolved` in place, and this list is pruned
+      // once it does (see GrowthSystemState.unresolvedBlossoms' own doc
+      // comment for why this list exists at all).
+      system.unresolvedBlossoms.push(revealed);
       pending.revealedCount++;
       pending.revealTimerMs -= intervalMs;
     }
@@ -896,7 +957,6 @@ function stepGrowthSystem(
   params: MovementParams,
   dt: number,
   maxGenerationForSystem: number,
-  bakeSafety: BakeSafety | undefined,
 ): void {
   const newBranches: Branch[] = [];
   const liveCount = () => system.branches.length + newBranches.length;
@@ -965,14 +1025,7 @@ function stepGrowthSystem(
     system.branches.push(...newBranches);
   }
 
-  revealPendingBlossoms(
-    system,
-    dt,
-    state.tuning.blossomRevealIntervalMs,
-    params.speed,
-    state.tuning.blossomRevealSpeedFloor,
-    bakeSafety,
-  );
+  revealPendingBlossoms(system, dt, state.tuning.blossomRevealIntervalMs, params.speed, state.tuning.blossomRevealSpeedFloor);
 }
 
 function initState(state: BotanicalState, world: World): void {
@@ -1054,18 +1107,8 @@ function stepState(state: BotanicalState, params: MovementParams, sessionParams:
   state.latestParams = params;
   state.latestSessionParams = sessionParams;
 
-  // Resolved once per tick, before the per-system loop -- doesn't depend on
-  // which system/branch/blossom is being checked, so every foreground
-  // system this tick shares the same 'foreground'-bucket snapshot for
-  // blossom-reveal gating (docs/HANDOFF.md bake-order fix), and each echo
-  // system gets its own independently-scoped snapshot from its own bucket
-  // (session 019 -- see resolveBakeThreats/BakeSafety's own doc comments).
-  // This reflects state as of the END of the PREVIOUS tick (nothing has
-  // grown yet this tick).
-  const bakeSafety = resolveBakeThreats(state);
-
   for (const system of state.foregroundSystems) {
-    stepGrowthSystem(state, system, system.systemId, params, dt, state.tuning.maxGeneration, bakeSafety.foreground);
+    stepGrowthSystem(state, system, system.systemId, params, dt, state.tuning.maxGeneration);
   }
   maybeSpawnNextForegroundSystem(state);
 
@@ -1077,18 +1120,22 @@ function stepState(state: BotanicalState, params: MovementParams, sessionParams:
       params,
       dt,
       Math.min(state.tuning.maxGeneration, echoConfig.maxGenerationCap),
-      bakeSafety.echoes[i],
     );
   });
 
-  // Resolved AGAIN here, after this tick's own growth/forking/maturation
-  // and the growth-plateau hand-off -- so any branch that newly matured (or
-  // newly forked) THIS tick gets its bake-safety resolved immediately,
-  // rather than lagging one tick behind. Cheap: resolveBakeThreats only
-  // ever examines currently-unresolved branches (see its own doc comment),
-  // and this call's mutations are exactly what buildScene/buildSceneLayers
-  // (via emitGrowthSystem) read `branch.bakeResolved` from -- no separate
-  // isSafeToBake recomputation happens at scene-emission time anymore.
+  // Resolved once per tick, after every system's own growth/forking/
+  // maturation/blossom-reveal -- so any branch that newly matured (or
+  // newly forked) and any blossom newly revealed THIS tick gets its
+  // bake-safety resolved immediately, feeding buildScene/buildSceneLayers'
+  // (via emitGrowthSystem) `final` computation at the next scene emission.
+  // Session 021: this is the ONLY resolveBakeThreats call needed now --
+  // with blossom reveal no longer gated on bake safety (revealPendingBlossoms'
+  // own doc comment), nothing mid-tick consumes a pre-growth snapshot
+  // anymore, so the extra pre-growth call sessions 017-020 made here would
+  // now just be redundant, wasted per-tick work (its mutations would be
+  // fully superseded by this call anyway). Cheap: resolveBakeThreats only
+  // ever examines currently-unresolved branches/blossoms (see its own doc
+  // comment).
   resolveBakeThreats(state);
 }
 
@@ -1166,6 +1213,16 @@ function emitGrowthSystem(
   }
 
   for (const blossom of system.blossoms) {
+    // Mirrors the branch `final` computation directly above: a revealed
+    // blossom is ALWAYS emitted (visible the instant revealPendingBlossoms
+    // reveals it, per that function's own doc comment -- session 021), but
+    // only reported `final` (and therefore only baked by the live
+    // compositor) once resolveBakeThreats has independently resolved its
+    // own `bakeResolved` flag safe. Until then it's drawn live every frame
+    // by the compositor, exactly like a still-growing or still-blocked
+    // stroke -- no longer invisible while blocked.
+    const final = !applyBakeSafety || blossom.bakeResolved;
+
     const element: SceneElement = {
       kind: 'circle',
       z: clamp01(blossom.z + zOffset),
@@ -1174,6 +1231,7 @@ function emitGrowthSystem(
       radius: blossom.radius,
       opacity: blossom.baseOpacity * opacityMultiplier,
       color: blossom.color,
+      final,
     };
     if (blossom.ringColor !== undefined) {
       element.ringColor = blossom.ringColor;

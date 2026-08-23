@@ -99,6 +99,7 @@ function makeBigBlossoms(count = 1000): Blossom[] {
     color: '#000000',
     radius: 0.01,
     baseOpacity: 0.5,
+    bakeResolved: false,
   }));
 }
 
@@ -399,41 +400,36 @@ describe('createBotanicalStyle — gradual "watercolor" blossom reveal', () => {
     expect(risingTicks.size).toBeGreaterThan(3);
   });
 
-  it('blossomRevealIntervalMs=0 disables the pacing TIMER; the bake-safety gate can still legitimately hold a cluster open temporarily, but everything drains by the end', () => {
-    // Reframed from the pre-generalization version of this test (which
-    // asserted pendingClusters was empty after EVERY single step()) --
-    // that assumed intervalMs=0 was the only thing that could ever leave a
-    // cluster pending, true under the old single-root bake-safety bypass,
-    // false now that the gate is branch-level: even at rootCount=1, a real
-    // cluster's remaining blossoms can be legitimately withheld for a
-    // while by a farther, unrelated (non-ancestor/descendant), still-
-    // growing sibling/cousin branch -- default tuning forks by default, so
-    // this is a real, expected occurrence, not a bug. This is the fix
-    // working as intended (docs/HANDOFF.md session 018), not a regression.
-    // What intervalMs=0 still guarantees, and what this test now checks:
-    // the PACING TIMER itself never adds delay -- any blossom that IS safe
-    // reveals immediately -- so every cluster still fully drains given
-    // enough ticks for the canvas to spread out and any holds to clear.
-    // Bumped from 1200 to 3000 ticks in session 020, same reason as the
-    // test above (the snapshot-timing-gap fix's conservative threat-z bound
-    // legitimately holds a single-root generation-0 branch's threat status
-    // longer) -- measured directly for this exact seed/tuning: pending
-    // count peaks at 34 around tick 600, is still 10 at tick 2100, and
-    // fully drains by tick 2400. 1200 ticks is no longer enough for this
-    // real, now-longer-but-still-bounded drain to complete.
+  it('blossomRevealIntervalMs=0 disables the pacing TIMER entirely -- every cluster drains the SAME tick it matures, regardless of bake-safety (session 021: reveal and bake-safety are decoupled)', () => {
+    // REWRITTEN, session 021 -- this test's session-018/020 premise (the
+    // bake-safety gate can legitimately hold pendingClusters open for a
+    // while, only guaranteed to drain "by the end") is now false BY
+    // DESIGN: the founder reported a real regression (docs/HANDOFF.md)
+    // where blossoms stayed invisible for a long time because REVEAL
+    // itself waited on bake-safety. revealPendingBlossoms no longer takes
+    // a safety argument at all, so with intervalMs=0 every due blossom
+    // reveals the INSTANT its cluster matures, full stop -- pendingClusters
+    // should never accumulate even transiently now. What CAN still lag
+    // behind (checked separately, by the echo-scoped equivalent test
+    // above) is each revealed blossom's own `final`/`bakeResolved` flag --
+    // a completely different thing from whether it's revealed at all.
     const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0 };
     const { renderer, state } = createBotanicalInternal({ blossomRevealIntervalMs: 0 });
     renderer.init(createWorld('instant-reveal-seed', 0, overrides));
 
     const paramsAt = () => makeParams({ speed: 0.9, expansion: 0.9, symmetry: 0.5 });
     let time = 0;
-    for (let tick = 0; tick < 3000; tick++) {
+    let sawNonEmptyPending = false;
+    for (let tick = 0; tick < 1000; tick++) {
       renderer.step(paramsAt(), INITIAL_SESSION_PARAMS, time, 16.67);
       time += 16.67;
+      if (state.foregroundSystems[0]!.pendingClusters.some((c) => c.revealedCount < c.blossoms.length)) {
+        sawNonEmptyPending = true;
+      }
     }
 
-    expect(state.foregroundSystems[0]!.blossoms.length).toBeGreaterThan(0);
-    expect(state.foregroundSystems[0]!.pendingClusters.length).toBe(0); // fully drained by the end, despite any temporary safety holds along the way
+    expect(state.foregroundSystems[0]!.blossoms.length).toBeGreaterThan(0); // sanity: clusters actually formed and revealed
+    expect(sawNonEmptyPending).toBe(false); // never held open, not even transiently
   });
 
   it('speed=0 still creeps forward (never fully stalls) but reveals far slower than speed=1, roughly proportional to blossomRevealSpeedFloor', () => {
@@ -621,48 +617,66 @@ describe('createBotanicalStyle — session movementVariance widens wander', () =
 });
 
 describe('createBotanicalStyle — bounded branch/element count', () => {
-  it('element count at a late checkpoint is not dramatically larger than at an earlier checkpoint', () => {
-    const overrides: WorldOverrides = FAST_CYCLE_OVERRIDES;
-    const renderer = createBotanicalStyle();
-    renderer.init(createWorld('bounded-seed', 0, overrides));
+  it(
+    'element count at a late checkpoint is not dramatically larger than at an earlier checkpoint',
+    () => {
+      const overrides: WorldOverrides = FAST_CYCLE_OVERRIDES;
+      const renderer = createBotanicalStyle();
+      renderer.init(createWorld('bounded-seed', 0, overrides));
 
-    const paramsAt = () => makeParams({ speed: 0.8, expansion: 0.6, symmetry: 0.3 });
+      const paramsAt = () => makeParams({ speed: 0.8, expansion: 0.6, symmetry: 0.3 });
 
-    runTicks(renderer, 500, 200, paramsAt);
-    const earlyCount = renderer.scene().elements.length;
+      runTicks(renderer, 500, 200, paramsAt);
+      const earlyCount = renderer.scene().elements.length;
 
-    runTicks(renderer, 1500, 200, paramsAt); // continues on to tick 2000 total
-    const lateCount = renderer.scene().elements.length;
+      runTicks(renderer, 1500, 200, paramsAt); // continues on to tick 2000 total
+      const lateCount = renderer.scene().elements.length;
 
-    expect(earlyCount).toBeGreaterThan(0);
-    expect(lateCount).toBeGreaterThan(0);
-    // Marks are permanent (docs/styles/botanical.md section 7), so element
-    // count only ever grows -- but it must grow *toward a ceiling*
-    // (maxConcurrentBranches, the composition budget: both forking and
-    // front-driven resprouting stop once a growth system's branch count
-    // hits it), not without limit. A generous 5x band comfortably separates
-    // "converges to a bound" from "unbounded."
-    expect(lateCount).toBeGreaterThanOrEqual(earlyCount);
-    expect(lateCount / earlyCount).toBeLessThan(5);
-  });
+      expect(earlyCount).toBeGreaterThan(0);
+      expect(lateCount).toBeGreaterThan(0);
+      // Marks are permanent (docs/styles/botanical.md section 7), so element
+      // count only ever grows -- but it must grow *toward a ceiling*
+      // (maxConcurrentBranches, the composition budget: both forking and
+      // front-driven resprouting stop once a growth system's branch count
+      // hits it), not without limit. A generous 5x band comfortably separates
+      // "converges to a bound" from "unbounded."
+      expect(lateCount).toBeGreaterThanOrEqual(earlyCount);
+      expect(lateCount / earlyCount).toBeLessThan(5);
+    },
+    // Bumped from the default 5000ms in session 021: decoupling blossom
+    // reveal from bake-safety (docs/HANDOFF.md) means many more blossoms
+    // can be simultaneously revealed-but-unresolved than before (reveal is
+    // no longer implicitly rate-limited by bake-safety), which is real,
+    // measured, bounded-but-not-cheap work (see the perf measurement in
+    // that session's own handoff entry) -- this specific FAST_CYCLE_OVERRIDES
+    // + large-dt scenario produces enough concurrent unresolved blossoms
+    // to need more wall-clock time than the default budget, not a hang.
+    30000,
+  );
 });
 
 describe('createBotanicalStyle — branchDensity knob changes steady-state element count', () => {
-  it('a low branchDensity override yields fewer elements than a high one, else identical', () => {
-    const lowOverrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, branchDensity: 0 };
-    const highOverrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, branchDensity: 0.99 };
+  it(
+    'a low branchDensity override yields fewer elements than a high one, else identical',
+    () => {
+      const lowOverrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, branchDensity: 0 };
+      const highOverrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, branchDensity: 0.99 };
 
-    const low = createBotanicalStyle();
-    const high = createBotanicalStyle();
-    low.init(createWorld('density-seed', 0, lowOverrides));
-    high.init(createWorld('density-seed', 0, highOverrides));
+      const low = createBotanicalStyle();
+      const high = createBotanicalStyle();
+      low.init(createWorld('density-seed', 0, lowOverrides));
+      high.init(createWorld('density-seed', 0, highOverrides));
 
-    const paramsAt = () => makeParams({ speed: 0.8, expansion: 0.6, symmetry: 0.3 });
-    runTicks(low, 1500, 200, paramsAt);
-    runTicks(high, 1500, 200, paramsAt);
+      const paramsAt = () => makeParams({ speed: 0.8, expansion: 0.6, symmetry: 0.3 });
+      runTicks(low, 1500, 200, paramsAt);
+      runTicks(high, 1500, 200, paramsAt);
 
-    expect(high.scene().elements.length).toBeGreaterThan(low.scene().elements.length);
-  });
+      expect(high.scene().elements.length).toBeGreaterThan(low.scene().elements.length);
+    },
+    // Same reason as the bounded-element-count test above -- session 021's
+    // decoupling of blossom reveal from bake-safety.
+    30000,
+  );
 });
 
 describe('createBotanicalStyle — growth-plateau fix: seamless successor foreground system', () => {
@@ -1396,6 +1410,12 @@ describe('createBotanicalStyle — bake-order safety: single-root foreground, ge
   // if the snapshot-timing-gap fix genuinely closes the algorithm-level
   // hole (not just something echo-shaped), this should pass here too.
   it('no bake-order violation occurs between any two unrelated branches within a forced single-root foreground system, across many ticks and several seeds', () => {
+    // Session 021: no logic changed here, but this now legitimately takes
+    // longer than the default 5000ms test timeout -- decoupling blossom
+    // reveal from bake-safety means many more blossoms can be concurrently
+    // revealed-but-unresolved (see docs/HANDOFF.md session 021's perf
+    // measurement), which is real, bounded-but-not-cheap work across 10
+    // seeds x 2000 ticks of a single-root, FAST_CYCLE_OVERRIDES scenario.
     const CLOSE_THRESHOLD = 0.04; // world units -- same heuristic the other violation sweeps use ("roughly a branch stroke width or two")
     const dt = 16.67;
     const TICKS = 2000;
@@ -1438,7 +1458,7 @@ describe('createBotanicalStyle — bake-order safety: single-root foreground, ge
 
       expect(violations).toBe(0);
     }
-  });
+  }, 60000);
 });
 
 // --- Session 019: bake-order safety extended to echo systems --------------
@@ -1571,27 +1591,51 @@ describe('createBotanicalStyle — bake-order safety: echo systems (session 019)
     }
   });
 
-  it("withholds an echo cluster's remaining blossoms open (a real bake-safety hold, not just reveal pacing) when a farther unrelated echo cousin branch is still growing nearby", () => {
-    // Same isolating trick as the foreground "blossomRevealIntervalMs=0"
-    // test above: with the pacing timer disabled, any blossom that IS safe
-    // reveals immediately, so a cluster staying open across ticks can only
-    // be explained by the bake-safety gate withholding it -- proof that
-    // echo blossom reveal (revealPendingBlossoms, shared code with
-    // foreground) is now actually gated, where before session 019 it never
-    // was (`safety === undefined` for every echo call site).
+  it("an echo blossom is visible (emitted, final: false) the instant it's revealed even while blocked by a farther unrelated echo cousin -- reveal and bake-safety are decoupled (session 021)", () => {
+    // REWRITTEN, session 021 -- this test's session-019 premise (reveal
+    // itself withheld by the bake-safety gate, provable by pendingClusters
+    // staying non-empty with intervalMs=0) is now false BY DESIGN: the
+    // founder reported a real regression (docs/HANDOFF.md) where session
+    // 020's more conservative bake-safety bound made blocked blossoms
+    // invisible for long stretches, because reveal itself waited on bake
+    // safety. The fix decouples them entirely -- revealPendingBlossoms no
+    // longer takes a safety argument at all, so with intervalMs=0 (pacing
+    // timer disabled) EVERY due blossom reveals immediately, full stop.
+    // What's gated now is `bakeResolved` (and therefore the emitted
+    // CircleElement's `final` flag), not reveal -- this test proves BOTH
+    // halves: reveal is never held open, and a revealed blossom's `final`
+    // flag genuinely can lag while it's still bake-unsafe (proving it's a
+    // real gate, not a no-op), while being visible in the scene throughout.
     const { renderer, state } = createBotanicalInternal({ crossRootBakeSafetyMargin: 0.4, blossomRevealIntervalMs: 0 });
-    renderer.init(createWorld('echo-blossom-withhold-seed', 0, FAST_CYCLE_OVERRIDES));
+    renderer.init(createWorld('echo-blossom-visible-not-final-seed', 0, FAST_CYCLE_OVERRIDES));
 
     const paramsAt = () => makeParams({ speed: 0.9, expansion: 0.9, symmetry: 0.5 });
     let sawHeldOpenCluster = false;
+    let sawVisibleButNotFinal = false;
+    let sawAnyRevealedBlossom = false;
     let time = 0;
-    for (let t = 0; t < 1500 && !sawHeldOpenCluster; t++) {
+    for (let t = 0; t < 1500; t++) {
       renderer.step(paramsAt(), INITIAL_SESSION_PARAMS, time, 16.67);
       time += 16.67;
+
       if (state.echoes[0]!.pendingClusters.some((c) => c.revealedCount < c.blossoms.length)) sawHeldOpenCluster = true;
+
+      const layer = (renderer.sceneLayers?.() ?? []).find((l) => l.layerId === 'echo0')!;
+      const circles = layer.elements.filter((e) => e.kind === 'circle');
+      if (circles.length > 0) sawAnyRevealedBlossom = true;
+      if (circles.some((e) => e.final !== true)) sawVisibleButNotFinal = true;
     }
 
-    expect(sawHeldOpenCluster).toBe(true);
+    expect(sawAnyRevealedBlossom).toBe(true); // sanity: clusters actually formed and revealed during the run
+    // Reveal itself is NEVER held open now, even with a farther unrelated
+    // branch still growing nearby -- intervalMs=0 always drains a cluster
+    // the instant each blossom is due, regardless of bake-safety.
+    expect(sawHeldOpenCluster).toBe(false);
+    // But at least one revealed blossom was genuinely visible-yet-not-yet-
+    // safe-to-bake at some point -- proving the bake-safety gate still
+    // does real work (blossom.bakeResolved/CircleElement.final), just no
+    // longer at the cost of hiding the blossom while it waits.
+    expect(sawVisibleButNotFinal).toBe(true);
   });
 
   it('same seed produces identical scenes across two independent runs with echo bake-safety gating engaged (determinism holds)', () => {

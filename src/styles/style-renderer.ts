@@ -40,6 +40,23 @@ export interface CircleElement {
   ringColor?: string;
   /** Base opacity for the ring, 0-1, before depth fade (same fade formula as the fill). Ignored if ringColor is absent. */
   ringOpacity?: number;
+  /**
+   * True once this circle is safe to permanently bake into the live
+   * compositor's persistent buffer (src/compositor/live-compositor.ts) --
+   * mirrors StrokeElement.final exactly, but for a different reason. A
+   * circle is whole the instant it's revealed (no growing-width concept
+   * the way a stroke has), so this is never about the circle's OWN
+   * geometry changing -- it's about docs/HANDOFF.md's bake-order safety
+   * gate (isSafeToBake in botanical.ts): a revealed-but-not-yet-safe
+   * blossom must still render every frame (this session's fix, decoupling
+   * the founder-tuned watercolor REVEAL pacing from the bake-order safety
+   * gate -- a blossom becomes visible immediately on reveal, exactly like
+   * a blocked stroke stays visible while growing), just not yet baked
+   * permanently. Absent or false means "draw fresh every frame instead of
+   * baking." Purely additive: ignored entirely by renderScene() and by
+   * export (finish()), so neither is affected by a style setting this.
+   */
+  final?: boolean;
 }
 
 export interface StrokeElement {

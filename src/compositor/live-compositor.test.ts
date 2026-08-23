@@ -142,8 +142,9 @@ function makeStroke(points: { x: number; y: number }[], overrides: Partial<Strok
   return { kind: 'stroke', z: 0, points, baseWidth: 0.05, taperExponent: 1, color: 'blue', opacity: 1, ...overrides };
 }
 
+/** Defaults `final: true` -- most tests in this file that use makeCircle() are exercising bake-exactly-once behavior, unaffected by session 021's new "a circle can be revealed but not yet safe to bake" state (see the dedicated describe block below for that). Override `final: false` explicitly to opt into the new live-redraw path instead. */
 function makeCircle(overrides: Partial<CircleElement> = {}): CircleElement {
-  return { kind: 'circle', z: 0, x: 0.5, y: 0.5, radius: 0.1, color: 'red', opacity: 1, ...overrides };
+  return { kind: 'circle', z: 0, x: 0.5, y: 0.5, radius: 0.1, color: 'red', opacity: 1, final: true, ...overrides };
 }
 
 const CANVAS_SIZE: CanvasSize = { width: 200, height: 100 };
@@ -346,6 +347,117 @@ describe('createLiveCompositor — bake-exactly-once for circles (unaffected by 
     // strokeA: 2 segments, strokeB: 1 segment => 3 stroke() calls total.
     expect(foregroundBuffer.calls.filter((c) => c.method === 'stroke')).toHaveLength(3);
     // circle1 + circle2 => exactly 2 fill() calls total, not re-baked.
+    expect(foregroundBuffer.calls.filter((c) => c.method === 'fill')).toHaveLength(2);
+  });
+});
+
+describe('createLiveCompositor — revealed-but-not-yet-safe circles are drawn live, not invisible (session 021)', () => {
+  // Session 021 (docs/HANDOFF.md): before this, a circle had no `final`
+  // concept at all -- it was baked unconditionally the instant it appeared,
+  // because reveal itself was gated on bake-order safety (so a "revealed"
+  // circle was already known-safe by construction). That coupling caused a
+  // real founder-reported regression (blossoms invisible until their area
+  // scrolled off-screen) once session 020's more conservative bake-safety
+  // bound made the invisibility window large. Reveal and bake-safety are
+  // now decoupled: a circle can be `final: false` (revealed, visible,
+  // not yet safe to permanently bake) exactly like a still-growing stroke.
+
+  it('a non-final circle is drawn fresh on destCtx every frame (never baked) -- visible immediately, exactly like a blocked stroke', () => {
+    const factory = createFakeBufferFactory();
+    const compositor = createLiveCompositor(factory);
+    const dest = DEST();
+    const layers: SceneLayer[] = [{ layerId: 'fg0', elements: [makeCircle({ final: false, color: 'blocked-circle' })] }];
+
+    for (let i = 0; i < 5; i++) {
+      compositor.renderFrame(layers, dest, CANVAS_SIZE, 'seed-live-circle');
+    }
+
+    const foregroundBuffer = factory.createdBuffers[2]!;
+    expect(foregroundBuffer.calls.filter((c) => c.method === 'fill')).toHaveLength(0); // never baked
+    // Drawn fresh onto destCtx every single frame it stays non-final.
+    expect(dest.calls.filter((c) => c.method === 'setFillStyle' && c.args[0] === 'blocked-circle')).toHaveLength(5);
+  });
+
+  it('once a circle flips to final: true, it bakes exactly once and stops being drawn live', () => {
+    const factory = createFakeBufferFactory();
+    const compositor = createLiveCompositor(factory);
+    const dest = DEST();
+    const circle = makeCircle({ final: false, color: 'now-safe' });
+
+    compositor.renderFrame([{ layerId: 'fg0', elements: [circle] }], dest, CANVAS_SIZE, 'seed-flip');
+    compositor.renderFrame([{ layerId: 'fg0', elements: [circle] }], dest, CANVAS_SIZE, 'seed-flip');
+    const foregroundBuffer = factory.createdBuffers[2]!;
+    expect(foregroundBuffer.calls.filter((c) => c.method === 'fill')).toHaveLength(0);
+
+    circle.final = true; // mirrors botanical.ts flipping blossom.bakeResolved -> emitGrowthSystem's `final`
+    compositor.renderFrame([{ layerId: 'fg0', elements: [circle] }], dest, CANVAS_SIZE, 'seed-flip');
+    expect(foregroundBuffer.calls.filter((c) => c.method === 'fill')).toHaveLength(1); // baked exactly once
+
+    for (let i = 0; i < 3; i++) {
+      compositor.renderFrame([{ layerId: 'fg0', elements: [circle] }], dest, CANVAS_SIZE, 'seed-flip');
+    }
+    expect(foregroundBuffer.calls.filter((c) => c.method === 'fill')).toHaveLength(1); // never rebaked
+  });
+
+  it('non-final circles are z-sorted together with non-final strokes when drawn live (mixed kinds, one bucket)', () => {
+    const factory = createFakeBufferFactory();
+    const compositor = createLiveCompositor(factory);
+    const dest = DEST();
+
+    const nearCircle = makeCircle({ final: false, z: 0.1, color: 'near-live-circle' });
+    const farStroke = makeStroke(
+      [
+        { x: 0, y: 0.5 },
+        { x: 0.1, y: 0.5 },
+      ],
+      { final: false, z: 0.9, color: 'far-live-stroke' },
+    );
+
+    // Circle listed first, on purpose -- the farther stroke must still draw
+    // first (i.e. underneath) regardless of array order.
+    compositor.renderFrame([{ layerId: 'fg0', elements: [nearCircle, farStroke] }], dest, CANVAS_SIZE, 'seed-live-z');
+
+    const paintEvents = dest.calls
+      .filter((c) => c.method === 'setStrokeStyle' || c.method === 'setFillStyle')
+      .map((c) => c.args[0]);
+    expect(paintEvents).toContain('far-live-stroke');
+    expect(paintEvents).toContain('near-live-circle');
+    expect(paintEvents.indexOf('far-live-stroke')).toBeLessThan(paintEvents.indexOf('near-live-circle'));
+  });
+
+  it('the in-order bake constraint (LayerBakeState.circlesBaked): a later circle that is already final cannot bake ahead of an earlier, still-blocked one in the same layer', () => {
+    const factory = createFakeBufferFactory();
+    const compositor = createLiveCompositor(factory);
+    const dest = DEST();
+
+    const blockedFirst = makeCircle({ final: false, color: 'blocked-first' });
+    const safeSecond = makeCircle({ final: true, color: 'safe-second' });
+
+    compositor.renderFrame(
+      [{ layerId: 'fg0', elements: [blockedFirst, safeSecond] }],
+      dest,
+      CANVAS_SIZE,
+      'seed-in-order',
+    );
+
+    const foregroundBuffer = factory.createdBuffers[2]!;
+    // Neither bakes: circlesBaked stays 0 (blockedFirst, index 0, isn't
+    // final), so index 1 (safeSecond) -- despite itself being final -- is
+    // not the "next in the contiguous prefix" and is correctly withheld
+    // too. Both are still visible, though: drawn live via drawLiveElements.
+    expect(foregroundBuffer.calls.filter((c) => c.method === 'fill')).toHaveLength(0);
+    expect(dest.calls.filter((c) => c.method === 'setFillStyle' && c.args[0] === 'blocked-first')).toHaveLength(1);
+    expect(dest.calls.filter((c) => c.method === 'setFillStyle' && c.args[0] === 'safe-second')).toHaveLength(1);
+
+    // Once the first one also resolves safe, BOTH bake in one pass (in
+    // z-order among themselves, same as any other same-frame batch).
+    blockedFirst.final = true;
+    compositor.renderFrame(
+      [{ layerId: 'fg0', elements: [blockedFirst, safeSecond] }],
+      dest,
+      CANVAS_SIZE,
+      'seed-in-order',
+    );
     expect(foregroundBuffer.calls.filter((c) => c.method === 'fill')).toHaveLength(2);
   });
 });
