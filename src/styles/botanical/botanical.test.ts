@@ -4,6 +4,7 @@ import { INITIAL_SESSION_PARAMS, type SessionParams } from '../../engine/session
 import { createLabeledStream } from '../../world/labeled-stream';
 import { createWorld, type WorldOverrides } from '../../world/world';
 import { angleDifference, growthStepFor } from './branch';
+import type { Blossom } from './blossom';
 import { createBotanicalInternal, createBotanicalStyle } from './botanical';
 import { BOTANICAL_PALETTE_PRESETS } from './palettes';
 import { DEFAULT_BOTANICAL_TUNING_CONFIG } from './tuning-config';
@@ -46,6 +47,19 @@ function curvatureSum(segments: { x: number; y: number }[]): number {
     sum += Math.abs(angleDifference(dirIn, dirOut));
   }
   return sum;
+}
+
+/** A large synthetic blossom cluster's already-generated members, for tests that inject a `PendingBlossomCluster` directly (bypassing organic branch growth) to isolate revealPendingBlossoms's pacing math. Large enough that it never fully drains within any of these tests' tick budgets, so it's never pruned out from `pendingClusters`. Field values are irrelevant here -- only array length/order (via revealedCount) is exercised. */
+function makeBigBlossoms(count = 1000): Blossom[] {
+  return Array.from({ length: count }, () => ({
+    branchId: 'synthetic',
+    x: 0.5,
+    y: 0.5,
+    z: 0,
+    color: '#000000',
+    radius: 0.01,
+    baseOpacity: 0.5,
+  }));
 }
 
 // Overrides used by tests that need a full growing->mature->(front-driven
@@ -319,6 +333,112 @@ describe('createBotanicalStyle — gradual "watercolor" blossom reveal', () => {
     }
 
     expect(state.foregroundSystems[0]!.blossoms.length).toBeGreaterThan(0);
+  });
+
+  it('speed=0 still creeps forward (never fully stalls) but reveals far slower than speed=1, roughly proportional to blossomRevealSpeedFloor', () => {
+    const intervalMs = 40;
+    const speedFloor = 0.06;
+    const dt = 16.67;
+    const ticks = 300;
+
+    const zero = createBotanicalInternal({ blossomRevealIntervalMs: intervalMs, blossomRevealSpeedFloor: speedFloor });
+    const full = createBotanicalInternal({ blossomRevealIntervalMs: intervalMs, blossomRevealSpeedFloor: speedFloor });
+    zero.renderer.init(createWorld('reveal-speed-seed', 0, { rootCount: 0 }));
+    full.renderer.init(createWorld('reveal-speed-seed', 0, { rootCount: 0 }));
+
+    // Inject an identical synthetic cluster directly into each system's
+    // pendingClusters, bypassing organic branch growth entirely (branch
+    // growth has its own, separate speedFloor scaling -- see branch.ts's
+    // growthStepFor -- which would otherwise confound this comparison by
+    // changing *when* a cluster spawns, not just how fast it reveals).
+    const injectedZero = { blossoms: makeBigBlossoms(), revealedCount: 0, revealTimerMs: 0 };
+    const injectedFull = { blossoms: makeBigBlossoms(), revealedCount: 0, revealTimerMs: 0 };
+    zero.state.foregroundSystems[0]!.pendingClusters.push(injectedZero);
+    full.state.foregroundSystems[0]!.pendingClusters.push(injectedFull);
+
+    let time = 0;
+    for (let i = 0; i < ticks; i++) {
+      zero.renderer.step(makeParams({ speed: 0, expansion: 0.5, symmetry: 0.5 }), INITIAL_SESSION_PARAMS, time, dt);
+      full.renderer.step(makeParams({ speed: 1, expansion: 0.5, symmetry: 0.5 }), INITIAL_SESSION_PARAMS, time, dt);
+      time += dt;
+    }
+
+    expect(injectedFull.revealedCount).toBeGreaterThan(0);
+    // Never fully stalls at speed=0: the leaky bucket still creeps forward.
+    expect(injectedZero.revealedCount).toBeGreaterThan(0);
+    // Meaningfully lower than speed=1's rate -- not just "greater than 0".
+    expect(injectedZero.revealedCount).toBeLessThan(injectedFull.revealedCount);
+
+    // Roughly proportional to speedFloor: effectiveDt at speed=0 is exactly
+    // dt*speedFloor vs dt*1 at speed=1, so the ratio of counts should land
+    // in the same ballpark as speedFloor itself (loose bound -- the leaky
+    // bucket's integer-count rounding means it won't be exact).
+    const ratio = injectedZero.revealedCount / injectedFull.revealedCount;
+    expect(ratio).toBeGreaterThan(speedFloor * 0.4);
+    expect(ratio).toBeLessThan(speedFloor * 2.5);
+  });
+
+  it('speed=1 reproduces the pre-fix fixed-rate math exactly, regardless of blossomRevealSpeedFloor', () => {
+    const intervalMs = 40;
+    const dt = 16.67;
+    const ticks = 200;
+
+    const runAt = (speedFloor: number): number => {
+      const { renderer, state } = createBotanicalInternal({ blossomRevealIntervalMs: intervalMs, blossomRevealSpeedFloor: speedFloor });
+      renderer.init(createWorld('reveal-rate-seed', 0, { rootCount: 0 }));
+      const injected = { blossoms: makeBigBlossoms(), revealedCount: 0, revealTimerMs: 0 };
+      state.foregroundSystems[0]!.pendingClusters.push(injected);
+      let time = 0;
+      for (let i = 0; i < ticks; i++) {
+        renderer.step(makeParams({ speed: 1, expansion: 0.5, symmetry: 0.5 }), INITIAL_SESSION_PARAMS, time, dt);
+        time += dt;
+      }
+      return injected.revealedCount;
+    };
+
+    // At speed=1, effectiveDt === dt regardless of speedFloor (speedFloor +
+    // 1 * (1 - speedFloor) === 1 for any speedFloor), so the reveal count
+    // must be identical no matter which speedFloor is configured -- a direct
+    // regression check against the old, unconditional fixed-rate math.
+    const lowFloor = runAt(0.06);
+    const highFloor = runAt(0.9);
+    expect(lowFloor).toBe(highFloor);
+
+    // And it matches the old fixed-rate formula directly: total elapsed ms
+    // divided by the reveal interval (comfortably away from a boundary tick
+    // here, so float summation error can't flip the floor).
+    const expectedCount = Math.floor((ticks * dt) / intervalMs);
+    expect(lowFloor).toBe(expectedCount);
+  });
+
+  it('the same fixed (dt, speed) tick sequence always produces an identical revealedCount trajectory (determinism invariant 4)', () => {
+    const intervalMs = 40;
+    const speedFloor = 0.06;
+    const dt = 16.67;
+    const ticks = 250;
+    // Varies speed tick-to-tick (still always in [0,1]) so the effectiveDt
+    // scaling is actually exercised across a range of values, not just one.
+    const speedAt = (i: number) => Math.abs(Math.sin(i * 0.13));
+
+    const run = (): number[] => {
+      const { renderer, state } = createBotanicalInternal({ blossomRevealIntervalMs: intervalMs, blossomRevealSpeedFloor: speedFloor });
+      renderer.init(createWorld('reveal-determinism-seed', 0, { rootCount: 0 }));
+      const injected = { blossoms: makeBigBlossoms(), revealedCount: 0, revealTimerMs: 0 };
+      state.foregroundSystems[0]!.pendingClusters.push(injected);
+      const trajectory: number[] = [];
+      let time = 0;
+      for (let i = 0; i < ticks; i++) {
+        renderer.step(makeParams({ speed: speedAt(i), expansion: 0.5, symmetry: 0.5 }), INITIAL_SESSION_PARAMS, time, dt);
+        time += dt;
+        trajectory.push(injected.revealedCount);
+      }
+      return trajectory;
+    };
+
+    const trajectoryA = run();
+    const trajectoryB = run();
+    expect(trajectoryA).toEqual(trajectoryB);
+    expect(trajectoryA[trajectoryA.length - 1]!).toBeGreaterThan(0);
   });
 });
 
