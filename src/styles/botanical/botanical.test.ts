@@ -72,6 +72,7 @@ function curvatureSum(segments: { x: number; y: number }[]): number {
 function makeBigBlossoms(count = 1000): Blossom[] {
   return Array.from({ length: count }, () => ({
     branchId: 'synthetic',
+    rootIndex: 0,
     x: 0.5,
     y: 0.5,
     z: 0,
