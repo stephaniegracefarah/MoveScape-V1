@@ -65,15 +65,16 @@ Rules for the coordinator writing entries: newest session on top; be specific en
 
 **Completed:**
 - Confirmed PR #13 was genuinely merged (`gh pr view 13` → `MERGED`, merge commit `b7130eb`) before touching anything, per this project's own verify-before-trusting standing practice.
-- Checked out `founder-backlog-watercolor-speed-fix` (PR #12), confirmed a clean working tree, and ran `git rebase origin/main`. As predicted in session 013's own branch-divergence note, this produced exactly one conflict — `docs/HANDOFF.md`, since both branches independently added their own "Current state summary" and "Session log" entries after diverging from the same `main` commit. Every other commit in PR #12 (the actual code: `blossomRevealIntervalMs`, `SPEED_JITTER_FLOOR`, the live-tunable dev slider, and their tests) applied cleanly with zero conflict.
-- Resolved the conflict by hand: reconciled "Current state summary" into one coherent set of bullets reflecting the true current state (PR #13 merged; PR #12 rebased and still awaiting the founder's live speed-jitter retest); kept both session log entries (013 and 012) in their correct chronological order rather than dropping either side's history.
+- Checked out `founder-backlog-watercolor-speed-fix` (PR #12), confirmed a clean working tree, and ran `git rebase origin/main`. PR #12 turned out to have seven commits, five of which were separate "Handoff: record..." commits (this project's own convention of committing handoff updates incrementally through a session) — every one of them touched `docs/HANDOFF.md`'s "Current state summary" section, so the rebase surfaced **four separate conflicts**, one per handoff-touching commit, replayed and resolved in sequence rather than one big squashed conflict. All non-handoff commits (the actual code: `blossomRevealIntervalMs`, `SPEED_JITTER_FLOOR`, the live-tunable dev slider, and their tests) applied cleanly with zero conflict.
+- Resolved each conflict by hand, in order, reading the incoming commit's own content rather than blindly taking one side — this mattered concretely: the second conflict's incoming side revealed the speed-jitter floor had already been recalibrated to 0.15 and made live-tunable within PR #12 itself (superseding an earlier draft of this entry that still described the stale first-attempt 0.85 value), and the fourth (final) conflict's incoming side added a detail worth preserving that the earlier merge hadn't captured — the founder's explicit decision to keep both PR #12 fixes bundled rather than splitting the confirmed watercolor-reveal fix out to merge sooner. Kept both session log entries (013 and 012) in their correct chronological order throughout rather than dropping either side's history, and added this session's own log entry (014) documenting the rebase itself.
 - Reran the full check suite after the rebase to confirm nothing broke in the process (see QA notes).
 
 **Deviations / decisions made, with reasoning:**
-- None beyond the conflict resolution itself, which was exactly the reconciliation session 013's own note anticipated — no surprises.
+- None beyond the conflict resolution itself, which was exactly the reconciliation session 013's own note anticipated — no surprises, just more individual conflict rounds than expected (four, not one) because of PR #12's incremental handoff-commit habit.
 
 **QA notes:**
-- [QA_PLACEHOLDER]
+- Reran the full check suite independently after the rebase completed, not just after resolving conflicts on paper: `npm run lint` clean, `npm run typecheck` clean, `npm test` **249/249** (245 from the merged frame-rate fix + 4 from PR #12's own speed-jitter/blossom-reveal tests), `npm run build` clean.
+- Grepped the built `dist/` bundle for dev-only strings (`Speed jitter floor (dev)`, `Show tuning panel`, `movescape-dev-slider-panel`, `ms-tuning-panel`) — none present, matching every prior session's verification pattern. Confirmed the real feature code (`SPEED_JITTER_FLOOR`, `blossomRevealIntervalMs`) IS present in the production bundle, as expected (it's runtime behavior, not dev-only UI).
 
 **Known issues added/resolved:** none.
 
