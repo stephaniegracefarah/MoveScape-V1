@@ -56,7 +56,7 @@
  */
 import { drawCircleElement, drawStrokeSegment, type CanvasLike, type CanvasSize } from './render-scene';
 import { renderPaperGround } from './paper-ground';
-import type { SceneLayer, StrokeElement } from '../styles/style-renderer';
+import type { SceneElement, SceneLayer, StrokeElement } from '../styles/style-renderer';
 
 /**
  * A caller-owned persistent offscreen pixel buffer -- one per depth bucket
@@ -144,38 +144,98 @@ function drawStrokeElementFully(ctx: CanvasLike, element: StrokeElement, worldUn
   }
 }
 
-/**
- * Bakes any newly-final, not-yet-baked stroke elements (each in full, at its
- * true final points.length) plus any newly-appeared circle elements in
- * `layer` onto `bucketCtx` (a persistent buffer's own context), mutating
- * `state` to record the new bake progress. Deliberately does NOT touch
- * non-final ("still growing") stroke elements at all -- those are the
- * caller's job via drawLiveStrokes below, redrawn fresh onto destCtx every
- * frame instead of ever being baked.
- */
-function bakeLayer(layer: SceneLayer, state: LayerBakeState, bucketCtx: CanvasLike, worldUnitPx: number): void {
-  let strokeIndex = 0;
-  let circleIndex = 0;
+/** One not-yet-baked element discovered during the collect pass, tagged with the `z` it must be sorted by before drawing. */
+interface PendingBakeItem {
+  z: number;
+  element: SceneElement;
+}
 
-  for (const element of layer.elements) {
-    if (element.kind === 'stroke') {
-      if (element.final === true && !state.bakedStrokeIndices.has(strokeIndex)) {
-        drawStrokeElementFully(bucketCtx, element, worldUnitPx);
-        state.bakedStrokeIndices.add(strokeIndex);
+/** Per-layer bookkeeping collected during the collect pass, applied to that layer's LayerBakeState only after every pending item across the whole bucket has actually been drawn (see collectAndBakeBucket below). */
+interface LayerBakeUpdate {
+  newlyBakedStrokeIndices: number[];
+  newCircleCount: number;
+}
+
+/**
+ * Bakes every newly-final, not-yet-baked stroke element (each in full, at its
+ * true final points.length) plus every newly-appeared circle element, across
+ * ALL of `bucketLayers` (every layer sharing one depth bucket -- see
+ * bucketFor above), onto `bucketCtx` (that bucket's persistent buffer).
+ *
+ * Paint-order fix (docs/HANDOFF.md, "branches poof disappear" /
+ * "blossoms burst all at once"): a bucket's bake pass used to draw each
+ * layer's own newly-bakeable elements immediately, one layer at a time, in
+ * `layer.elements` iteration order -- NOT in z order. Early in a session,
+ * before the canvas has spread out, that let a farther-z (higher z) element
+ * that happened to finish baking in a later layer or later array position
+ * permanently paint over a nearer-z (lower z) element it should always
+ * render underneath, since baking is one-shot and permanent (unlike
+ * render-scene.ts's renderScene, which re-sorts and repaints every element
+ * fresh every frame). The fix: collect every newly-bakeable element across
+ * every layer in this bucket FIRST, sort the whole batch by z descending
+ * (farthest first -- same convention as renderScene's
+ * `[...scene.elements].sort((a, b) => b.z - a.z)`, so nearer/lower-z
+ * elements paint last, i.e. on top), THEN draw them onto `bucketCtx` in that
+ * order, and only THEN update each layer's bake-state bookkeeping. This
+ * changes nothing about WHAT gets baked or WHEN (still exactly once, the
+ * first frame a stroke is final / a circle appears) -- only the paint order
+ * among elements that become bakeable in the same frame.
+ */
+function collectAndBakeBucket(bucketLayers: SceneLayer[], getLayerState: (layerId: string) => LayerBakeState, bucketCtx: CanvasLike, worldUnitPx: number): void {
+  const pending: PendingBakeItem[] = [];
+  const updates = new Map<string, LayerBakeUpdate>();
+
+  for (const layer of bucketLayers) {
+    const state = getLayerState(layer.layerId);
+    const newlyBakedStrokeIndices: number[] = [];
+    let strokeIndex = 0;
+    let circleIndex = 0;
+
+    for (const element of layer.elements) {
+      if (element.kind === 'stroke') {
+        if (element.final === true && !state.bakedStrokeIndices.has(strokeIndex)) {
+          pending.push({ z: element.z, element });
+          newlyBakedStrokeIndices.push(strokeIndex);
+        }
+        strokeIndex++;
+      } else {
+        if (circleIndex >= state.circlesBaked) {
+          pending.push({ z: element.z, element });
+        }
+        circleIndex++;
       }
-      strokeIndex++;
+    }
+
+    // Elements are append-only (see LayerBakeState's doc comment), so
+    // circleIndex (this frame's total circle count) is always >= the
+    // previous count; Math.max is defensive, not load-bearing.
+    updates.set(layer.layerId, { newlyBakedStrokeIndices, newCircleCount: circleIndex });
+  }
+
+  // Farthest (largest z) first, so nearer elements draw last and end up on
+  // top -- matching render-scene.ts's renderScene exactly.
+  pending.sort((a, b) => b.z - a.z);
+
+  for (const item of pending) {
+    if (item.element.kind === 'stroke') {
+      drawStrokeElementFully(bucketCtx, item.element, worldUnitPx);
     } else {
-      if (circleIndex >= state.circlesBaked) {
-        drawCircleElement(bucketCtx, element, worldUnitPx);
-      }
-      circleIndex++;
+      drawCircleElement(bucketCtx, item.element, worldUnitPx);
     }
   }
 
-  // Elements are append-only (see the doc comment above), so circleIndex
-  // (this frame's total circle count) is always >= the previous count;
-  // Math.max is defensive, not load-bearing.
-  state.circlesBaked = Math.max(state.circlesBaked, circleIndex);
+  // Only now, after every pending element in this bucket has actually been
+  // drawn in the correct order, record what got baked -- so a mid-batch
+  // ordering decision can never be observed as "already baked" partway
+  // through this same frame's draw pass.
+  for (const layer of bucketLayers) {
+    const state = getLayerState(layer.layerId);
+    const update = updates.get(layer.layerId)!;
+    for (const strokeIndex of update.newlyBakedStrokeIndices) {
+      state.bakedStrokeIndices.add(strokeIndex);
+    }
+    state.circlesBaked = Math.max(state.circlesBaked, update.newCircleCount);
+  }
 }
 
 /**
@@ -184,7 +244,7 @@ function bakeLayer(layer: SceneLayer, state: LayerBakeState, bucketCtx: CanvasLi
  * renderScene() would do for that one element. Cheap: concurrently-growing
  * strokes are a small, bounded set per growth system (capped by
  * maxConcurrentBranches), unlike the unboundedly-accumulating mature
- * content bakeLayer handles above.
+ * content collectAndBakeBucket handles above.
  */
 function drawLiveStrokes(layer: SceneLayer, destCtx: CanvasLike, worldUnitPx: number): void {
   for (const element of layer.elements) {
@@ -254,9 +314,7 @@ export function createLiveCompositor(bufferFactory: OffscreenBufferFactory): Liv
       for (const bucket of BUCKET_PAINT_ORDER) {
         const bucketLayers = layersByBucket[bucket];
 
-        for (const layer of bucketLayers) {
-          bakeLayer(layer, getLayerState(layer.layerId), bucketBuffers[bucket].ctx, worldUnitPx);
-        }
+        collectAndBakeBucket(bucketLayers, getLayerState, bucketBuffers[bucket].ctx, worldUnitPx);
 
         bucketBuffers[bucket].blitTo(destCtx);
 
