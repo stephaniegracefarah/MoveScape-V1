@@ -18,6 +18,12 @@ import { deriveWorldSeed, formatLocalDate } from './world/seed';
 import { createBotanicalStyle } from './styles/botanical/botanical';
 import { BOTANICAL_PALETTE_PRESETS, type BotanicalPaletteId } from './styles/botanical/palettes';
 import { DEFAULT_BOTANICAL_TUNING_CONFIG, type BotanicalTuningConfig } from './styles/botanical/tuning-config';
+import { openRecipeStore, type RecipeStore } from './storage/recipe-store';
+import { nextSessionIndexFor } from './storage/next-session-index';
+import { exportCanvasAsPng } from './storage/image-export';
+import { serializeRecipe, deserializeRecipe } from './storage/recipe-export';
+import { PIECE_RECIPE_VERSION, type PieceRecipe } from './storage/recipe';
+import type { MovementRecording } from './engine/recording';
 
 // The Scroll (M5 Stage 2, spec Part 3 "Composition and canvas"): the canvas
 // has this fixed height and grows rightward as the piece grows -- see
@@ -38,6 +44,7 @@ if (app) {
         <button id="ms-start-camera" type="button">Start camera</button>
         <button id="ms-pause" type="button" hidden>Pause</button>
         <button id="ms-toggle-preview" type="button" hidden>Show camera</button>
+        <button id="ms-finish" type="button" hidden>Finish</button>
         <button id="ms-stop" type="button" hidden>Stop</button>
         <span id="ms-activating" class="ms-activating" hidden>Starting…</span>
       </div>
@@ -46,8 +53,21 @@ if (app) {
         <canvas id="ms-canvas" class="ms-canvas" width="${CANVAS_HEIGHT_PX}" height="${CANVAS_HEIGHT_PX}"></canvas>
       </div>
       <p id="ms-error" class="ms-error" hidden></p>
+      <div class="ms-session-end" id="ms-session-end" hidden>
+        <p>Session finished. Keep this piece?</p>
+        <div class="ms-controls">
+          <button id="ms-save-piece" type="button">Save piece</button>
+          <button id="ms-discard-piece" type="button">Discard</button>
+        </div>
+        <p id="ms-session-end-status" class="ms-status" hidden></p>
+      </div>
       <div id="ms-readout"></div>
       <div id="ms-preview"></div>
+      <div class="ms-backup">
+        <button id="ms-import-recipe" type="button">Import recipe backup…</button>
+        <input id="ms-import-recipe-file" type="file" accept="application/json" hidden />
+        <p id="ms-import-status" class="ms-status" hidden></p>
+      </div>
     </main>
   `;
 
@@ -64,6 +84,13 @@ if (app) {
     .ms-controls button:disabled { opacity: 0.5; cursor: default; }
     .ms-activating { font-size: 12px; opacity: 0.75; align-self: center; }
     .ms-error { color: #ff8080; font-size: 13px; }
+    .ms-session-end { margin: 8px 0 16px; padding: 12px; border: 1px solid #444; border-radius: 8px; }
+    .ms-session-end p { margin: 0 0 8px; }
+    .ms-status { font-size: 13px; opacity: 0.85; margin: 8px 0 0; }
+    .ms-status.ms-status-error { color: #ff8080; }
+    .ms-backup { margin-top: 24px; padding-top: 16px; border-top: 1px solid #333; }
+    .ms-backup button { font: inherit; padding: 8px 14px; border-radius: 6px;
+      border: 1px solid #444; background: #1c1c22; color: #f2f2f2; cursor: pointer; }
     .ms-canvas-wrap { overflow-x: auto; max-width: 100%; border-radius: 8px;
       margin: 4px 0 16px; background: #f7f0e3; }
     .ms-canvas { display: block; height: ${CANVAS_HEIGHT_PX}px; width: auto; }
@@ -80,11 +107,19 @@ if (app) {
   const startCameraBtnRef = app.querySelector<HTMLButtonElement>('#ms-start-camera');
   const pauseBtnRef = app.querySelector<HTMLButtonElement>('#ms-pause');
   const previewToggleBtnRef = app.querySelector<HTMLButtonElement>('#ms-toggle-preview');
+  const finishBtnRef = app.querySelector<HTMLButtonElement>('#ms-finish');
   const stopBtnRef = app.querySelector<HTMLButtonElement>('#ms-stop');
   const activatingElRef = app.querySelector<HTMLSpanElement>('#ms-activating');
   const canvasElRef = app.querySelector<HTMLCanvasElement>('#ms-canvas');
   const canvasWrapElRef = app.querySelector<HTMLDivElement>('#ms-canvas-wrap');
   const paletteControlsElRef = app.querySelector<HTMLDivElement>('#ms-palette-controls');
+  const sessionEndElRef = app.querySelector<HTMLDivElement>('#ms-session-end');
+  const sessionEndStatusElRef = app.querySelector<HTMLParagraphElement>('#ms-session-end-status');
+  const savePieceBtnRef = app.querySelector<HTMLButtonElement>('#ms-save-piece');
+  const discardPieceBtnRef = app.querySelector<HTMLButtonElement>('#ms-discard-piece');
+  const importRecipeBtnRef = app.querySelector<HTMLButtonElement>('#ms-import-recipe');
+  const importRecipeFileRef = app.querySelector<HTMLInputElement>('#ms-import-recipe-file');
+  const importStatusElRef = app.querySelector<HTMLParagraphElement>('#ms-import-status');
 
   if (
     readoutContainerRef &&
@@ -94,11 +129,19 @@ if (app) {
     startCameraBtnRef &&
     pauseBtnRef &&
     previewToggleBtnRef &&
+    finishBtnRef &&
     stopBtnRef &&
     activatingElRef &&
     canvasElRef &&
     canvasWrapElRef &&
-    paletteControlsElRef
+    paletteControlsElRef &&
+    sessionEndElRef &&
+    sessionEndStatusElRef &&
+    savePieceBtnRef &&
+    discardPieceBtnRef &&
+    importRecipeBtnRef &&
+    importRecipeFileRef &&
+    importStatusElRef
   ) {
     // Re-bind to fresh consts so their (non-null) type is fixed at this
     // point — TypeScript would otherwise re-widen the outer refs to
@@ -111,11 +154,19 @@ if (app) {
     const startCameraBtn = startCameraBtnRef;
     const pauseBtn = pauseBtnRef;
     const previewToggleBtn = previewToggleBtnRef;
+    const finishBtn = finishBtnRef;
     const stopBtn = stopBtnRef;
     const activatingEl = activatingElRef;
     const canvasEl = canvasElRef;
     const canvasWrapEl = canvasWrapElRef;
     const paletteControlsEl = paletteControlsElRef;
+    const sessionEndEl = sessionEndElRef;
+    const sessionEndStatusEl = sessionEndStatusElRef;
+    const savePieceBtn = savePieceBtnRef;
+    const discardPieceBtn = discardPieceBtnRef;
+    const importRecipeBtn = importRecipeBtnRef;
+    const importRecipeFile = importRecipeFileRef;
+    const importStatusEl = importStatusElRef;
     // getContext('2d') is effectively never null for a freshly-created
     // <canvas> in a real browser; guarded rather than asserted so a
     // hypothetical unsupported environment degrades to "no art rendering"
@@ -125,6 +176,28 @@ if (app) {
     const readout = createParamsReadout(readoutEl);
     let liveLoop: LiveRenderLoop | null = null;
     let selectedPaletteId: BotanicalPaletteId = 'default';
+    // Opened once at app startup; awaited wherever a save/import actually
+    // needs it (M5 Stage 3 -- recipe persistence). A rejected open (no
+    // IndexedDB available) surfaces as an error only at the point of use,
+    // not as a startup crash -- the live art experience works with zero
+    // storage available, saving just won't.
+    const recipeStorePromise: Promise<RecipeStore> = openRecipeStore();
+    // Fixed once per session at "Start camera" time (see beginSession) --
+    // spec Part 3: "the first session of the day is index 0, the second
+    // index 1." Reused verbatim across any mid-session palette-switch
+    // restart, since that's still the same session/performance, not a new
+    // one. Recomputing this per palette switch would be both wasteful (an
+    // extra store query) and wrong once a save has happened mid-session.
+    let currentSessionIndex = 0;
+    // The exact WorldOverrides startLiveLoop last used to build currentWorld
+    // -- captured so a saved recipe's userChoices matches what was actually
+    // rendered, not recomputed from possibly-stale UI state.
+    let currentOverrides: WorldOverrides = {};
+    // The finished session's own recording + world, captured by
+    // finishSession() and consumed by saveSession()/discardSession() --
+    // null whenever no finished-but-undecided session is pending.
+    let pendingRecording: MovementRecording | null = null;
+    let pendingWorld: World | null = null;
     const pauseGate = createPauseGate((params, timestampMs) => {
       readout.update(params, timestampMs);
       liveLoop?.feed(params);
@@ -190,8 +263,9 @@ if (app) {
       // values (false / undefined) in a build where the panel itself was
       // dead-code-eliminated, so this line is a pure pass-through there.
       const overrides = manualOverridesActive ? panelWorldOverrides : paletteIndexOverride(selectedPaletteId);
-      const world = createWorld(worldSeed, 0, overrides);
+      const world = createWorld(worldSeed, currentSessionIndex, overrides);
       currentWorld = world;
+      currentOverrides = overrides ?? {};
       liveLoop = createLiveRenderLoop(
         createBotanicalStyle(panelTuningConfig),
         world,
@@ -319,10 +393,136 @@ if (app) {
       hidePreview();
       pauseGate.reset();
       setPaused(false);
+      // Stop is a full abort: any not-yet-decided finished session is
+      // discarded too, not left in limbo behind a hidden panel.
+      pendingRecording = null;
+      pendingWorld = null;
+      sessionEndEl.hidden = true;
       stopBtn.hidden = true;
       pauseBtn.hidden = true;
+      finishBtn.hidden = true;
       previewToggleBtn.hidden = true;
       setStartButtonsDisabled(false);
+    }
+
+    /**
+     * Ends the current session without discarding it: freezes the render
+     * loop in place (no clear-and-reset -- the finished piece stays on
+     * screen for the Save/Discard decision), stops capturing movement, and
+     * shows the session-end panel. saveSession()/discardSession() are the
+     * only two ways out of the pending state this leaves behind.
+     */
+    function finishSession(): void {
+      if (!liveLoop || !currentWorld) return;
+      pendingRecording = liveLoop.getRecording();
+      pendingWorld = currentWorld;
+      activeAdapter?.stop();
+      activeAdapter = null;
+      readout.reset();
+      liveLoop.stop(); // freezes the loop only -- does not touch canvas contents, unlike stopLiveLoop()
+      hidePreview();
+      pauseGate.reset();
+      setPaused(false);
+      stopBtn.hidden = true;
+      pauseBtn.hidden = true;
+      finishBtn.hidden = true;
+      previewToggleBtn.hidden = true;
+      // Disabled for the life of the pending decision so starting a new
+      // session can't silently overwrite currentWorld/currentSessionIndex
+      // out from under the still-undecided piece.
+      setStartButtonsDisabled(true);
+      savePieceBtn.hidden = false;
+      discardPieceBtn.hidden = false;
+      sessionEndStatusEl.hidden = true;
+      sessionEndStatusEl.textContent = '';
+      sessionEndStatusEl.classList.remove('ms-status-error');
+      sessionEndEl.hidden = false;
+    }
+
+    /** Triggers a browser download of `json` as a file named `filename`. Same object-URL-plus-anchor technique as image-export.ts, inlined here since this is the only caller of a text (not canvas-pixel) download in the app. */
+    function downloadJsonFile(json: string, filename: string): void {
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = filename;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    }
+
+    function discardSession(): void {
+      pendingRecording = null;
+      pendingWorld = null;
+      sessionEndEl.hidden = true;
+      stopLiveLoop();
+      setStartButtonsDisabled(false);
+    }
+
+    /**
+     * Persists the pending recording as a PieceRecipe (IndexedDB -- the
+     * permanent record) and downloads the frozen canvas as a PNG (the
+     * instant-viewing/sharing artifact) -- spec Part 2: "you save it — an
+     * image at minimum, plus its tiny recipe." The recipe JSON download
+     * itself is a separate, optional backup affordance (see the "Import
+     * recipe backup" control below), not part of this routine save path.
+     */
+    async function saveSession(): Promise<void> {
+      if (!pendingRecording || !pendingWorld) return;
+      savePieceBtn.disabled = true;
+      discardPieceBtn.disabled = true;
+      sessionEndStatusEl.hidden = false;
+      sessionEndStatusEl.classList.remove('ms-status-error');
+      sessionEndStatusEl.textContent = 'Saving…';
+      try {
+        const store = await recipeStorePromise;
+        const recipe: PieceRecipe = {
+          version: PIECE_RECIPE_VERSION,
+          styleId: 'botanical',
+          userChoices: currentOverrides,
+          worldSeed: pendingWorld.worldSeed,
+          sessionIndex: pendingWorld.sessionIndex,
+          movementRecording: pendingRecording,
+        };
+        await store.save(recipe);
+        const baseName = `movescape-${recipe.worldSeed}-session${recipe.sessionIndex}`;
+        exportCanvasAsPng(canvasEl, `${baseName}.png`);
+        downloadJsonFile(serializeRecipe(recipe), `${baseName}.json`);
+        pendingRecording = null;
+        pendingWorld = null;
+        savePieceBtn.hidden = true;
+        discardPieceBtn.hidden = true;
+        sessionEndStatusEl.textContent = 'Saved — image and recipe backup downloaded, stored locally.';
+        stopLiveLoop(); // safe to reset the canvas now that the piece is persisted
+        setStartButtonsDisabled(false);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        sessionEndStatusEl.textContent = `Could not save: ${message}`;
+        sessionEndStatusEl.classList.add('ms-status-error');
+      } finally {
+        savePieceBtn.disabled = false;
+        discardPieceBtn.disabled = false;
+      }
+    }
+
+    /**
+     * Computes this session's sessionIndex (spec Part 3: "the first session
+     * of the day is index 0, the second index 1") before the first
+     * startLiveLoop() call of a new session, then starts it. A storage
+     * failure here (no IndexedDB available) falls back to 0 rather than
+     * blocking the live art experience on it -- saveSession() will surface
+     * its own error later if storage still isn't reachable by the time the
+     * user tries to save.
+     */
+    async function beginSession(): Promise<void> {
+      const userId = getOrCreateUserId();
+      const worldSeed = deriveWorldSeed(userId, formatLocalDate(new Date()));
+      try {
+        const store = await recipeStorePromise;
+        currentSessionIndex = await nextSessionIndexFor(store, worldSeed);
+      } catch {
+        currentSessionIndex = 0;
+      }
+      startLiveLoop();
     }
 
     function stopActive(): void {
@@ -359,9 +559,10 @@ if (app) {
         activeAdapter = adapter;
         stopBtn.hidden = false;
         pauseBtn.hidden = false;
+        finishBtn.hidden = false;
         refreshPreviewAvailability();
         setStartButtonsDisabled(false);
-        startLiveLoop();
+        await beginSession();
       } catch (err) {
         if (!activation.isCurrent(token)) return; // stale failure; a newer activation already owns the UI
         pendingAdapter = null;
@@ -386,6 +587,44 @@ if (app) {
 
     stopBtn.addEventListener('click', () => {
       stopActive();
+    });
+
+    finishBtn.addEventListener('click', () => {
+      finishSession();
+    });
+
+    savePieceBtn.addEventListener('click', () => {
+      void saveSession();
+    });
+
+    discardPieceBtn.addEventListener('click', () => {
+      discardSession();
+    });
+
+    importRecipeBtn.addEventListener('click', () => {
+      importRecipeFile.click();
+    });
+
+    importRecipeFile.addEventListener('change', () => {
+      void (async () => {
+        const file = importRecipeFile.files?.[0];
+        importRecipeFile.value = ''; // clear so re-importing the same filename later still fires 'change'
+        if (!file) return;
+        importStatusEl.hidden = false;
+        importStatusEl.classList.remove('ms-status-error');
+        importStatusEl.textContent = 'Importing…';
+        try {
+          const text = await file.text();
+          const recipe = deserializeRecipe(text);
+          const store = await recipeStorePromise;
+          await store.save(recipe);
+          importStatusEl.textContent = `Imported recipe (world ${recipe.worldSeed}, session ${recipe.sessionIndex}).`;
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          importStatusEl.textContent = `Could not import: ${message}`;
+          importStatusEl.classList.add('ms-status-error');
+        }
+      })();
     });
 
     pauseBtn.addEventListener('click', () => {

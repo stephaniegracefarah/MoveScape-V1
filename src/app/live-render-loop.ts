@@ -24,7 +24,7 @@
 import type { MovementParams, MovementSample } from '../adapters/movement-params';
 import { renderPaperGround } from '../compositor/paper-ground';
 import { computeCanvasSize, renderScene, type CanvasLike, type CanvasSize } from '../compositor/render-scene';
-import { recordSample } from '../engine/recording';
+import { recordSample, type MovementRecording } from '../engine/recording';
 import { advanceTicks, SIMULATION_TICK_MS } from '../engine/replay';
 import { createSessionParamsAccumulator } from '../engine/session-params';
 import type { StyleRenderer } from '../styles/style-renderer';
@@ -35,6 +35,8 @@ export interface LiveRenderLoop {
   feed(params: MovementParams): void;
   /** Cancel the render loop. Does not touch the style, world, or canvas contents. */
   stop(): void;
+  /** The session's recording so far -- read by the caller at session end (M5) to build a PieceRecipe. Never mutated externally. */
+  getRecording(): MovementRecording;
 }
 
 export function createLiveRenderLoop(
@@ -100,6 +102,9 @@ export function createLiveRenderLoop(
     stop(): void {
       stopped = true;
       if (rafHandle !== null) cancelAnimationFrame(rafHandle);
+    },
+    getRecording(): MovementRecording {
+      return recording;
     },
   };
 }

@@ -122,7 +122,9 @@ export function spawnBlossomCluster(args: SpawnBlossomClusterArgs): Blossom[] {
 
     const blossom: Blossom = {
       branchId: args.branchId,
-      x: clamp01(anchor.x + offsetX),
+      // x mirrors branch.ts's tickGrowing: world-space and unbounded, not
+      // clamped to [0,1] -- only y (the canvas's fixed height) is.
+      x: anchor.x + offsetX,
       y: clamp01(anchor.y + offsetY),
       z: clamp01(args.z + zJitter),
       color,

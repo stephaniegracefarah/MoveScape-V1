@@ -119,17 +119,21 @@ interface RootPoint {
   baseDirectionCenter: number;
 }
 
-/** One independent growth system: its own roots/branches/blossoms/resprout counters. The foreground system and each depth echo are each one of these, stepped identically. */
+/** One independent growth system: its own roots/branches/blossoms/resprout counters. The foreground system(s) and each depth echo are each one of these, stepped identically. */
 interface GrowthSystemState {
+  systemId: string;
   roots: RootPoint[];
   branches: Branch[];
   blossoms: Blossom[];
   resproutCounters: Map<number, number>;
 }
 
-function createEmptyGrowthSystem(): GrowthSystemState {
-  return { roots: [], branches: [], blossoms: [], resproutCounters: new Map() };
+function createEmptyGrowthSystem(systemId: string): GrowthSystemState {
+  return { systemId, roots: [], branches: [], blossoms: [], resproutCounters: new Map() };
 }
+
+/** The Nth foreground system's id: 'fg0', 'fg1', ... -- see maybeSpawnNextForegroundSystem. */
+const foregroundSystemId = (index: number): string => `${FOREGROUND_SYSTEM_ID}${index}`;
 
 /**
  * Everything the StyleRenderer factory mutates over a session, held in one
@@ -139,7 +143,8 @@ function createEmptyGrowthSystem(): GrowthSystemState {
  */
 export interface BotanicalState {
   sessionSeed: string;
-  foreground: GrowthSystemState;
+  /** Ordered list of foreground growth systems -- normally length 1, growing to 2+ when an earlier system fills its maxConcurrentBranches budget and a successor picks up the sweep (see maybeSpawnNextForegroundSystem). Rendered/stepped identically and in order, oldest first. */
+  foregroundSystems: GrowthSystemState[];
   echoes: GrowthSystemState[];
   latestParams: MovementParams | undefined;
   latestSessionParams: SessionParams;
@@ -163,8 +168,8 @@ export interface BotanicalState {
 function createEmptyState(tuning: BotanicalTuningConfig): BotanicalState {
   return {
     sessionSeed: '',
-    foreground: createEmptyGrowthSystem(),
-    echoes: ECHO_CONFIGS.map(() => createEmptyGrowthSystem()),
+    foregroundSystems: [],
+    echoes: ECHO_CONFIGS.map((cfg) => createEmptyGrowthSystem(cfg.systemId)),
     latestParams: undefined,
     latestSessionParams: INITIAL_SESSION_PARAMS,
     tuning,
@@ -451,20 +456,60 @@ function initState(state: BotanicalState, world: World): void {
   state.blossomsPerCluster = BLOSSOMS_PER_CLUSTER_MIN + Math.floor(blossomsPerClusterRaw * BLOSSOMS_PER_CLUSTER_SPAN);
 
   state.latestParams = undefined;
-  state.foreground = createEmptyGrowthSystem();
-  state.echoes = ECHO_CONFIGS.map(() => createEmptyGrowthSystem());
+  state.foregroundSystems = [createEmptyGrowthSystem(foregroundSystemId(0))];
+  state.echoes = ECHO_CONFIGS.map((cfg) => createEmptyGrowthSystem(cfg.systemId));
 
-  initGrowthSystem(state, state.foreground, FOREGROUND_SYSTEM_ID, state.rootCount);
+  initGrowthSystem(state, state.foregroundSystems[0]!, foregroundSystemId(0), state.rootCount);
   ECHO_CONFIGS.forEach((echoConfig, i) => {
     initGrowthSystem(state, state.echoes[i]!, echoConfig.systemId, echoConfig.rootCount);
   });
+}
+
+/**
+ * Once the currently-active (last) foreground system fills its
+ * maxConcurrentBranches budget, spawns a successor that continues the sweep
+ * seamlessly rather than raising or sharing the cap (docs/HANDOFF.md,
+ * growth-plateau fix folded into M5 Stage 3). "Seamless" is the whole
+ * requirement: the new system's one starting root is placed exactly at the
+ * old system's growth front -- the branch with the largest tipX, i.e. the
+ * one that has traveled furthest along the rightward sweep -- not at a fresh
+ * random position, so the hand-off reads as the same tree continuing rather
+ * than a new wave starting elsewhere on the canvas.
+ *
+ * Self-limiting by construction: a freshly-appended successor starts with
+ * exactly 1 branch, far under maxConcurrentBranches's minimum of 15, so it
+ * becomes the new "last" system and the very next tick's check on it
+ * immediately returns false. No extra "already spawned" flag is needed.
+ */
+function maybeSpawnNextForegroundSystem(state: BotanicalState): void {
+  const last = state.foregroundSystems[state.foregroundSystems.length - 1]!;
+  if (last.branches.length < state.maxConcurrentBranches) return;
+
+  const frontier = last.branches.reduce((furthest, branch) => (branch.tipX > furthest.tipX ? branch : furthest));
+
+  const newSystemId = foregroundSystemId(state.foregroundSystems.length);
+  const dirJitter = createLabeledStream(state.sessionSeed, `${newSystemId}:handoffDirection`)();
+  const baseDirectionCenter = COMPOSITION_SWEEP_ANGLE + (dirJitter * 2 - 1) * state.tuning.rootBaseDirectionSpread;
+
+  const root: RootPoint = { x: frontier.tipX, y: frontier.tipY, z: frontier.z, baseDirectionCenter };
+
+  const newSystem = createEmptyGrowthSystem(newSystemId);
+  newSystem.roots = [root];
+  newSystem.resproutCounters.set(0, 0);
+  newSystem.branches = [spawnRootBranch(state, newSystem, newSystemId, 0)];
+
+  state.foregroundSystems.push(newSystem);
 }
 
 function stepState(state: BotanicalState, params: MovementParams, sessionParams: SessionParams, dt: number): void {
   state.latestParams = params;
   state.latestSessionParams = sessionParams;
 
-  stepGrowthSystem(state, state.foreground, FOREGROUND_SYSTEM_ID, params, dt, state.tuning.maxGeneration);
+  for (const system of state.foregroundSystems) {
+    stepGrowthSystem(state, system, system.systemId, params, dt, state.tuning.maxGeneration);
+  }
+  maybeSpawnNextForegroundSystem(state);
+
   ECHO_CONFIGS.forEach((echoConfig, i) => {
     stepGrowthSystem(
       state,
@@ -520,7 +565,9 @@ function emitGrowthSystem(
 function buildScene(state: BotanicalState): Scene {
   const elements: SceneElement[] = [];
 
-  emitGrowthSystem(elements, state, state.foreground, 0, 1);
+  for (const system of state.foregroundSystems) {
+    emitGrowthSystem(elements, state, system, 0, 1);
+  }
   ECHO_CONFIGS.forEach((echoConfig, i) => {
     emitGrowthSystem(elements, state, state.echoes[i]!, echoConfig.zOffset, echoConfig.opacityMultiplier);
   });
