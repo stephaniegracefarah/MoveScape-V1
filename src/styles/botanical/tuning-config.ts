@@ -152,6 +152,6 @@ export const DEFAULT_BOTANICAL_TUNING_CONFIG: BotanicalTuningConfig = {
   blossomRingProbability: 0.2,
   blossomRingLightenAmount: 0.3,
   blossomCrossDrawProbability: 0.4,
-  blossomRevealIntervalMs: 40,
-  blossomRevealSpeedFloor: 0.06,
+  blossomRevealIntervalMs: 300,
+  blossomRevealSpeedFloor: 0,
 };

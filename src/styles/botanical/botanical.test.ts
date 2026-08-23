@@ -245,8 +245,12 @@ describe('createBotanicalStyle — expansion scales blossom cluster size', () =>
     // cluster's own count, not a sum across a variable number of roots.
     const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0 };
 
-    const low = createBotanicalInternal();
-    const high = createBotanicalInternal();
+    // blossomRevealIntervalMs: 0 bypasses reveal-pacing entirely (see the
+    // "watercolor reveal" describe block below) -- this test measures
+    // decided cluster MEMBERSHIP size (spawnBlossomsFor), not reveal speed,
+    // so it must not be sensitive to the tuning defaults' reveal-rate cap.
+    const low = createBotanicalInternal({ blossomRevealIntervalMs: 0 });
+    const high = createBotanicalInternal({ blossomRevealIntervalMs: 0 });
     low.renderer.init(createWorld('cluster-size-seed', 0, overrides));
     high.renderer.init(createWorld('cluster-size-seed', 0, overrides));
 
