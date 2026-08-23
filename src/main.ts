@@ -877,6 +877,7 @@ if (app) {
         blossomRingProbability: { min: 0, max: 1, step: 0.01 },
         blossomRingLightenAmount: { min: 0, max: 1, step: 0.01 },
         blossomCrossDrawProbability: { min: 0, max: 1, step: 0.01 },
+        blossomRevealIntervalMs: { min: 0, max: 300, step: 1 }, // 0 = instant (old behavior); higher = slower "watercolor" build
       };
 
       function buildPanel(): HTMLDivElement {
