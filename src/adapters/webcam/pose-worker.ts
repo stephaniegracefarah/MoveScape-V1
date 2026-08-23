@@ -13,7 +13,7 @@
  * workers; see the pre-loading workaround in createLandmarker() below.
  */
 import { FilesetResolver, PoseLandmarker } from '@mediapipe/tasks-vision';
-import { computeMovementParams, nextStateAfterNoPose, type PoseFrameState } from './params-from-landmarks';
+import { computeMovementParams, nextStateAfterNoPose, POSE_PARAM_TUNING, type PoseFrameState } from './params-from-landmarks';
 import type { MainToWorkerMessage, WorkerToMainMessage } from './worker-protocol';
 
 /**
@@ -46,6 +46,8 @@ let frameState: PoseFrameState | null = null;
 /** Frames in a row with no confidently detected pose (see
  *  nextStateAfterNoPose / POSE_PARAM_TUNING.NO_POSE_RESET_THRESHOLD). */
 let consecutiveNoPoseFrames = 0;
+/** Live-overridable via WorkerSetSpeedJitterFloorMessage (dev-only pose-tuning slider, main.ts) -- starts at the shipped default. */
+let speedJitterFloor: number = POSE_PARAM_TUNING.SPEED_JITTER_FLOOR;
 
 /**
  * Pre-executes MediaPipe's Emscripten wasm loader in this worker's global
@@ -126,7 +128,7 @@ function handleFrame(frame: VideoFrame, captureTimeMs: number): void {
     const landmarks = result.landmarks[0];
     if (landmarks && landmarks.length >= 33) {
       consecutiveNoPoseFrames = 0;
-      const { params, state } = computeMovementParams(landmarks, captureTimeMs, frameState);
+      const { params, state } = computeMovementParams(landmarks, captureTimeMs, frameState, speedJitterFloor);
       frameState = state;
       scope.postMessage({ type: 'result', params, timestampMs: captureTimeMs });
     } else {
@@ -152,6 +154,8 @@ scope.addEventListener('message', (event) => {
   const message = event.data;
   if (message.type === 'frame') {
     handleFrame(message.frame, message.captureTimeMs);
+  } else if (message.type === 'setSpeedJitterFloor') {
+    speedJitterFloor = message.value;
   }
 });
 

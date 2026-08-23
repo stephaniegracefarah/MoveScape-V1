@@ -102,6 +102,8 @@ export interface BotanicalTuningConfig {
   blossomRingLightenAmount: number;
   /** Probability a given blossom circle's color is drawn from anywhere in the palette rather than the cluster's own base tone (visual spec section 4's "~40% cross-draw"). */
   blossomCrossDrawProbability: number;
+  /** Milliseconds between each individual blossom's reveal within a freshly-matured cluster (founder request, session 011: "1 by 1 as if someone was doing watercolor" rather than a cluster popping in all at once). A cluster's full membership is still decided deterministically the instant its branch matures (spawnBlossomsFor) -- this only paces how many of those already-decided blossoms have been added to the rendered/scene-visible list so far, driven purely by dt (fixed-timestep, invariant 4), never wall-clock. */
+  blossomRevealIntervalMs: number;
 }
 
 export const DEFAULT_BOTANICAL_TUNING_CONFIG: BotanicalTuningConfig = {
@@ -148,4 +150,5 @@ export const DEFAULT_BOTANICAL_TUNING_CONFIG: BotanicalTuningConfig = {
   blossomRingProbability: 0.2,
   blossomRingLightenAmount: 0.3,
   blossomCrossDrawProbability: 0.4,
+  blossomRevealIntervalMs: 40,
 };

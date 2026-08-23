@@ -84,6 +84,27 @@ export const POSE_PARAM_TUNING = {
   SPEED_RATE_SCALE: 0.28,
 
   /**
+   * Floor (torso-units/sec) subtracted from the raw displacement rate before
+   * scaling -- landmark jitter (MediaPipe's per-frame inference noise, worse
+   * in dim light) is real, nonzero displacement even when the person is
+   * genuinely motionless, so a floor of 0 lets that noise read as movement.
+   *
+   * Session 012 tried 0.85 (back-calculated from one founder-reported idle
+   * reading) and it overshot badly -- real, deliberate movement started
+   * reading as speed=0 too. Lowered to a much more conservative default; a
+   * live camera is the only way to actually calibrate this (no camera access
+   * in the coordinator's own dev environment), so it's also now overridable
+   * live per session via `setSpeedJitterFloor` (see the webcam adapter and
+   * the dev-only pose-tuning slider in main.ts) rather than requiring
+   * another blind guess-and-redeploy cycle. Movement genuinely above the
+   * floor is unaffected -- this only suppresses displacement at or below
+   * typical sensor-noise magnitude, which is sensor-stability calibration
+   * (like the EMA below), not noise-blending the speed signal itself
+   * (invariant 6).
+   */
+  SPEED_JITTER_FLOOR: 0.15,
+
+  /**
    * EMA smoothing factor for speed (0–1; higher = less smoothing, faster
    * response), applied for sensor stability only (invariant 6) — never
    * noise-blended. Kept high so the smoothed value converges within the
@@ -137,19 +158,24 @@ function mean(values: readonly number[]): number {
 /**
  * Computes one frame of MovementParams from 33 MediaPipe pose landmarks.
  *
- * Pure: given the same (landmarks, timestampMs, previous) it always returns
- * the same result.
+ * Pure: given the same (landmarks, timestampMs, previous, speedJitterFloor)
+ * it always returns the same result.
  *
  * @param landmarks The 33 MediaPipe Pose landmarks for this frame.
  * @param timestampMs Capture-clock timestamp for this frame, in ms.
  * @param previous The state returned alongside the previous frame's params,
  *   or null for the first frame of a session (speed reads 0 on that frame —
  *   there is nothing yet to compare against).
+ * @param speedJitterFloor Overrides POSE_PARAM_TUNING.SPEED_JITTER_FLOOR for
+ *   this call when provided -- the live-tunable path (see
+ *   WorkerSetSpeedJitterFloorMessage), since this constant can only really
+ *   be calibrated against a real camera, not blind.
  */
 export function computeMovementParams(
   landmarks: readonly PoseLandmarkPoint[],
   timestampMs: number,
-  previous: PoseFrameState | null
+  previous: PoseFrameState | null,
+  speedJitterFloor: number = POSE_PARAM_TUNING.SPEED_JITTER_FLOOR,
 ): { params: MovementParams; state: PoseFrameState } {
   if (landmarks.length < 33) {
     throw new Error(`computeMovementParams expects 33 pose landmarks, got ${landmarks.length}`);
@@ -212,7 +238,8 @@ export function computeMovementParams(
     }, 0);
     const avgDisplacement = totalDisplacement / SPEED_LANDMARK_INDICES.length;
     const ratePerSecond = avgDisplacement / torsoSize / dtSeconds;
-    rawSpeed = clamp01((ratePerSecond * POSE_PARAM_TUNING.SPEED_RATE_SCALE) / POSE_PARAM_TUNING.SPEED_CEILING);
+    const aboveJitterFloor = Math.max(0, ratePerSecond - speedJitterFloor);
+    rawSpeed = clamp01((aboveJitterFloor * POSE_PARAM_TUNING.SPEED_RATE_SCALE) / POSE_PARAM_TUNING.SPEED_CEILING);
   }
   const priorEma = previous ? previous.emaSpeed : rawSpeed;
   const emaSpeed = clamp01(priorEma + POSE_PARAM_TUNING.SPEED_EMA_ALPHA * (rawSpeed - priorEma));

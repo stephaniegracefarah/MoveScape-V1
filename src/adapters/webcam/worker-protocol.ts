@@ -17,7 +17,19 @@ export interface WorkerFrameMessage {
   captureTimeMs: number;
 }
 
-export type MainToWorkerMessage = WorkerFrameMessage;
+/**
+ * Main thread → worker: live-retune the speed jitter floor (dev-only —
+ * see main.ts's pose-tuning slider) without restarting the session. Added
+ * because this constant can't be calibrated blind (no camera access in the
+ * coordinator's own dev environment); a live camera + live slider is the
+ * only way to actually dial it in.
+ */
+export interface WorkerSetSpeedJitterFloorMessage {
+  type: 'setSpeedJitterFloor';
+  value: number;
+}
+
+export type MainToWorkerMessage = WorkerFrameMessage | WorkerSetSpeedJitterFloorMessage;
 
 /** Worker → main thread: the pose landmarker finished loading (GPU or CPU
  *  delegate) and the worker is ready to receive frames. */

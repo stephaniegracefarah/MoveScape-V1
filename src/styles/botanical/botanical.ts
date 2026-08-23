@@ -119,6 +119,14 @@ interface RootPoint {
   baseDirectionCenter: number;
 }
 
+/** A freshly-matured branch's whole blossom cluster, generated (and therefore fully decided, deterministically) all at once, but revealed into `GrowthSystemState.blossoms` a few at a time -- see revealPendingBlossoms. `blossoms` keeps its own already-generated members in their fixed generation order; `revealedCount` is how many of those are visible so far. */
+interface PendingBlossomCluster {
+  blossoms: Blossom[];
+  revealedCount: number;
+  /** Ms accumulated toward the next reveal (a leaky-bucket timer, not wall-clock -- advanced only by each tick's own dt). */
+  revealTimerMs: number;
+}
+
 /** One independent growth system: its own roots/branches/blossoms/resprout counters. The foreground system(s) and each depth echo are each one of these, stepped identically. */
 interface GrowthSystemState {
   systemId: string;
@@ -126,10 +134,45 @@ interface GrowthSystemState {
   branches: Branch[];
   blossoms: Blossom[];
   resproutCounters: Map<number, number>;
+  pendingClusters: PendingBlossomCluster[];
 }
 
 function createEmptyGrowthSystem(systemId: string): GrowthSystemState {
-  return { systemId, roots: [], branches: [], blossoms: [], resproutCounters: new Map() };
+  return { systemId, roots: [], branches: [], blossoms: [], resproutCounters: new Map(), pendingClusters: [] };
+}
+
+/**
+ * Advances every not-yet-fully-revealed cluster's leaky-bucket timer by `dt`
+ * and moves any newly-due blossoms from `pending.blossoms` into
+ * `system.blossoms` (the array buildScene/emitGrowthSystem actually reads).
+ * Purely dt-driven -- same tick, same result, live or replay (invariant 4).
+ * A cluster's own blossoms were already fully generated, in a fixed order,
+ * the instant its branch matured (spawnBlossomsFor); this only paces when
+ * each already-decided blossom starts rendering, so no new randomness is
+ * introduced here and reveal order is itself deterministic.
+ */
+function revealPendingBlossoms(system: GrowthSystemState, dt: number, intervalMs: number): void {
+  let anyFullyRevealed = false;
+  for (const pending of system.pendingClusters) {
+    if (pending.revealedCount >= pending.blossoms.length) {
+      anyFullyRevealed = true;
+      continue;
+    }
+    pending.revealTimerMs += dt;
+    while (pending.revealTimerMs >= intervalMs && pending.revealedCount < pending.blossoms.length) {
+      system.blossoms.push(pending.blossoms[pending.revealedCount]!);
+      pending.revealedCount++;
+      pending.revealTimerMs -= intervalMs;
+    }
+    if (pending.revealedCount >= pending.blossoms.length) anyFullyRevealed = true;
+  }
+  // Prune fully-drained entries so pendingClusters doesn't grow unboundedly
+  // over a long session -- safe since a fully-revealed entry does nothing
+  // further (permanent ink: its blossoms already live in system.blossoms
+  // forever, same as everything else).
+  if (anyFullyRevealed) {
+    system.pendingClusters = system.pendingClusters.filter((p) => p.revealedCount < p.blossoms.length);
+  }
 }
 
 /** The Nth foreground system's id: 'fg0', 'fg1', ... -- see maybeSpawnNextForegroundSystem. */
@@ -330,6 +373,7 @@ function initGrowthSystem(
   system.roots = [];
   system.branches = [];
   system.blossoms = [];
+  system.pendingClusters = [];
 
   // Root points: drawn once, sequentially, from a single system-level
   // stream (not per-root streams) -- spec Part 4's documented init order.
@@ -395,7 +439,10 @@ function stepGrowthSystem(
         branch.lifecycleTimer = 0;
         const jitterDraw = createLabeledStream(state.sessionSeed, `${branch.id}:matureDuration`)();
         branch.matureDurationMs = computeMatureDurationMs(state.baseMatureDurationMs, jitterDraw);
-        system.blossoms.push(...spawnBlossomsFor(state, branch));
+        // The cluster's full membership is decided right here, deterministically,
+        // in a fixed order -- only *when* each of these already-generated
+        // blossoms starts rendering is staggered (revealPendingBlossoms below).
+        system.pendingClusters.push({ blossoms: spawnBlossomsFor(state, branch), revealedCount: 0, revealTimerMs: 0 });
       }
     } else {
       // mature -- permanent (docs/styles/botanical.md section 7's "marks are
@@ -424,6 +471,8 @@ function stepGrowthSystem(
   if (newBranches.length > 0) {
     system.branches.push(...newBranches);
   }
+
+  revealPendingBlossoms(system, dt, state.tuning.blossomRevealIntervalMs);
 }
 
 function initState(state: BotanicalState, world: World): void {

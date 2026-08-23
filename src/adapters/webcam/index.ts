@@ -191,5 +191,12 @@ export function createWebcamAdapter(): InputAdapter {
     return running ? stream : null;
   }
 
-  return { id: 'webcam', start, stop, previewStream };
+  /** Dev-only pose tuning (main.ts): forwards a new sensor-noise floor to the running pose worker. No-op if not running yet. */
+  function setSpeedJitterFloor(value: number): void {
+    if (!worker) return;
+    const message: MainToWorkerMessage = { type: 'setSpeedJitterFloor', value };
+    worker.postMessage(message);
+  }
+
+  return { id: 'webcam', start, stop, previewStream, setSpeedJitterFloor };
 }

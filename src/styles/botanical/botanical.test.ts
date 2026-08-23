@@ -253,6 +253,75 @@ describe('createBotanicalStyle — expansion scales blossom cluster size', () =>
   });
 });
 
+describe('createBotanicalStyle — gradual "watercolor" blossom reveal', () => {
+  it('a freshly-matured cluster reveals a few blossoms at a time, not all at once', () => {
+    const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0 };
+    const { renderer, state } = createBotanicalInternal({ blossomRevealIntervalMs: 40 });
+    renderer.init(createWorld('gradual-reveal-seed', 0, overrides));
+
+    const paramsAt = () => makeParams({ speed: 0.9, expansion: 0.9, symmetry: 0.5 });
+    const dt = 16.67;
+    const countsAtEachTick: number[] = [];
+    let firstNonZeroTick = -1;
+    let tick = 0;
+    let time = 0;
+    // Long enough to reveal a whole cluster gradually and see it finish
+    // growing (not just start) -- expansion=0.9 makes for a large cluster
+    // (visual spec: expansionScaledClusterCount), so this needs real room.
+    while (countsAtEachTick.length < 400) {
+      renderer.step(paramsAt(), INITIAL_SESSION_PARAMS, time, dt);
+      time += dt;
+      const count = state.foregroundSystems[0]!.blossoms.length;
+      countsAtEachTick.push(count);
+      if (firstNonZeroTick === -1 && count > 0) firstNonZeroTick = tick;
+      tick++;
+    }
+
+    expect(firstNonZeroTick).toBeGreaterThan(-1); // a cluster did spawn within the run
+
+    // The key behavior: the very first tick any blossom appears, the count
+    // is small (a handful), not the whole cluster -- proves staggering
+    // actually happened rather than an instant full-cluster pop-in.
+    const countOnFirstAppearance = countsAtEachTick[firstNonZeroTick]!;
+    const finalCount = countsAtEachTick[countsAtEachTick.length - 1]!;
+    expect(countOnFirstAppearance).toBeGreaterThan(0);
+    expect(countOnFirstAppearance).toBeLessThan(finalCount);
+
+    // Monotonically non-decreasing (permanent ink: nothing is ever
+    // un-revealed), and genuinely increases across multiple *different*
+    // ticks after first appearing, not just once -- the actual "1 by 1"
+    // pacing, not a single second jump to the full count.
+    const risingTicks = new Set<number>();
+    for (let i = 1; i < countsAtEachTick.length; i++) {
+      expect(countsAtEachTick[i]!).toBeGreaterThanOrEqual(countsAtEachTick[i - 1]!);
+      if (countsAtEachTick[i]! > countsAtEachTick[i - 1]!) risingTicks.add(i);
+    }
+    expect(risingTicks.size).toBeGreaterThan(3);
+  });
+
+  it('blossomRevealIntervalMs=0 reproduces the old instant-reveal behavior exactly (every cluster fully drains the same tick it is queued)', () => {
+    const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0 };
+    const { renderer, state } = createBotanicalInternal({ blossomRevealIntervalMs: 0 });
+    renderer.init(createWorld('instant-reveal-seed', 0, overrides));
+
+    const paramsAt = () => makeParams({ speed: 0.9, expansion: 0.9, symmetry: 0.5 });
+    let time = 0;
+    // With intervalMs=0, revealPendingBlossoms drains and prunes a cluster
+    // fully within the same stepGrowthSystem call that queued it -- so the
+    // real invariant is that pendingClusters is always empty right after
+    // step() returns, never holding a lingering (let alone partial) entry.
+    for (let tick = 0; tick < 400; tick++) {
+      renderer.step(paramsAt(), INITIAL_SESSION_PARAMS, time, 16.67);
+      time += 16.67;
+      for (const system of state.foregroundSystems) {
+        expect(system.pendingClusters.length).toBe(0);
+      }
+    }
+
+    expect(state.foregroundSystems[0]!.blossoms.length).toBeGreaterThan(0);
+  });
+});
+
 describe('createBotanicalStyle — symmetry calms wander', () => {
   it('symmetry=1 produces measurably lower aggregate path curvature than symmetry=0, else-identical inputs', () => {
     // Wander noise varies very slowly relative to a single branch's whole
