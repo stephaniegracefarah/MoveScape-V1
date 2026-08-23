@@ -106,15 +106,19 @@ function createFakeBufferFactory(): OffscreenBufferFactory & {
   createdBuffers: (CanvasLike & { calls: RecordedCall[] })[];
   growCalls: { bufferIndex: number; size: CanvasSize }[];
   blitOrder: number[];
+  /** `dest.globalAlpha` as observed AT THE MOMENT each blitTo call fired, same index alignment as blitOrder -- session 024's globalAlpha-leak regression test reads this directly (a real `drawImage`-based blitTo, like main.ts's or the harness's, would composite using exactly this value, so recording it here is what lets a test assert "this blit would have landed opaque" without needing a real canvas). */
+  blitAlphas: number[];
 } {
   const createdBuffers: (CanvasLike & { calls: RecordedCall[] })[] = [];
   const growCalls: { bufferIndex: number; size: CanvasSize }[] = [];
   const blitOrder: number[] = [];
+  const blitAlphas: number[] = [];
 
   return {
     createdBuffers,
     growCalls,
     blitOrder,
+    blitAlphas,
     create(size: CanvasSize): OffscreenBuffer {
       const bufferIndex = createdBuffers.length;
       const canvas = createMockCanvas();
@@ -124,6 +128,7 @@ function createFakeBufferFactory(): OffscreenBufferFactory & {
         ctx: canvas,
         blitTo(dest: CanvasLike) {
           blitOrder.push(bufferIndex);
+          blitAlphas.push(dest.globalAlpha);
           const target = dest as CanvasLike & { calls?: RecordedCall[] };
           target.calls?.push({ method: 'blitTo', args: [bufferIndex] });
         },
@@ -759,5 +764,59 @@ describe('createLiveCompositor — reset', () => {
     // reset() actually cleared the tracked "already baked" state, not just
     // the buffers.
     expect(secondForegroundBuffer.calls.filter((c) => c.method === 'stroke')).toHaveLength(2);
+  });
+});
+
+describe('createLiveCompositor — globalAlpha invariant (session 024, docs/HANDOFF.md)', () => {
+  it("a low-alpha live element in an EARLIER bucket does not leak its globalAlpha into a LATER bucket's blitTo call -- the exact mechanism behind the founder-reported 'whole branch segments vanish in a single step' bug", () => {
+    // Reproduces session 024's forensic trace precisely: echo1 draws a
+    // still-growing (non-final) element with a very low opacity --
+    // drawCircleElement/drawStrokeSegment (render-scene.ts) set
+    // `ctx.globalAlpha` to exactly that value and, pre-fix, nothing ever
+    // reset it afterward. A real `blitTo` (main.ts's DOM implementation,
+    // render-divergence-harness.ts's Node one) is a bare `drawImage` that
+    // composites using WHATEVER `globalAlpha` its target already holds --
+    // this fake's blitAlphas records exactly that value, so this test can
+    // assert what a real blit would have done without needing a real
+    // canvas (this file's own established convention -- see its top
+    // comment).
+    const factory = createFakeBufferFactory();
+    const compositor = createLiveCompositor(factory);
+    const dest = DEST();
+
+    const fadedLiveCircle = makeCircle({ final: false, opacity: 0.05, color: 'faded-echo-circle' });
+    const bakedStroke = makeStroke(
+      [
+        { x: 0, y: 0.5 },
+        { x: 0.1, y: 0.5 },
+      ],
+      { final: true, color: 'baked-foreground-stroke' },
+    );
+
+    compositor.renderFrame(
+      [
+        { layerId: 'echo1', elements: [fadedLiveCircle] },
+        { layerId: 'fg0', elements: [bakedStroke] },
+      ],
+      dest,
+      CANVAS_SIZE,
+      'seed-alpha-leak',
+    );
+
+    // Sanity: the leak precondition genuinely existed this frame -- echo1's
+    // own low-opacity live circle really was drawn onto `dest` (otherwise
+    // this test would trivially pass for the wrong reason).
+    expect(dest.calls.some((c) => c.method === 'setFillStyle' && c.args[0] === 'faded-echo-circle')).toBe(true);
+
+    // blitOrder/blitAlphas are index-aligned, in creation order (echo1=0,
+    // echo0=1, foreground=2 -- see createFakeBufferFactory's own doc
+    // comment); the foreground bucket's own blit is what composites
+    // `bakedStroke` onto `dest`. Pre-fix, this read 0.05 (the leaked echo1
+    // circle's own alpha) -- a real blitTo would have rendered the whole
+    // foreground buffer at 5% opacity, visually indistinguishable from
+    // "vanished" against a light paper background.
+    const foregroundBlitIndex = factory.blitOrder.indexOf(2);
+    expect(foregroundBlitIndex).toBeGreaterThanOrEqual(0);
+    expect(factory.blitAlphas[foregroundBlitIndex]).toBe(1);
   });
 });

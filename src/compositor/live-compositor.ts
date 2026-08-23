@@ -68,6 +68,34 @@
  * OffscreenBufferFactory below are hand-written structural interfaces, DI'd
  * in by the caller (src/main.ts implements OffscreenBufferFactory against a
  * real HTMLCanvasElement).
+ *
+ * THE globalAlpha INVARIANT (session 024, docs/HANDOFF.md -- root cause of
+ * the founder-reported "whole branch segments vanish in a single step"
+ * bug): several contexts in this file are SHARED across multiple draw
+ * passes that don't all set their own alpha -- `destCtx` across every
+ * bucket in one renderFrame call and across every future frame; a bucket's
+ * own persistent buffer ctx across every future tick's bake pass. Every
+ * draw HELPER here (drawStrokeSegment/drawCircleElement, render-scene.ts)
+ * already sets `ctx.globalAlpha` itself before every fill/stroke, so a
+ * dirty ambient value never corrupts what THEY draw -- but `blitTo`
+ * (main.ts's DOM implementation, render-divergence-harness.ts's Node one)
+ * is a bare `drawImage` call that does NOT set its own alpha; it silently
+ * composites using whatever `globalAlpha` its target already holds. The
+ * root cause: `drawLiveElements` left `destCtx.globalAlpha` at whatever
+ * its last-drawn element's own (often depth-faded, near-zero) opacity was,
+ * and the NEXT bucket's `blitTo` inherited it, compositing that bucket's
+ * entire persistent buffer at a near-invisible opacity. The invariant,
+ * now enforced at every site that touches a shared context's alpha: ANY
+ * function that sets `globalAlpha` on a context it does not exclusively
+ * own restores it to 1 before returning, unconditionally -- see
+ * collectAndBakeBucket's and drawLiveElements' own matching reset, and
+ * renderFrame's explicit reset immediately before every `blitTo` call
+ * (belt-and-suspenders: the resets inside collectAndBakeBucket/
+ * drawLiveElements mean an already-correct destCtx reaches renderFrame's
+ * own reset as a no-op, but renderFrame's reset is what actually GUARANTEES
+ * every blitTo call is protected, independent of what ran before it).
+ * renderPaperGround (paper-ground.ts) and renderScene (render-scene.ts)
+ * already followed this convention before this fix -- audited, unchanged.
  */
 import { drawCircleElement, drawStrokeSegment, type CanvasLike, type CanvasSize } from './render-scene';
 import { renderPaperGround } from './paper-ground';
@@ -91,14 +119,59 @@ export interface OffscreenBufferFactory {
   create(size: CanvasSize): OffscreenBuffer;
 }
 
+/**
+ * Diagnostic-only snapshot of one layer's bake bookkeeping after a single
+ * renderFrame call, for `onDebug` below -- session 022's "permanence
+ * oracle" investigation (docs/HANDOFF.md) needed a way to inspect the REAL
+ * internal bookkeeping this module tracks privately, not a caller-side
+ * reimplementation of it (which could only ever show what the bookkeeping
+ * SHOULD be, not what it actually is, defeating the point of tracing a
+ * suspected bookkeeping bug). Purely observational: reading these values
+ * can never influence what gets drawn.
+ */
+export interface LiveCompositorDebugLayerInfo {
+  layerId: string;
+  bucket: Bucket;
+  /** Snapshot of this layer's LayerBakeState.bakedStrokeIndices right after this frame. */
+  bakedStrokeIndices: number[];
+  /** Stroke kind-relative indices that newly entered bakedStrokeIndices THIS frame (empty if none). */
+  newlyBakedStrokeIndicesThisFrame: number[];
+  /** This layer's LayerBakeState.circlesBaked right after this frame. */
+  circlesBaked: number;
+  /** This layer's circlesBaked value BEFORE this frame's bake pass ran -- compare to `circlesBaked` to see if it advanced this frame. */
+  circlesBakedBeforeThisFrame: number;
+}
+
+/** Diagnostic-only per-frame summary -- see LiveCompositorDebugLayerInfo's own doc comment. */
+export interface LiveCompositorDebugFrameInfo {
+  canvasSize: CanvasSize;
+  /** True iff this frame's canvasSize differs from the previous frame's (width and/or height). */
+  canvasSizeChangedThisFrame: boolean;
+  /** True iff this frame's canvasSize growth actually triggered growTo() on the persistent buffers (see ensureBuffers -- only fires when width or height increases past the last-known size). */
+  buffersGrewThisFrame: boolean;
+  layers: LiveCompositorDebugLayerInfo[];
+}
+
 export interface LiveCompositor {
   /**
    * One frame: diffs `layers` against internally tracked state, bakes only
    * what's newly-final into the right persistent buffer, redraws whatever's
    * still growing fresh, then composites paper-ground + all buffers +
    * live-growing strokes back-to-front onto `destCtx` at `canvasSize`.
+   *
+   * `onDebug`, if given, is called once at the end of this frame with a
+   * snapshot of the internal bake bookkeeping that just happened --
+   * diagnostic-only (see LiveCompositorDebugFrameInfo's own doc comment),
+   * never called in production (main.ts never passes it) and never
+   * affecting what gets drawn.
    */
-  renderFrame(layers: SceneLayer[], destCtx: CanvasLike, canvasSize: CanvasSize, worldSeed: string): void;
+  renderFrame(
+    layers: SceneLayer[],
+    destCtx: CanvasLike,
+    canvasSize: CanvasSize,
+    worldSeed: string,
+    onDebug?: (info: LiveCompositorDebugFrameInfo) => void,
+  ): void;
   /**
    * Discards all persistent buffers and tracked bake-state -- call when
    * starting a fresh session (e.g. a palette-switch restart) so no stale
@@ -222,7 +295,12 @@ interface LayerBakeUpdate {
  * first frame a stroke is final / a circle appears) -- only the paint order
  * among elements that become bakeable in the same frame.
  */
-function collectAndBakeBucket(bucketLayers: SceneLayer[], getLayerState: (layerId: string) => LayerBakeState, bucketCtx: CanvasLike, worldUnitPx: number): void {
+function collectAndBakeBucket(
+  bucketLayers: SceneLayer[],
+  getLayerState: (layerId: string) => LayerBakeState,
+  bucketCtx: CanvasLike,
+  worldUnitPx: number,
+): Map<string, LayerBakeUpdate> {
   const pending: PendingBakeItem[] = [];
   const updates = new Map<string, LayerBakeUpdate>();
 
@@ -272,6 +350,24 @@ function collectAndBakeBucket(bucketLayers: SceneLayer[], getLayerState: (layerI
     }
   }
 
+  // GLOBALALPHA INVARIANT (session 024, docs/HANDOFF.md -- the founder-
+  // reported "whole branch segments vanish in one step" bug, root-caused to
+  // exactly this): drawStrokeSegment/drawCircleElement (render-scene.ts)
+  // both SET `ctx.globalAlpha` themselves before every fill/stroke call, so
+  // leaving it dirty here wouldn't corrupt any FUTURE draw through this
+  // same function (every draw call sets its own alpha first) -- but
+  // `bucketCtx` is not private to this function: it's a persistent buffer's
+  // own context, reused across every future tick's bake pass AND blitted
+  // via `drawImage` elsewhere (live-compositor.ts's own renderFrame),
+  // and `drawImage` does NOT set its own alpha -- it silently composites
+  // using whatever `globalAlpha` its target context already has. Any
+  // function here that sets `ctx.globalAlpha` on a context it does not
+  // exclusively own must restore it to 1 before returning, unconditionally
+  // (even when `pending` was empty) -- the same convention paper-ground.ts's
+  // renderPaperGround already followed. See drawLiveElements' matching
+  // reset and renderFrame's own reset immediately before each blitTo call.
+  bucketCtx.globalAlpha = 1;
+
   // Only now, after every pending element in this bucket has actually been
   // drawn in the correct order, record what got baked -- so a mid-batch
   // ordering decision can never be observed as "already baked" partway
@@ -284,6 +380,8 @@ function collectAndBakeBucket(bucketLayers: SceneLayer[], getLayerState: (layerI
     }
     state.circlesBaked = update.newCircleBakedCount;
   }
+
+  return updates;
 }
 
 /**
@@ -365,6 +463,16 @@ function drawLiveElements(
       drawCircleElement(destCtx, element, worldUnitPx);
     }
   }
+
+  // GLOBALALPHA INVARIANT (session 024) -- see collectAndBakeBucket's own
+  // matching comment for the full mechanism. `destCtx` here is the SHARED
+  // on-screen (or export) canvas context, reused across every bucket in
+  // BUCKET_PAINT_ORDER within this same renderFrame call, and across every
+  // future frame -- leaving it at whatever alpha this bucket's last live
+  // element happened to use is exactly the leak that let the NEXT bucket's
+  // `blitTo` (a bare `drawImage`, which never sets its own alpha) silently
+  // composite an entire persistent buffer at a near-invisible opacity.
+  destCtx.globalAlpha = 1;
 }
 
 export function createLiveCompositor(bufferFactory: OffscreenBufferFactory): LiveCompositor {
@@ -401,7 +509,8 @@ export function createLiveCompositor(bufferFactory: OffscreenBufferFactory): Liv
   }
 
   return {
-    renderFrame(layers, destCtx, canvasSize, worldSeed): void {
+    renderFrame(layers, destCtx, canvasSize, worldSeed, onDebug): void {
+      const sizeBeforeThisFrame = lastSize;
       const bucketBuffers = ensureBuffers(canvasSize);
       // Same fixed world-to-pixel scale as render-scene.ts: 1 world unit =
       // 1 canvas height in pixels, constant for the life of a session --
@@ -424,11 +533,35 @@ export function createLiveCompositor(bufferFactory: OffscreenBufferFactory): Liv
       // everything else.
       renderPaperGround(destCtx, canvasSize, worldSeed);
 
+      const debugLayers: LiveCompositorDebugLayerInfo[] = [];
+
       for (const bucket of BUCKET_PAINT_ORDER) {
         const bucketLayers = layersByBucket[bucket];
 
-        collectAndBakeBucket(bucketLayers, getLayerState, bucketBuffers[bucket].ctx, worldUnitPx);
+        const circlesBakedBefore = new Map<string, number>();
+        if (onDebug) {
+          for (const layer of bucketLayers) {
+            circlesBakedBefore.set(layer.layerId, getLayerState(layer.layerId).circlesBaked);
+          }
+        }
 
+        const updates = collectAndBakeBucket(bucketLayers, getLayerState, bucketBuffers[bucket].ctx, worldUnitPx);
+
+        // GLOBALALPHA INVARIANT (session 024, docs/HANDOFF.md -- the
+        // founder-reported "whole branch segments vanish in one step" bug):
+        // `blitTo` is a bare `drawImage` under the hood (main.ts's DOM
+        // implementation, render-divergence-harness.ts's Node one) -- it
+        // never sets its own alpha, so it silently composites this bucket's
+        // ENTIRE persistent buffer using whatever `globalAlpha` `destCtx`
+        // already happens to hold. `destCtx` is shared across every bucket
+        // in this loop; drawLiveElements' own reset (its own doc comment)
+        // covers the common case, but this explicit reset immediately
+        // before the call is the actual fix -- it does not depend on every
+        // upstream drawer remembering to clean up after itself, and it
+        // means the FIRST bucket's blit (nothing has drawn on destCtx yet
+        // this frame except renderPaperGround, which already resets to 1
+        // itself) is exactly as protected as the second and third.
+        destCtx.globalAlpha = 1;
         bucketBuffers[bucket].blitTo(destCtx);
 
         // Still-growing/still-unsafe live elements (strokes AND, since
@@ -438,6 +571,35 @@ export function createLiveCompositor(bufferFactory: OffscreenBufferFactory): Liv
         // the whole bucket, not per-layer -- see drawLiveElements's own doc
         // comment.
         drawLiveElements(bucketLayers, getLayerState, destCtx, worldUnitPx);
+
+        if (onDebug) {
+          for (const layer of bucketLayers) {
+            const state = getLayerState(layer.layerId);
+            const update = updates.get(layer.layerId);
+            debugLayers.push({
+              layerId: layer.layerId,
+              bucket,
+              bakedStrokeIndices: [...state.bakedStrokeIndices].sort((a, b) => a - b),
+              newlyBakedStrokeIndicesThisFrame: update?.newlyBakedStrokeIndices ?? [],
+              circlesBaked: state.circlesBaked,
+              circlesBakedBeforeThisFrame: circlesBakedBefore.get(layer.layerId) ?? 0,
+            });
+          }
+        }
+      }
+
+      if (onDebug) {
+        onDebug({
+          canvasSize,
+          canvasSizeChangedThisFrame:
+            sizeBeforeThisFrame === null ||
+            sizeBeforeThisFrame.width !== canvasSize.width ||
+            sizeBeforeThisFrame.height !== canvasSize.height,
+          buffersGrewThisFrame:
+            sizeBeforeThisFrame !== null &&
+            (canvasSize.width > sizeBeforeThisFrame.width || canvasSize.height > sizeBeforeThisFrame.height),
+          layers: debugLayers,
+        });
       }
     },
     reset(): void {
