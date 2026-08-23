@@ -104,6 +104,8 @@ export interface BotanicalTuningConfig {
   blossomCrossDrawProbability: number;
   /** Milliseconds between each individual blossom's reveal within a freshly-matured cluster (founder request, session 011: "1 by 1 as if someone was doing watercolor" rather than a cluster popping in all at once). A cluster's full membership is still decided deterministically the instant its branch matures (spawnBlossomsFor) -- this only paces how many of those already-decided blossoms have been added to the rendered/scene-visible list so far, driven purely by dt (fixed-timestep, invariant 4), never wall-clock. */
   blossomRevealIntervalMs: number;
+  /** Fraction of full reveal-rate that still applies at speed=0, mirroring branch growth's own speedFloor (growthStepFor in branch.ts) -- reveal pacing ties to how fast the user is actually moving rather than advancing at a fixed real-time rate, so blossoms still creep forward at rest but reveal faster the more the user moves. Kept as its own field, independent from branch growth's speedFloor, so the founder can tune blossom-reveal pacing separately via the dev tuning panel. Per the spec's immediacy-budget principle, this scales by the tick's own honestly-recorded speed -- never noise -- so the determinism invariant (same recorded speed + dt sequence -> identical result, live or replay) still holds. */
+  blossomRevealSpeedFloor: number;
 }
 
 export const DEFAULT_BOTANICAL_TUNING_CONFIG: BotanicalTuningConfig = {
@@ -150,5 +152,6 @@ export const DEFAULT_BOTANICAL_TUNING_CONFIG: BotanicalTuningConfig = {
   blossomRingProbability: 0.2,
   blossomRingLightenAmount: 0.3,
   blossomCrossDrawProbability: 0.4,
-  blossomRevealIntervalMs: 40,
+  blossomRevealIntervalMs: 300,
+  blossomRevealSpeedFloor: 0,
 };

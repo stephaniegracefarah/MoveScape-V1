@@ -142,23 +142,28 @@ function createEmptyGrowthSystem(systemId: string): GrowthSystemState {
 }
 
 /**
- * Advances every not-yet-fully-revealed cluster's leaky-bucket timer by `dt`
- * and moves any newly-due blossoms from `pending.blossoms` into
- * `system.blossoms` (the array buildScene/emitGrowthSystem actually reads).
- * Purely dt-driven -- same tick, same result, live or replay (invariant 4).
- * A cluster's own blossoms were already fully generated, in a fixed order,
- * the instant its branch matured (spawnBlossomsFor); this only paces when
- * each already-decided blossom starts rendering, so no new randomness is
- * introduced here and reveal order is itself deterministic.
+ * Advances every not-yet-fully-revealed cluster's leaky-bucket timer by an
+ * effective dt (dt scaled by how fast the user is actually moving, same
+ * speedFloor-scaled shape as branch growth's growthStepFor in branch.ts) and
+ * moves any newly-due blossoms from `pending.blossoms` into `system.blossoms`
+ * (the array buildScene/emitGrowthSystem actually reads). A pure function of
+ * the tick's own dt and recorded speed -- zero wall-clock dependency, so the
+ * determinism invariant still holds: same recorded speed + dt sequence,
+ * same result, live or replay (invariant 4). A cluster's own blossoms were
+ * already fully generated, in a fixed order, the instant its branch matured
+ * (spawnBlossomsFor); this only paces when each already-decided blossom
+ * starts rendering, so no new randomness is introduced here and reveal order
+ * is itself deterministic.
  */
-function revealPendingBlossoms(system: GrowthSystemState, dt: number, intervalMs: number): void {
+function revealPendingBlossoms(system: GrowthSystemState, dt: number, intervalMs: number, speed: number, speedFloor: number): void {
+  const effectiveDt = dt * (speedFloor + speed * (1 - speedFloor));
   let anyFullyRevealed = false;
   for (const pending of system.pendingClusters) {
     if (pending.revealedCount >= pending.blossoms.length) {
       anyFullyRevealed = true;
       continue;
     }
-    pending.revealTimerMs += dt;
+    pending.revealTimerMs += effectiveDt;
     while (pending.revealTimerMs >= intervalMs && pending.revealedCount < pending.blossoms.length) {
       system.blossoms.push(pending.blossoms[pending.revealedCount]!);
       pending.revealedCount++;
@@ -472,7 +477,7 @@ function stepGrowthSystem(
     system.branches.push(...newBranches);
   }
 
-  revealPendingBlossoms(system, dt, state.tuning.blossomRevealIntervalMs);
+  revealPendingBlossoms(system, dt, state.tuning.blossomRevealIntervalMs, params.speed, state.tuning.blossomRevealSpeedFloor);
 }
 
 function initState(state: BotanicalState, world: World): void {
