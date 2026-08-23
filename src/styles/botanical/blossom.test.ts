@@ -14,6 +14,7 @@ describe('spawnBlossomCluster — count', () => {
     const draw = createLabeledStream('seed-1', 'branch1:blossoms');
     const blossoms = spawnBlossomCluster({
       branchId: 'branch1',
+      rootIndex: 0,
       segments: makeSegments(20),
       count: 12,
       paletteColors: TEST_PALETTE,
@@ -28,6 +29,7 @@ describe('spawnBlossomCluster — count', () => {
     const draw = createLabeledStream('seed-1', 'branch1:blossoms');
     const blossoms = spawnBlossomCluster({
       branchId: 'branch1',
+      rootIndex: 0,
       segments: makeSegments(20),
       count: 0,
       paletteColors: TEST_PALETTE,
@@ -45,8 +47,8 @@ describe('spawnBlossomCluster — determinism', () => {
     const drawA = createLabeledStream('seed-1', 'branch1:blossoms');
     const drawB = createLabeledStream('seed-1', 'branch1:blossoms');
 
-    const a = spawnBlossomCluster({ branchId: 'branch1', segments, count: 8, paletteColors: TEST_PALETTE, z: 0.3, draw: drawA, tuning: DEFAULT_BOTANICAL_TUNING_CONFIG });
-    const b = spawnBlossomCluster({ branchId: 'branch1', segments, count: 8, paletteColors: TEST_PALETTE, z: 0.3, draw: drawB, tuning: DEFAULT_BOTANICAL_TUNING_CONFIG });
+    const a = spawnBlossomCluster({ branchId: 'branch1', rootIndex: 0, segments, count: 8, paletteColors: TEST_PALETTE, z: 0.3, draw: drawA, tuning: DEFAULT_BOTANICAL_TUNING_CONFIG });
+    const b = spawnBlossomCluster({ branchId: 'branch1', rootIndex: 0, segments, count: 8, paletteColors: TEST_PALETTE, z: 0.3, draw: drawB, tuning: DEFAULT_BOTANICAL_TUNING_CONFIG });
 
     expect(a).toEqual(b);
   });
@@ -56,8 +58,8 @@ describe('spawnBlossomCluster — determinism', () => {
     const drawA = createLabeledStream('seed-1', 'branch1:blossoms');
     const drawB = createLabeledStream('seed-2', 'branch1:blossoms');
 
-    const a = spawnBlossomCluster({ branchId: 'branch1', segments, count: 8, paletteColors: TEST_PALETTE, z: 0.3, draw: drawA, tuning: DEFAULT_BOTANICAL_TUNING_CONFIG });
-    const b = spawnBlossomCluster({ branchId: 'branch1', segments, count: 8, paletteColors: TEST_PALETTE, z: 0.3, draw: drawB, tuning: DEFAULT_BOTANICAL_TUNING_CONFIG });
+    const a = spawnBlossomCluster({ branchId: 'branch1', rootIndex: 0, segments, count: 8, paletteColors: TEST_PALETTE, z: 0.3, draw: drawA, tuning: DEFAULT_BOTANICAL_TUNING_CONFIG });
+    const b = spawnBlossomCluster({ branchId: 'branch1', rootIndex: 0, segments, count: 8, paletteColors: TEST_PALETTE, z: 0.3, draw: drawB, tuning: DEFAULT_BOTANICAL_TUNING_CONFIG });
 
     expect(a).not.toEqual(b);
   });
@@ -68,6 +70,7 @@ describe('spawnBlossomCluster — shape', () => {
     const draw = createLabeledStream('seed-1', 'branch1:blossoms');
     const blossoms = spawnBlossomCluster({
       branchId: 'branch1',
+      rootIndex: 0,
       segments: makeSegments(20),
       count: 10,
       paletteColors: TEST_PALETTE,
@@ -95,6 +98,7 @@ describe('spawnBlossomCluster — shape', () => {
     const draw = createLabeledStream('seed-1', 'branch1:blossoms');
     const blossoms = spawnBlossomCluster({
       branchId: 'branch1',
+      rootIndex: 0,
       segments: [{ x: 0.5, y: 0.9 }],
       count: 6,
       paletteColors: TEST_PALETTE,
@@ -111,6 +115,7 @@ describe('spawnBlossomCluster — size mixture', () => {
     const draw = createLabeledStream('seed-1', 'branch1:blossoms');
     const blossoms = spawnBlossomCluster({
       branchId: 'branch1',
+      rootIndex: 0,
       segments: makeSegments(20),
       count: 60,
       paletteColors: TEST_PALETTE,
@@ -144,6 +149,7 @@ describe('spawnBlossomCluster — gaussian packing', () => {
 
     const blossoms = spawnBlossomCluster({
       branchId: 'branch1',
+      rootIndex: 0,
       segments,
       count: 40,
       paletteColors: TEST_PALETTE,
@@ -181,6 +187,7 @@ describe('spawnBlossomCluster — ring outline', () => {
     const draw = createLabeledStream('seed-1', 'branch1:blossoms');
     const blossoms = spawnBlossomCluster({
       branchId: 'branch1',
+      rootIndex: 0,
       segments: makeSegments(20),
       count: 10,
       paletteColors: TEST_PALETTE,
@@ -199,6 +206,7 @@ describe('spawnBlossomCluster — ring outline', () => {
     const draw = createLabeledStream('seed-1', 'branch1:blossoms');
     const blossoms = spawnBlossomCluster({
       branchId: 'branch1',
+      rootIndex: 0,
       segments: makeSegments(20),
       count: 10,
       paletteColors: TEST_PALETTE,

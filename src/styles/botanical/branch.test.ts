@@ -135,6 +135,7 @@ describe('tickGrowing — lifecycle transition threshold', () => {
     const branch = spawnBranch({
       id: 'b1',
       generation: 0,
+      rootIndex: 0,
       z: 0.5,
       color: '#4a1218',
       rootX: 0.5,
@@ -167,6 +168,7 @@ describe('tickGrowing — lifecycle transition threshold', () => {
     const branch = spawnBranch({
       id: 'b1',
       generation: 0,
+      rootIndex: 0,
       z: 0.5,
       color: '#4a1218',
       rootX: 0.5,
@@ -198,6 +200,7 @@ describe('tickGrowing — lifecycle transition threshold', () => {
     const branch = spawnBranch({
       id: 'b1',
       generation: 0,
+      rootIndex: 0,
       z: 0.5,
       color: '#4a1218',
       rootX: 0.5,
@@ -299,6 +302,7 @@ describe('checkCrossedForks — fork-point crossing detection', () => {
     return spawnBranch({
       id: 'b1',
       generation: 0,
+      rootIndex: 0,
       z: 0.5,
       color: '#4a1218',
       rootX: 0.5,

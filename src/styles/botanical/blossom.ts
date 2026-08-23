@@ -10,6 +10,8 @@ import type { BotanicalTuningConfig } from './tuning-config';
 
 export interface Blossom {
   branchId: string;
+  /** Which root (0-based, within its own growth system) the owning branch's lineage descends from -- threaded through from `branch.rootIndex` at spawn (spawnBlossomsFor in botanical.ts). Used by the cross-root bake-order safety check (isSafeToBake in botanical.ts) the same way Branch.rootIndex is. */
+  rootIndex: number;
   x: number;
   y: number;
   z: number;
@@ -29,6 +31,7 @@ export interface Blossom {
 
 export interface SpawnBlossomClusterArgs {
   branchId: string;
+  rootIndex: number;
   segments: { x: number; y: number }[];
   count: number;
   /** Curated palette color list for this cluster (docs/styles/botanical.md section 4), at least 1 entry, hex strings like '#a31621'. */
@@ -122,6 +125,7 @@ export function spawnBlossomCluster(args: SpawnBlossomClusterArgs): Blossom[] {
 
     const blossom: Blossom = {
       branchId: args.branchId,
+      rootIndex: args.rootIndex,
       // x mirrors branch.ts's tickGrowing: world-space and unbounded, not
       // clamped to [0,1] -- only y (the canvas's fixed height) is.
       x: anchor.x + offsetX,

@@ -22,6 +22,8 @@ export type BranchLifecycle = 'growing' | 'mature';
 export interface Branch {
   id: string;
   generation: number;
+  /** Which root (0-based, within its own growth system) this branch's lineage descends from -- set explicitly at spawn (spawnRootBranch in botanical.ts) and inherited unchanged by every forked descendant (spawnChildBranch), so a branch's own root lineage is always known directly rather than needing to be parsed back out of its `id` string. Used by the cross-root bake-order safety check (isSafeToBake in botanical.ts) to tell which of a system's roots a given branch belongs to. */
+  rootIndex: number;
   z: number;
   color: string;
 
@@ -131,6 +133,7 @@ export function computeMatureDurationMs(baseMatureDurationMs: number, jitterDraw
 export interface SpawnBranchArgs {
   id: string;
   generation: number;
+  rootIndex: number;
   z: number;
   color: string;
   rootX: number;
@@ -151,6 +154,7 @@ export function spawnBranch(args: SpawnBranchArgs): Branch {
   return {
     id: args.id,
     generation: args.generation,
+    rootIndex: args.rootIndex,
     z: args.z,
     color: args.color,
     rootX: args.rootX,

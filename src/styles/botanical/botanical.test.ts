@@ -3,9 +3,16 @@ import type { MovementParams } from '../../adapters/movement-params';
 import { INITIAL_SESSION_PARAMS, type SessionParams } from '../../engine/session-params';
 import { createLabeledStream } from '../../world/labeled-stream';
 import { createWorld, type WorldOverrides } from '../../world/world';
+import type { SceneElement } from '../style-renderer';
 import { angleDifference, growthStepFor } from './branch';
 import type { Blossom } from './blossom';
-import { createBotanicalInternal, createBotanicalStyle } from './botanical';
+import {
+  computeGrowingRootStartMinX,
+  createBotanicalInternal,
+  createBotanicalStyle,
+  isSafeToBake,
+  type RootBakeSafetySystem,
+} from './botanical';
 import { BOTANICAL_PALETTE_PRESETS } from './palettes';
 import { DEFAULT_BOTANICAL_TUNING_CONFIG } from './tuning-config';
 
@@ -34,6 +41,18 @@ function boundingBoxSpread(points: { x: number; y: number }[]): number {
   const width = Math.max(...xs) - Math.min(...xs);
   const height = Math.max(...ys) - Math.min(...ys);
   return width + height;
+}
+
+/** Smallest distance between any point of `a` and any point of `b` -- fine for a test-only proximity check on the modest point counts these tests deal with, not a hot path. */
+function minSegmentDistance(a: { x: number; y: number }[], b: { x: number; y: number }[]): number {
+  let min = Infinity;
+  for (const pa of a) {
+    for (const pb of b) {
+      const d = Math.hypot(pa.x - pb.x, pa.y - pb.y);
+      if (d < min) min = d;
+    }
+  }
+  return min;
 }
 
 function curvatureSum(segments: { x: number; y: number }[]): number {
@@ -754,5 +773,329 @@ describe('BotanicalTuningConfig — override plumbing (M4x tuning panel)', () =>
       // formula deterministic: radius === blossomRadiusSmallMin exactly.
       expect(blossom.radius).toBeCloseTo(0.2, 10);
     }
+  });
+});
+
+// --- fix-cross-root-bake-order: computeRootFrontierMaxX / isSafeToBake pure
+// functions, plus end-to-end wiring tests. See docs/HANDOFF.md -- confirmed
+// bug: a root's z is fixed by its own index (initGrowthSystem's
+// `z = clamp01((i + zJitter) / rootCount)`), so within one growth system a
+// higher-rootIndex root is ALWAYS farther, yet both roots start bunched
+// close together near the left edge (ROOT_X_MIN/ROOT_X_SPAN) before the
+// canvas has spread out -- if the nearer root's branch matures and bakes
+// first, a farther root arriving later at the same screen position
+// permanently overwrites it (the live compositor's own within-frame z-sort
+// can't reconcile bakes across different frames).
+
+function strokeFinalFlags(elements: SceneElement[]): boolean[] {
+  return elements.filter((e) => e.kind === 'stroke').map((e) => e.final === true);
+}
+
+describe('computeGrowingRootStartMinX — per-root growing-branch start tracking', () => {
+  it('tracks the min rootX among GROWING branches per (systemId, rootIndex) key, ignoring mature ones', () => {
+    const systems: RootBakeSafetySystem[] = [
+      {
+        systemId: 'fg0',
+        roots: [
+          { x: 0.1, z: 0.2 },
+          { x: 0.15, z: 0.8 },
+        ],
+        branches: [
+          { rootIndex: 0, rootX: 0.3, lifecycle: 'mature' }, // mature -- excluded, no future bake risk
+          { rootIndex: 0, rootX: 0.32, lifecycle: 'growing' },
+          { rootIndex: 0, rootX: 0.28, lifecycle: 'growing' }, // smaller rootX -- this is the min
+          { rootIndex: 1, rootX: 0.2, lifecycle: 'growing' },
+        ],
+      },
+    ];
+    const minX = computeGrowingRootStartMinX(systems);
+    expect(minX.get('fg0:0')).toBe(0.28);
+    expect(minX.get('fg0:1')).toBe(0.2);
+  });
+
+  it('keys are namespaced per systemId, so two systems both having a rootIndex 0 stay independent', () => {
+    const systems: RootBakeSafetySystem[] = [
+      { systemId: 'fg0', roots: [{ x: 0, z: 0.5 }], branches: [{ rootIndex: 0, rootX: 1.2, lifecycle: 'growing' }] },
+      { systemId: 'fg1', roots: [{ x: 1.2, z: 0.5 }], branches: [{ rootIndex: 0, rootX: 1.25, lifecycle: 'growing' }] },
+    ];
+    const minX = computeGrowingRootStartMinX(systems);
+    expect(minX.get('fg0:0')).toBe(1.2);
+    expect(minX.get('fg1:0')).toBe(1.25);
+  });
+
+  it('has no entry for a lineage with no branches, or whose branches are all mature', () => {
+    const systems: RootBakeSafetySystem[] = [
+      { systemId: 'fg0', roots: [{ x: 0, z: 0.5 }], branches: [] },
+      { systemId: 'fg1', roots: [{ x: 0, z: 0.5 }], branches: [{ rootIndex: 0, rootX: 0.1, lifecycle: 'mature' }] },
+    ];
+    const minX = computeGrowingRootStartMinX(systems);
+    expect(minX.size).toBe(0);
+  });
+});
+
+describe('isSafeToBake — cross-root bake-order safety predicate', () => {
+  it('is a complete no-op when the only system has exactly one root (the single-root regression guarantee)', () => {
+    const singleRootSystem: RootBakeSafetySystem = {
+      systemId: 'fg0',
+      roots: [{ x: 0.1, z: 0.37 }],
+      branches: [{ rootIndex: 0, rootX: 0.1, lifecycle: 'growing' }],
+    };
+    const growingRootStartMinX = computeGrowingRootStartMinX([singleRootSystem]);
+    for (const ownZ of [0, 0.1, 0.37, 0.9, 1]) {
+      expect(
+        isSafeToBake({
+          ownSystemId: 'fg0',
+          ownRootIndex: 0,
+          ownZ,
+          ownTipX: 0.9,
+          allSystems: [singleRootSystem],
+          growingRootStartMinX,
+          margin: 0.15,
+        }),
+      ).toBe(true);
+    }
+  });
+
+  it('is a no-op across multiple single-root foreground systems (the growth-plateau hand-off case)', () => {
+    // fg1's root happens to land at a HIGHER z than fg0's root, and fg1's
+    // sole branch is still growing right near fg0's own territory -- if
+    // single-root systems were treated as mutual threats, this would
+    // (wrongly) gate fg0's content: neither system ever had more than one
+    // root, so there is no structural nearer/farther guarantee between them.
+    const fg0: RootBakeSafetySystem = {
+      systemId: 'fg0',
+      roots: [{ x: 0.1, z: 0.2 }],
+      branches: [{ rootIndex: 0, rootX: 0.1, lifecycle: 'mature' }],
+    };
+    const fg1: RootBakeSafetySystem = {
+      systemId: 'fg1',
+      roots: [{ x: 0.12, z: 0.8 }],
+      branches: [{ rootIndex: 0, rootX: 0.12, lifecycle: 'growing' }],
+    };
+    const growingRootStartMinX = computeGrowingRootStartMinX([fg0, fg1]);
+    expect(
+      isSafeToBake({
+        ownSystemId: 'fg0',
+        ownRootIndex: 0,
+        ownZ: 0.2,
+        ownTipX: 0.9,
+        allSystems: [fg0, fg1],
+        growingRootStartMinX,
+        margin: 0.15,
+      }),
+    ).toBe(true);
+  });
+
+  it('never gates against a nearer or equal-z other root (nearer/equal painting on top is already correct)', () => {
+    const system: RootBakeSafetySystem = {
+      systemId: 'fg0',
+      roots: [
+        { x: 0.1, z: 0.6 },
+        { x: 0.12, z: 0.6 }, // equal z to root0
+      ],
+      branches: [
+        { rootIndex: 0, rootX: 0.1, lifecycle: 'mature' },
+        { rootIndex: 1, rootX: 0.12, lifecycle: 'growing' }, // root1 still growing right nearby -- would gate if z were treated as farther
+      ],
+    };
+    const growingRootStartMinX = computeGrowingRootStartMinX([system]);
+    expect(
+      isSafeToBake({ ownSystemId: 'fg0', ownRootIndex: 0, ownZ: 0.6, ownTipX: 0.9, allSystems: [system], growingRootStartMinX, margin: 0.15 }),
+    ).toBe(true);
+  });
+
+  it('withholds (false) when a farther root has a currently-growing branch starting at or before ownTipX + margin', () => {
+    // The exact violation shape found via integration testing: root0
+    // (nearer, z=0.2) has a branch that reached far ahead (tipX=0.5); root1
+    // (farther, z=0.8) has a branch STILL GROWING, spawned back at its own
+    // anchor (rootX=0.06) -- root1's eventual bake (whenever it matures)
+    // will still cover that whole path from 0.06 onward, so it could still
+    // arrive later and paint over root0's content near there.
+    const system: RootBakeSafetySystem = {
+      systemId: 'fg0',
+      roots: [
+        { x: 0.05, z: 0.2 },
+        { x: 0.06, z: 0.8 },
+      ],
+      branches: [
+        { rootIndex: 0, rootX: 0.05, lifecycle: 'mature' },
+        { rootIndex: 1, rootX: 0.06, lifecycle: 'growing' },
+      ],
+    };
+    const growingRootStartMinX = computeGrowingRootStartMinX([system]);
+    expect(
+      isSafeToBake({ ownSystemId: 'fg0', ownRootIndex: 0, ownZ: 0.2, ownTipX: 0.5, allSystems: [system], growingRootStartMinX, margin: 0.15 }),
+    ).toBe(false);
+  });
+
+  it('allows (true) once that farther root\'s growing branch has moved its own start well past ownTipX + margin', () => {
+    // A forked child of root1, spawned once root1's own growth had already
+    // swept well past root0's tipX + margin (0.5 + 0.15 = 0.65) -- its own
+    // rootX (0.7) is already beyond that, so its future bake can never
+    // retroactively cover root0's territory back at 0.5.
+    const system: RootBakeSafetySystem = {
+      systemId: 'fg0',
+      roots: [
+        { x: 0.05, z: 0.2 },
+        { x: 0.06, z: 0.8 },
+      ],
+      branches: [
+        { rootIndex: 0, rootX: 0.05, lifecycle: 'mature' },
+        { rootIndex: 1, rootX: 0.06, lifecycle: 'mature' }, // root1's own root branch already resolved
+        { rootIndex: 1, rootX: 0.7, lifecycle: 'growing' }, // its child, forked far out, still growing
+      ],
+    };
+    const growingRootStartMinX = computeGrowingRootStartMinX([system]);
+    expect(
+      isSafeToBake({ ownSystemId: 'fg0', ownRootIndex: 0, ownZ: 0.2, ownTipX: 0.5, allSystems: [system], growingRootStartMinX, margin: 0.15 }),
+    ).toBe(true);
+  });
+
+  it('treats a root with no currently-growing branch (all mature) as having no active threat', () => {
+    const system: RootBakeSafetySystem = {
+      systemId: 'fg0',
+      roots: [
+        { x: 0.05, z: 0.2 },
+        { x: 0.06, z: 0.8 },
+      ],
+      branches: [
+        { rootIndex: 0, rootX: 0.05, lifecycle: 'mature' },
+        { rootIndex: 1, rootX: 0.06, lifecycle: 'mature' }, // root1's only branch so far -- already mature
+      ],
+    };
+    const growingRootStartMinX = computeGrowingRootStartMinX([system]);
+    expect(growingRootStartMinX.has('fg0:1')).toBe(false); // sanity: no entry, "no active threat" path is what's under test
+    expect(
+      isSafeToBake({ ownSystemId: 'fg0', ownRootIndex: 0, ownZ: 0.2, ownTipX: 0.5, allSystems: [system], growingRootStartMinX, margin: 0.15 }),
+    ).toBe(true);
+  });
+
+  it('never gates against its own root (same systemId + rootIndex pair is always skipped)', () => {
+    const system: RootBakeSafetySystem = {
+      systemId: 'fg0',
+      roots: [
+        { x: 0.05, z: 0.2 },
+        { x: 0.06, z: 0.8 },
+      ],
+      branches: [{ rootIndex: 1, rootX: 0.06, lifecycle: 'growing' }],
+    };
+    const growingRootStartMinX = computeGrowingRootStartMinX([system]);
+    expect(
+      isSafeToBake({ ownSystemId: 'fg0', ownRootIndex: 1, ownZ: 0.8, ownTipX: 0.9, allSystems: [system], growingRootStartMinX, margin: 0.15 }),
+    ).toBe(true);
+  });
+});
+
+describe('createBotanicalStyle — cross-root bake-order safety: single-root regression (must be a complete no-op)', () => {
+  it('final is exactly `lifecycle === "mature"` for every fg0 branch in a single-root session, byte-for-byte the pre-fix formula', () => {
+    const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0 }; // -> 1 root
+    const { renderer, state } = createBotanicalInternal();
+    renderer.init(createWorld('single-root-noop-seed', 0, overrides));
+
+    runTicks(renderer, 800, 16.67, () => makeParams({ speed: 0.8, expansion: 0.6, symmetry: 0.4 }));
+
+    expect(state.foregroundSystems[0]!.branches.some((b) => b.lifecycle === 'mature')).toBe(true); // sanity: real maturity happened
+
+    const layer = (renderer.sceneLayers?.() ?? []).find((l) => l.layerId === 'fg0')!;
+    const branches = state.foregroundSystems[0]!.branches.filter((b) => b.segments.length >= 2);
+    const finals = strokeFinalFlags(layer.elements);
+
+    expect(finals.length).toBe(branches.length); // sanity: same alignment emitGrowthSystem produces
+    finals.forEach((final, i) => {
+      expect(final).toBe(branches[i]!.lifecycle === 'mature');
+    });
+  });
+
+  it('scene() and sceneLayers() agree with each other in the single-root case too (no divergence introduced by the fix)', () => {
+    const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0 };
+    const renderer = createBotanicalStyle();
+    renderer.init(createWorld('single-root-consistency-seed', 0, overrides));
+    runTicks(renderer, 500, 16.67, () => makeParams({ speed: 0.7, expansion: 0.5, symmetry: 0.5 }));
+
+    const flattened = (renderer.sceneLayers?.() ?? []).flatMap((l) => l.elements);
+    expect(flattened.length).toBeGreaterThan(0);
+    expect(flattened).toEqual(renderer.scene().elements);
+  });
+});
+
+describe('createBotanicalStyle — cross-root bake-order safety: forced two-root integration', () => {
+  const TWO_ROOT_OVERRIDES: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0.75 }; // -> 1 + floor(0.75*2) = 2 roots
+
+  it('no baked-order violation occurs between different-root branches, across many ticks and several seeds', () => {
+    const CLOSE_THRESHOLD = 0.04; // world units -- roughly a branch stroke width or two
+    const dt = 16.67;
+    const TICKS = 1200;
+
+    for (let seedNum = 0; seedNum < 5; seedNum++) {
+      const { renderer, state } = createBotanicalInternal();
+      renderer.init(createWorld(`bake-safety-seed-${seedNum}`, 0, TWO_ROOT_OVERRIDES));
+      expect(state.foregroundSystems[0]!.roots.length).toBe(2); // sanity: the scenario actually engages the fix
+
+      const firstFinalTick = new Map<number, number>(); // stroke-kind index -> first tick observed final
+      let time = 0;
+      for (let t = 0; t < TICKS; t++) {
+        renderer.step({ v: 1, expansion: 0.6, speed: 0.6, symmetry: 0.6 }, INITIAL_SESSION_PARAMS, time, dt);
+        time += dt;
+
+        const layer = (renderer.sceneLayers?.() ?? []).find((l) => l.layerId === 'fg0')!;
+        strokeFinalFlags(layer.elements).forEach((final, i) => {
+          if (final && !firstFinalTick.has(i)) firstFinalTick.set(i, t);
+        });
+      }
+
+      const branches = state.foregroundSystems[0]!.branches.filter((b) => b.segments.length >= 2);
+      let violations = 0;
+      for (let j = 0; j < branches.length; j++) {
+        for (let i = 0; i < branches.length; i++) {
+          if (i === j) continue;
+          const a = branches[i]!;
+          const b = branches[j]!;
+          if (a.rootIndex === b.rootIndex) continue;
+          const tickA = firstFinalTick.get(i);
+          const tickB = firstFinalTick.get(j);
+          if (tickA === undefined || tickB === undefined) continue;
+          if (tickB <= tickA) continue; // only a LATER bake can overwrite an earlier one
+          if (b.z <= a.z) continue; // only a FARTHER later bake is a violation
+          if (minSegmentDistance(a.segments, b.segments) <= CLOSE_THRESHOLD) violations++;
+        }
+      }
+
+      expect(violations).toBe(0);
+    }
+  });
+
+  it("withholds a nearer, already-mature branch's final flag until the farther root's frontier catches up, in the full renderer pipeline", () => {
+    const { renderer, state } = createBotanicalInternal({ crossRootBakeSafetyMargin: 0.4 }); // large margin -- easy to observe withholding
+    renderer.init(createWorld('bake-safety-withhold-seed', 0, TWO_ROOT_OVERRIDES));
+
+    const paramsAt = () => makeParams({ speed: 0.6, expansion: 0.5, symmetry: 0.5 });
+    let sawMatureNotYetFinal = false;
+    let time = 0;
+    for (let t = 0; t < 400 && !sawMatureNotYetFinal; t++) {
+      renderer.step(paramsAt(), INITIAL_SESSION_PARAMS, time, 16.67);
+      time += 16.67;
+
+      const layer = (renderer.sceneLayers?.() ?? []).find((l) => l.layerId === 'fg0')!;
+      const branches = state.foregroundSystems[0]!.branches.filter((b) => b.segments.length >= 2);
+      strokeFinalFlags(layer.elements).forEach((final, i) => {
+        if (branches[i]!.lifecycle === 'mature' && !final) sawMatureNotYetFinal = true;
+      });
+    }
+
+    expect(sawMatureNotYetFinal).toBe(true);
+  });
+
+  it('same seed, forced two roots, produces identical scenes across two independent runs (determinism holds with the safety gate engaged)', () => {
+    const a = createBotanicalInternal();
+    const b = createBotanicalInternal();
+    a.renderer.init(createWorld('bake-safety-determinism-seed', 0, TWO_ROOT_OVERRIDES));
+    b.renderer.init(createWorld('bake-safety-determinism-seed', 0, TWO_ROOT_OVERRIDES));
+
+    const paramsAt = () => makeParams({ speed: 0.7, expansion: 0.6, symmetry: 0.4 });
+    runTicks(a.renderer, 900, 16.67, paramsAt);
+    runTicks(b.renderer, 900, 16.67, paramsAt);
+
+    expect(a.state.foregroundSystems[0]!.roots.length).toBe(2); // sanity
+    expect(a.renderer.scene()).toEqual(b.renderer.scene());
   });
 });

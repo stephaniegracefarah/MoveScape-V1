@@ -142,6 +142,179 @@ function createEmptyGrowthSystem(systemId: string): GrowthSystemState {
 }
 
 /**
+ * The minimal shape computeGrowingRootStartMinX/isSafeToBake need from a
+ * growth system -- a structural subset of GrowthSystemState (which
+ * satisfies this automatically, so callers pass state.foregroundSystems
+ * directly with no cast) kept separate so both functions stay easily
+ * unit-testable with small hand-built fixtures instead of full
+ * GrowthSystemState objects (resproutCounters/pendingClusters/etc. are
+ * irrelevant to this check).
+ */
+export interface RootBakeSafetySystem {
+  systemId: string;
+  roots: { x: number; z: number }[];
+  branches: { rootIndex: number; rootX: number; lifecycle: 'growing' | 'mature' }[];
+}
+
+/**
+ * For every (systemId, rootIndex) lineage, the smallest rootX among its
+ * currently-STILL-GROWING branches -- keyed `${systemId}:${rootIndex}`.
+ * This (not a "how far has it grown" frontier) is the quantity
+ * isSafeToBake actually needs, for a subtle but important reason: the live
+ * compositor bakes a stroke whole, in one shot, only once it matures
+ * (live-compositor.ts's drawStrokeElementFully bakes every segment from
+ * index 0), covering its ENTIRE path from its own rootX (fixed at spawn,
+ * never moves) onward. A branch's CURRENT tipX while still growing says
+ * nothing about that future bake -- it will still include everything back
+ * to its own rootX once it finally matures, however much further it grows
+ * meanwhile. So a NOT-YET-MATURE branch is a live threat to any nearby
+ * content with x >= its rootX, for as long as it keeps growing; a MATURE
+ * branch, by contrast, poses no threat at all regardless of its tipX --
+ * once mature it either already baked (an earlier frame) or is baking
+ * THIS frame, sorted correctly by z alongside whatever else bakes this
+ * same frame (live-compositor.ts's collectAndBakeBucket) -- either way its
+ * bake-order relative to anything checking safety now is already resolved
+ * correctly. (An earlier version of this fix tracked "max tipX reached by
+ * any mature branch" instead; testing found it insufficient -- a fast,
+ * shallow FORKED CHILD of the farther root can mature and report a
+ * generous tipX while that root's own slower, root-covering branch is
+ * still growing and will still bake later, still covering the origin
+ * region. Gating on growing branches' own rootX instead of mature
+ * branches' tipX closes that gap directly.)
+ *
+ * A lineage with no currently-growing branch at all (every branch mature,
+ * or --degenerate/test-fixture only, since a real root always has >=1
+ * branch from init onward -- no branches yet) has no entry here;
+ * isSafeToBake's own fallback distinguishes "definitely no threat right
+ * now" from "never grew, worst case" (see its own doc comment).
+ */
+export function computeGrowingRootStartMinX(systems: RootBakeSafetySystem[]): Map<string, number> {
+  const minX = new Map<string, number>();
+  for (const system of systems) {
+    for (const branch of system.branches) {
+      if (branch.lifecycle !== 'growing') continue;
+      const key = `${system.systemId}:${branch.rootIndex}`;
+      const current = minX.get(key);
+      if (current === undefined || branch.rootX < current) {
+        minX.set(key, branch.rootX);
+      }
+    }
+  }
+  return minX;
+}
+
+/**
+ * The cross-root bake-order safety check (docs/HANDOFF.md, cross-root
+ * paint-order bug): a piece of content at (ownSystemId, ownRootIndex, ownZ,
+ * ownTipX) is safe to permanently bake (or, for a blossom, to be revealed
+ * into the scene) only if, for every OTHER root sharing the same
+ * compositor bucket that is currently FARTHER (larger z -- nearer-z roots
+ * painting over farther-z roots is already correct, expected behavior),
+ * NO currently-growing branch of that root starts (`rootX`) at or before
+ * this content's own x position plus `margin` -- see
+ * computeGrowingRootStartMinX's own doc comment for why growing branches'
+ * OWN start point, not how far anything has grown, is what actually
+ * determines future bake-order risk.
+ *
+ * A root with no growing-branch entry (computeGrowingRootStartMinX) --
+ * every one of its branches mature, the ordinary case whenever a root
+ * happens to be between one branch maturing and its next resprout starting
+ * -- has no active threat right now and is treated as infinitely safe.
+ *
+ * Only ever needs to consider OTHER roots -- a root can never threaten its
+ * own content (same lineage always bakes in its own arrival order, which is
+ * already correct within one root), so same-(systemId,rootIndex) pairs are
+ * always skipped.
+ *
+ * Only a system with MORE THAN ONE root can ever supply a threatening
+ * "other root": the confirmed bug's whole precondition is the structural
+ * guarantee that within one system, a higher rootIndex is ALWAYS farther
+ * (initGrowthSystem's `z = clamp01((i + zJitter) / rootCount)`), so a
+ * higher-index root can genuinely still be catching up to a lower-index
+ * root's own content. A system with exactly one root carries no such
+ * guarantee at all -- that lone root's z is just one arbitrary draw
+ * (rootCount=1 collapses the same formula to `clamp01(zJitter)`, uniform
+ * over the whole depth range), unrelated by construction to any other
+ * system's own root(s). This matters in practice: the growth-plateau
+ * hand-off (maybeSpawnNextForegroundSystem) appends a new always-single-root
+ * foreground system once an earlier one fills up, so a long session
+ * ordinarily has several single-root systems live in the same 'foreground'
+ * compositor bucket at once even when every individual system only ever had
+ * 1 root -- treating those as mutual threats would gate on a coincidental,
+ * meaningless z relationship instead of the real bug, with no way to ever
+ * resolve (two single-root systems' roots don't converge the way two roots
+ * racing down the same system's shared sweep do). Skipping single-root
+ * systems entirely keeps the single-root case a true no-op end-to-end, at
+ * any number of foreground systems, exactly matching this fix's own
+ * regression requirement.
+ */
+export function isSafeToBake(args: {
+  ownSystemId: string;
+  ownRootIndex: number;
+  ownZ: number;
+  ownTipX: number;
+  allSystems: RootBakeSafetySystem[];
+  growingRootStartMinX: Map<string, number>;
+  margin: number;
+}): boolean {
+  for (const system of args.allSystems) {
+    if (system.roots.length <= 1) continue;
+    for (let rootIndex = 0; rootIndex < system.roots.length; rootIndex++) {
+      if (system.systemId === args.ownSystemId && rootIndex === args.ownRootIndex) continue;
+      const otherZ = system.roots[rootIndex]!.z;
+      if (otherZ <= args.ownZ) continue; // only a FARTHER root can later paint over this content
+      const key = `${system.systemId}:${rootIndex}`;
+      // No entry -> no currently-growing branch for this root -> no active
+      // threat right now (Infinity, never <= anything finite).
+      const threatStartX = args.growingRootStartMinX.get(key) ?? Infinity;
+      if (threatStartX <= args.ownTipX + args.margin) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Bundles everything isSafeToBake needs about the current cross-root
+ * foreground state -- computed once per tick (stepState, for blossom-reveal
+ * gating) or once per scene emission (buildScene/buildSceneLayers, for
+ * stroke finality gating), then threaded down to each individual branch's
+ * or blossom's own isSafeToBake call rather than recomputed per-element.
+ * `allSystems` is always `state.foregroundSystems` -- echoes are each their
+ * own separate compositor bucket (live-compositor.ts's bucketFor), so they
+ * neither need this check applied to them nor participate as an "other
+ * root" in anyone else's check (see stepState/buildScene: echo calls pass
+ * `undefined` for this instead of a CrossRootBakeSafety).
+ */
+interface CrossRootBakeSafety {
+  growingRootStartMinX: Map<string, number>;
+  allSystems: GrowthSystemState[];
+  margin: number;
+}
+
+function computeCrossRootBakeSafety(state: BotanicalState): CrossRootBakeSafety {
+  return {
+    growingRootStartMinX: computeGrowingRootStartMinX(state.foregroundSystems),
+    allSystems: state.foregroundSystems,
+    margin: state.tuning.crossRootBakeSafetyMargin,
+  };
+}
+
+/** True if the next not-yet-revealed blossom in `pending` (if any) is safe to reveal right now per the cross-root bake-order check -- `safety === undefined` (echo systems, which never need this check) always returns true. */
+function isNextBlossomSafe(pending: PendingBlossomCluster, systemId: string, safety: CrossRootBakeSafety | undefined): boolean {
+  if (safety === undefined) return true;
+  const next = pending.blossoms[pending.revealedCount]!;
+  return isSafeToBake({
+    ownSystemId: systemId,
+    ownRootIndex: next.rootIndex,
+    ownZ: next.z,
+    ownTipX: next.x,
+    allSystems: safety.allSystems,
+    growingRootStartMinX: safety.growingRootStartMinX,
+    margin: safety.margin,
+  });
+}
+
+/**
  * Advances every not-yet-fully-revealed cluster's leaky-bucket timer by an
  * effective dt (dt scaled by how fast the user is actually moving, same
  * speedFloor-scaled shape as branch growth's growthStepFor in branch.ts) and
@@ -154,8 +327,24 @@ function createEmptyGrowthSystem(systemId: string): GrowthSystemState {
  * (spawnBlossomsFor); this only paces when each already-decided blossom
  * starts rendering, so no new randomness is introduced here and reveal order
  * is itself deterministic.
+ *
+ * A blossom that is otherwise due (the timer condition holds) but not yet
+ * safe to bake per isNextBlossomSafe (cross-root bake-order check) is left
+ * pending: the timer is NOT decremented and the blossom is NOT pushed, so
+ * `revealTimerMs` keeps accumulating (already incremented this tick, above
+ * the while loop) and gets rechecked next tick without losing progress or
+ * double-counting. `safety === undefined` (echo systems) skips this check
+ * entirely, reproducing the pre-fix behavior exactly.
  */
-function revealPendingBlossoms(system: GrowthSystemState, dt: number, intervalMs: number, speed: number, speedFloor: number): void {
+function revealPendingBlossoms(
+  system: GrowthSystemState,
+  systemId: string,
+  dt: number,
+  intervalMs: number,
+  speed: number,
+  speedFloor: number,
+  safety: CrossRootBakeSafety | undefined,
+): void {
   const effectiveDt = dt * (speedFloor + speed * (1 - speedFloor));
   let anyFullyRevealed = false;
   for (const pending of system.pendingClusters) {
@@ -164,7 +353,11 @@ function revealPendingBlossoms(system: GrowthSystemState, dt: number, intervalMs
       continue;
     }
     pending.revealTimerMs += effectiveDt;
-    while (pending.revealTimerMs >= intervalMs && pending.revealedCount < pending.blossoms.length) {
+    while (
+      pending.revealTimerMs >= intervalMs &&
+      pending.revealedCount < pending.blossoms.length &&
+      isNextBlossomSafe(pending, systemId, safety)
+    ) {
       system.blossoms.push(pending.blossoms[pending.revealedCount]!);
       pending.revealedCount++;
       pending.revealTimerMs -= intervalMs;
@@ -254,8 +447,9 @@ function spawnRootBranch(
   systemId: string,
   rootIndex: number,
 ): Branch {
-  // rootIndex always comes from a valid range (0..rootCount-1, or a parsed
-  // resprout id that originated from one of those), so this is always defined.
+  // rootIndex always comes from a valid range (0..rootCount-1, or a
+  // resprouting branch's own already-set branch.rootIndex, which always
+  // originated from one of those), so this is always defined.
   const root = system.roots[rootIndex]!;
   const counter = system.resproutCounters.get(rootIndex) ?? 0;
   system.resproutCounters.set(rootIndex, counter + 1);
@@ -280,6 +474,7 @@ function spawnRootBranch(
   return spawnBranch({
     id,
     generation: 0,
+    rootIndex,
     z: root.z,
     color,
     rootX: root.x,
@@ -327,6 +522,7 @@ function spawnChildBranch(state: BotanicalState, parent: Branch, childIndex: num
   return spawnBranch({
     id: childId,
     generation,
+    rootIndex: parent.rootIndex,
     z,
     color,
     rootX: parent.tipX,
@@ -359,6 +555,7 @@ function spawnBlossomsFor(state: BotanicalState, branch: Branch): Blossom[] {
   const draw = createLabeledStream(state.sessionSeed, `${branch.id}:blossoms`);
   return spawnBlossomCluster({
     branchId: branch.id,
+    rootIndex: branch.rootIndex,
     segments: branch.segments,
     count: expansionScaledClusterCount(state),
     paletteColors: state.palette.colors,
@@ -405,6 +602,7 @@ function stepGrowthSystem(
   params: MovementParams,
   dt: number,
   maxGenerationForSystem: number,
+  bakeSafety: CrossRootBakeSafety | undefined,
 ): void {
   const newBranches: Branch[] = [];
   const liveCount = () => system.branches.length + newBranches.length;
@@ -463,11 +661,7 @@ function stepGrowthSystem(
       if (branch.lifecycleTimer >= branch.matureDurationMs) {
         branch.lifecycleTimer = 0;
         if (branch.generation === 0 && liveCount() < state.maxConcurrentBranches) {
-          const rootIndexMatch = /:root(\d+):/.exec(branch.id);
-          const rootIndex = rootIndexMatch?.[1] !== undefined ? Number(rootIndexMatch[1]) : NaN;
-          if (!Number.isNaN(rootIndex)) {
-            newBranches.push(spawnRootBranch(state, system, systemId, rootIndex));
-          }
+          newBranches.push(spawnRootBranch(state, system, systemId, branch.rootIndex));
         }
       }
     }
@@ -477,7 +671,15 @@ function stepGrowthSystem(
     system.branches.push(...newBranches);
   }
 
-  revealPendingBlossoms(system, dt, state.tuning.blossomRevealIntervalMs, params.speed, state.tuning.blossomRevealSpeedFloor);
+  revealPendingBlossoms(
+    system,
+    systemId,
+    dt,
+    state.tuning.blossomRevealIntervalMs,
+    params.speed,
+    state.tuning.blossomRevealSpeedFloor,
+    bakeSafety,
+  );
 }
 
 function initState(state: BotanicalState, world: World): void {
@@ -559,8 +761,15 @@ function stepState(state: BotanicalState, params: MovementParams, sessionParams:
   state.latestParams = params;
   state.latestSessionParams = sessionParams;
 
+  // Computed once per tick, before the per-system loop -- doesn't depend on
+  // which system/branch/blossom is being checked, so every foreground
+  // system this tick shares the same snapshot (docs/HANDOFF.md cross-root
+  // bake-order fix). Echoes never receive this (see CrossRootBakeSafety's
+  // own doc comment) -- each echo is its own separate compositor bucket.
+  const bakeSafety = computeCrossRootBakeSafety(state);
+
   for (const system of state.foregroundSystems) {
-    stepGrowthSystem(state, system, system.systemId, params, dt, state.tuning.maxGeneration);
+    stepGrowthSystem(state, system, system.systemId, params, dt, state.tuning.maxGeneration, bakeSafety);
   }
   maybeSpawnNextForegroundSystem(state);
 
@@ -572,20 +781,65 @@ function stepState(state: BotanicalState, params: MovementParams, sessionParams:
       params,
       dt,
       Math.min(state.tuning.maxGeneration, echoConfig.maxGenerationCap),
+      undefined,
     );
   });
 }
 
 /** Emits one growth system's branches/blossoms as scene elements, applying its z-offset (depth-echo placement) and opacity multiplier (depth-echo paleness) on top of each element's own values. zOffset=0/opacityMultiplier=1 for the foreground system is a no-op. */
+/**
+ * The furthest-right x any point of `branch`'s own path has ever reached --
+ * NOT necessarily its current `tipX`. Wander can occasionally curve a
+ * branch's direction enough that it ends up net-negative relative to where
+ * it started, or otherwise finishes to the left of an earlier point along
+ * its own path (docs/HANDOFF.md cross-root bake-order fix: found via the
+ * fix's own wide-seed verification sweep). isSafeToBake's `ownTipX` is
+ * meant to answer "how far right does this content's own path actually
+ * reach" (the relevant question for whether a farther root's still-growing
+ * branch could still catch up and overlap it) -- using the raw, possibly
+ * backward-drifted `tipX` there would understate that reach and let content
+ * bake before it's genuinely safe. Only relevant for this safety check;
+ * every other use of `tipX` in this file (front-driven resprout position,
+ * growth-plateau hand-off anchoring, wherever a branch actually IS right
+ * now) intentionally means the literal current tip, not this.
+ */
+function branchMaxReachX(branch: Branch): number {
+  let max = branch.rootX;
+  for (const point of branch.segments) {
+    if (point.x > max) max = point.x;
+  }
+  return max;
+}
+
 function emitGrowthSystem(
   elements: SceneElement[],
   state: BotanicalState,
   system: GrowthSystemState,
   zOffset: number,
   opacityMultiplier: number,
+  bakeSafety?: CrossRootBakeSafety,
 ): void {
   for (const branch of system.branches) {
     if (branch.segments.length < 2) continue; // a stroke needs at least 2 points
+
+    // A mature branch is only reported final (and therefore only baked by
+    // the live compositor -- docs/HANDOFF.md cross-root bake-order fix) once
+    // it's also safe: no other, farther root sharing this bucket could
+    // still arrive later and permanently paint over it. bakeSafety is
+    // undefined for echo systems (their own separate compositor bucket --
+    // no cross-root risk there), where this is exactly the pre-fix check.
+    const final =
+      branch.lifecycle === 'mature' &&
+      (bakeSafety === undefined ||
+        isSafeToBake({
+          ownSystemId: system.systemId,
+          ownRootIndex: branch.rootIndex,
+          ownZ: branch.z,
+          ownTipX: branchMaxReachX(branch),
+          allSystems: bakeSafety.allSystems,
+          growingRootStartMinX: bakeSafety.growingRootStartMinX,
+          margin: bakeSafety.margin,
+        }));
 
     elements.push({
       kind: 'stroke',
@@ -600,7 +854,7 @@ function emitGrowthSystem(
       // only appends via tickGrowing, which only runs while 'growing'), so
       // its taper is safe to bake once, in full, at its true final
       // points.length -- see StrokeElement.final's own doc comment.
-      final: branch.lifecycle === 'mature',
+      final,
     });
   }
 
@@ -624,9 +878,14 @@ function emitGrowthSystem(
 
 function buildScene(state: BotanicalState): Scene {
   const elements: SceneElement[] = [];
+  // Computed once per call, not per branch -- doesn't depend on which
+  // branch is being checked (docs/HANDOFF.md cross-root bake-order fix).
+  // Applies only to foreground systems; echoes are each their own separate
+  // compositor bucket, so they're emitted exactly as before (no bakeSafety).
+  const bakeSafety = computeCrossRootBakeSafety(state);
 
   for (const system of state.foregroundSystems) {
-    emitGrowthSystem(elements, state, system, 0, 1);
+    emitGrowthSystem(elements, state, system, 0, 1, bakeSafety);
   }
   ECHO_CONFIGS.forEach((echoConfig, i) => {
     emitGrowthSystem(elements, state, state.echoes[i]!, echoConfig.zOffset, echoConfig.opacityMultiplier);
@@ -648,10 +907,16 @@ function buildScene(state: BotanicalState): Scene {
  */
 function buildSceneLayers(state: BotanicalState): SceneLayer[] {
   const layers: SceneLayer[] = [];
+  // Same bakeSafety contract as buildScene above -- computed once per call,
+  // applies only to foreground systems, so this stays byte-for-byte
+  // consistent with buildScene's own `final` values for the same state
+  // (sceneLayers' own doc comment / the "never silently out of sync with
+  // scene()" test both require this).
+  const bakeSafety = computeCrossRootBakeSafety(state);
 
   for (const system of state.foregroundSystems) {
     const elements: SceneElement[] = [];
-    emitGrowthSystem(elements, state, system, 0, 1);
+    emitGrowthSystem(elements, state, system, 0, 1, bakeSafety);
     layers.push({ layerId: system.systemId, elements });
   }
   ECHO_CONFIGS.forEach((echoConfig, i) => {
