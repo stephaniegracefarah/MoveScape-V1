@@ -14,6 +14,7 @@ import {
   isSafeToBake,
   type BakeSafetySystem,
   type BakeThreatEntry,
+  type ForkZBound,
 } from './botanical';
 import { BOTANICAL_PALETTE_PRESETS } from './palettes';
 import { DEFAULT_BOTANICAL_TUNING_CONFIG } from './tuning-config';
@@ -354,7 +355,20 @@ describe('createBotanicalStyle — gradual "watercolor" blossom reveal', () => {
     // Long enough to reveal a whole cluster gradually and see it finish
     // growing (not just start) -- expansion=0.9 makes for a large cluster
     // (visual spec: expansionScaledClusterCount), so this needs real room.
-    while (countsAtEachTick.length < 400) {
+    // Bumped from 400 to 3000 ticks in session 020: the snapshot-timing-gap
+    // fix's conservative threat-z bound (computeBakeThreats' own doc
+    // comment) makes a still-growing generation-0 branch (this test forces
+    // rootCount=1, maxGeneration defaults to 5) look like a threat for
+    // longer than the old, less-conservative check did, which legitimately
+    // delays this specific cluster's reveal -- measured directly for this
+    // exact seed/tuning: first blossom around tick 229, but the count
+    // barely moves past 1 until several hundred ticks later, with the bulk
+    // of the reveal happening between roughly tick 800 and 2600. This is a
+    // real, measured behavioral consequence of the fix (reported to the
+    // coordinator, not silently absorbed) -- 400 ticks is simply no longer
+    // enough runway to observe genuine staggering under the corrected
+    // algorithm; it isn't a sign anything is broken.
+    while (countsAtEachTick.length < 3000) {
       renderer.step(paramsAt(), INITIAL_SESSION_PARAMS, time, dt);
       time += dt;
       const count = state.foregroundSystems[0]!.blossoms.length;
@@ -400,13 +414,20 @@ describe('createBotanicalStyle — gradual "watercolor" blossom reveal', () => {
     // the PACING TIMER itself never adds delay -- any blossom that IS safe
     // reveals immediately -- so every cluster still fully drains given
     // enough ticks for the canvas to spread out and any holds to clear.
+    // Bumped from 1200 to 3000 ticks in session 020, same reason as the
+    // test above (the snapshot-timing-gap fix's conservative threat-z bound
+    // legitimately holds a single-root generation-0 branch's threat status
+    // longer) -- measured directly for this exact seed/tuning: pending
+    // count peaks at 34 around tick 600, is still 10 at tick 2100, and
+    // fully drains by tick 2400. 1200 ticks is no longer enough for this
+    // real, now-longer-but-still-bounded drain to complete.
     const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0 };
     const { renderer, state } = createBotanicalInternal({ blossomRevealIntervalMs: 0 });
     renderer.init(createWorld('instant-reveal-seed', 0, overrides));
 
     const paramsAt = () => makeParams({ speed: 0.9, expansion: 0.9, symmetry: 0.5 });
     let time = 0;
-    for (let tick = 0; tick < 1200; tick++) {
+    for (let tick = 0; tick < 3000; tick++) {
       renderer.step(paramsAt(), INITIAL_SESSION_PARAMS, time, 16.67);
       time += 16.67;
     }
@@ -855,12 +876,23 @@ function strokeFinalFlags(elements: SceneElement[]): boolean[] {
   return elements.filter((e) => e.kind === 'stroke').map((e) => e.final === true);
 }
 
-/** A `BakeSafetySystem` branch fixture with `reachX` defaulted equal to `rootX` (the common case for these tests -- a branch whose full-path reach hasn't grown past its own start), spreadable to override just `reachX` when a test specifically needs the two to differ. */
+/** A `BakeSafetySystem` branch fixture with `reachX` defaulted equal to `rootX` (the common case for these tests -- a branch whose full-path reach hasn't grown past its own start) and `generation` defaulted to 0, spreadable to override just `reachX`/`generation` when a test specifically needs them to differ. */
 function fixtureBranch(
-  b: { id: string; rootX: number; z: number; lifecycle: 'growing' | 'mature'; reachX?: number },
-): { id: string; rootX: number; reachX: number; z: number; lifecycle: 'growing' | 'mature' } {
-  return { reachX: b.rootX, ...b };
+  b: { id: string; rootX: number; z: number; lifecycle: 'growing' | 'mature'; reachX?: number; generation?: number },
+): { id: string; rootX: number; reachX: number; z: number; lifecycle: 'growing' | 'mature'; generation: number } {
+  return { reachX: b.rootX, generation: 0, ...b };
 }
+
+/**
+ * A `ForkZBound` with `maxGeneration: 0` -- combined with `fixtureBranch`'s
+ * own `generation: 0` default, `remainingGenerations` (computeBakeThreats'
+ * effectiveThreatZ) is always exactly 0, so every growing branch's threat z
+ * equals its own raw z, byte-for-byte the pre-session-020 (snapshot-only)
+ * formula. Used by every test in this describe block that predates the
+ * snapshot-timing-gap fix and was written to pin that original, un-inflated
+ * behavior -- the inflation itself gets its own dedicated tests below.
+ */
+const NO_INFLATION_BOUND: ForkZBound = { maxGeneration: 0, childZJitterMax: 0.05 };
 
 describe('computeBakeThreats — resolved live-threat list (growing + mature-but-blocked)', () => {
   it('collects {id, z, rootX} for every currently-GROWING branch across all given systems, ignoring RESOLVED-SAFE mature ones', () => {
@@ -876,7 +908,7 @@ describe('computeBakeThreats — resolved live-threat list (growing + mature-but
         ],
       },
     ];
-    expect(computeBakeThreats(systems, 0.15)).toEqual([
+    expect(computeBakeThreats(systems, 0.15, NO_INFLATION_BOUND)).toEqual([
       { id: 'fg0:root1:0', z: 0.8, rootX: 0.5 }, // farthest-first processing order
       { id: 'fg0:root0:0/child0', z: 0.22, rootX: 0.32 },
     ]);
@@ -887,7 +919,7 @@ describe('computeBakeThreats — resolved live-threat list (growing + mature-but
       { branches: [fixtureBranch({ id: 'fg0:root0:0', rootX: 0.1, z: 0.5, lifecycle: 'growing' })] },
       { branches: [fixtureBranch({ id: 'fg1:root0:0', rootX: 0.2, z: 0.6, lifecycle: 'growing' })] },
     ];
-    expect(computeBakeThreats(systems, 0.15).map((e) => e.id)).toEqual(['fg1:root0:0', 'fg0:root0:0']); // farther (z=0.6) first
+    expect(computeBakeThreats(systems, 0.15, NO_INFLATION_BOUND).map((e) => e.id)).toEqual(['fg1:root0:0', 'fg0:root0:0']); // farther (z=0.6) first
   });
 
   it('returns an empty list when there are no branches, or every branch resolves safe', () => {
@@ -895,7 +927,7 @@ describe('computeBakeThreats — resolved live-threat list (growing + mature-but
       { branches: [] },
       { branches: [fixtureBranch({ id: 'fg1:root0:0', rootX: 0.1, z: 0.5, lifecycle: 'mature' })] },
     ];
-    expect(computeBakeThreats(systems, 0.15)).toEqual([]);
+    expect(computeBakeThreats(systems, 0.15, NO_INFLATION_BOUND)).toEqual([]);
   });
 
   // --- The third correction found through this generalization's own
@@ -930,7 +962,7 @@ describe('computeBakeThreats — resolved live-threat list (growing + mature-but
         ],
       },
     ];
-    const threats = computeBakeThreats(systems, 0.15);
+    const threats = computeBakeThreats(systems, 0.15, NO_INFLATION_BOUND);
     expect(threats).toEqual([
       { id: 'c', z: 0.9, rootX: 0.68 },
       { id: 'b', z: 0.7, rootX: 0.5 }, // mature, but still blocked by c -- correctly retained as a threat
@@ -952,9 +984,99 @@ describe('computeBakeThreats — resolved live-threat list (growing + mature-but
         ],
       },
     ];
-    const threats = computeBakeThreats(systems, 0.15);
+    const threats = computeBakeThreats(systems, 0.15, NO_INFLATION_BOUND);
     expect(threats).toEqual([{ id: 'c', z: 0.9, rootX: 0.9 }]); // b now resolves safe on its own -- no longer in the threat list
     expect(isSafeToBake({ id: 'a', z: 0.3, tipX: 0.5, threats, margin: 0.15 })).toBe(true); // and no longer withholds 'a' either
+  });
+});
+
+// --- Session 020: the snapshot-timing gap -- a still-growing branch's
+// threat z must be a conservative upper bound on what its not-yet-spawned
+// descendants could still reach, not just its own current z (see
+// computeBakeThreats' own "THE SNAPSHOT-TIMING GAP" doc comment for the
+// full mechanism and the real evidence -- session 019's it.fails test --
+// that motivated this).
+describe('computeBakeThreats — effectiveThreatZ (snapshot-timing-gap fix, session 020)', () => {
+  it("inflates a GROWING branch's threat z by (remaining generations) * childZJitterMax, not its own raw z", () => {
+    const systems: BakeSafetySystem[] = [
+      { branches: [fixtureBranch({ id: 'g', rootX: 0.1, z: 0.5, lifecycle: 'growing', generation: 1 })] },
+    ];
+    const bound: ForkZBound = { maxGeneration: 3, childZJitterMax: 0.05 };
+    // remainingGenerations = 3 - 1 = 2 -> threatZ = 0.5 + 2*0.05 = 0.6
+    expect(computeBakeThreats(systems, 0.15, bound)).toEqual([{ id: 'g', z: 0.6, rootX: 0.1 }]);
+  });
+
+  it('clamps the inflated threat z to 1, exactly like every other z value in this file', () => {
+    const systems: BakeSafetySystem[] = [
+      { branches: [fixtureBranch({ id: 'g', rootX: 0.1, z: 0.98, lifecycle: 'growing', generation: 0 })] },
+    ];
+    const bound: ForkZBound = { maxGeneration: 2, childZJitterMax: 0.05 };
+    // remainingGenerations = 2 -> raw would be 0.98 + 0.1 = 1.08, clamped to 1.
+    expect(computeBakeThreats(systems, 0.15, bound)).toEqual([{ id: 'g', z: 1, rootX: 0.1 }]);
+  });
+
+  it('never inflates a branch already at (or past) the generation cap -- remaining generations floors at 0', () => {
+    const systems: BakeSafetySystem[] = [
+      { branches: [fixtureBranch({ id: 'g', rootX: 0.1, z: 0.5, lifecycle: 'growing', generation: 5 })] },
+    ];
+    const bound: ForkZBound = { maxGeneration: 3, childZJitterMax: 0.05 }; // generation (5) > maxGeneration (3)
+    expect(computeBakeThreats(systems, 0.15, bound)).toEqual([{ id: 'g', z: 0.5, rootX: 0.1 }]);
+  });
+
+  it('never inflates a MATURE branch, even one well under the generation cap -- it can no longer fork, so there is nothing left to bound', () => {
+    const systems: BakeSafetySystem[] = [
+      {
+        branches: [
+          // z=0.9 keeps this the sole (and therefore auto-resolved-safe)
+          // farthest entry, so its OWN reported z is directly observable.
+          fixtureBranch({ id: 'm', rootX: 0.1, z: 0.9, lifecycle: 'mature', generation: 0 }),
+        ],
+      },
+    ];
+    const bound: ForkZBound = { maxGeneration: 5, childZJitterMax: 0.05 }; // would inflate by 0.25 if this were growing
+    expect(computeBakeThreats(systems, 0.15, bound)).toEqual([]); // resolves safe -- nothing farther than it, so raw z=0.9 (unlisted) is never even exposed here...
+    // ...so prove it more directly: a nearer, unrelated branch is only
+    // withheld if the mature one's EFFECTIVE z is compared as 0.9 (its raw
+    // value), not 0.9+0.25=1.15 -- construct the nearer branch at z=0.92
+    // (between the two): if 'm' were wrongly inflated past 0.92, 'm' would
+    // still register as farther and withhold it; since 'm' truly stays at
+    // its raw 0.9, a candidate at z=0.92 (farther than 'm') is correctly
+    // UNTHREATENED by 'm' at all (0.9 <= 0.92, filtered by isSafeToBake's
+    // own `entry.z <= args.z` check), proving 'm' was resolved and reported
+    // using its raw z, not an inflated one.
+    const systemsB: BakeSafetySystem[] = [
+      {
+        branches: [
+          fixtureBranch({ id: 'm', rootX: 0.05, z: 0.9, lifecycle: 'mature', generation: 0 }),
+          fixtureBranch({ id: 'other', rootX: 0.2, z: 0.92, lifecycle: 'mature', generation: 0 }),
+        ],
+      },
+    ];
+    expect(computeBakeThreats(systemsB, 0.15, bound)).toEqual([]); // both resolve safe -- 'm' never threatens 'other' at its true, un-inflated z
+  });
+
+  it("sorts by the uniform effective value, so a GROWING branch's inflated bound correctly lands in the threat list before a MATURE candidate whose real z falls between the growing branch's raw and inflated values", () => {
+    // g: raw z=0.5, generation=0, maxGeneration=2, jitterMax=0.1 -> inflated
+    // threatZ = 0.5 + 2*0.1 = 0.7. m: real z=0.6 (between g's raw 0.5 and
+    // inflated 0.7) -- under the OLD (snapshot-only, un-inflated) formula, g
+    // (raw 0.5) would sort AFTER m (0.6) and so would NOT yet be in
+    // `threats` when m is resolved, letting m wrongly resolve safe. Under
+    // the fix, g's inflated 0.7 sorts BEFORE m, so m's resolution correctly
+    // sees g as a (farther, unrelated) threat and stays blocked.
+    const bound: ForkZBound = { maxGeneration: 2, childZJitterMax: 0.1 };
+    const systems: BakeSafetySystem[] = [
+      {
+        branches: [
+          fixtureBranch({ id: 'm', rootX: 0.5, reachX: 0.55, z: 0.6, lifecycle: 'mature', generation: 0 }),
+          fixtureBranch({ id: 'g', rootX: 0.62, z: 0.5, lifecycle: 'growing', generation: 0 }), // rootX close enough to threaten m (0.62 <= 0.55 + margin 0.15 = 0.7)
+        ],
+      },
+    ];
+    const threats = computeBakeThreats(systems, 0.15, bound);
+    expect(threats).toEqual([
+      { id: 'g', z: 0.7, rootX: 0.62 }, // g's inflated value, processed first
+      { id: 'm', z: 0.6, rootX: 0.5 }, // m stays blocked -- g's inflated (not raw) z is what makes this correct
+    ]);
   });
 });
 
@@ -1253,6 +1375,235 @@ describe('createBotanicalStyle — bake-order safety: forced two-root integratio
     runTicks(b.renderer, 900, 16.67, paramsAt);
 
     expect(a.state.foregroundSystems[0]!.roots.length).toBe(2); // sanity
+    expect(a.renderer.scene()).toEqual(b.renderer.scene());
+  });
+});
+
+describe('createBotanicalStyle — bake-order safety: single-root foreground, generous sweep (session 020 -- verifies the snapshot-timing-gap fix covers foreground too, not just echo)', () => {
+  // Session 019's hypothesis: the snapshot-timing gap (a nearer branch
+  // resolves safe and bakes before a farther, not-yet-spawned cousin
+  // forks and later overwrites it) was always theoretically possible for
+  // foreground, just statistically rarer there than for echo -- foreground
+  // roots are z-separated by a full 1/rootCount gap, while a single-root
+  // system (like every echo, or foreground forced to rootCount=1 here)
+  // has every branch sharing one much tighter z band, making a same-root
+  // cousin conflict more likely to actually manifest within a bounded
+  // seed/tick budget. This test forces foreground into that SAME
+  // maximally-analogous single-root shape (mirroring session 019's own
+  // echo violation sweep almost exactly, just against `state.
+  // foregroundSystems[0]` instead of `state.echoes[i]`) at a generously
+  // larger budget (10 seeds, 2000 ticks vs the two-root test's 5/1200) --
+  // if the snapshot-timing-gap fix genuinely closes the algorithm-level
+  // hole (not just something echo-shaped), this should pass here too.
+  it('no bake-order violation occurs between any two unrelated branches within a forced single-root foreground system, across many ticks and several seeds', () => {
+    const CLOSE_THRESHOLD = 0.04; // world units -- same heuristic the other violation sweeps use ("roughly a branch stroke width or two")
+    const dt = 16.67;
+    const TICKS = 2000;
+    const SEED_COUNT = 10;
+    const SINGLE_ROOT_OVERRIDES: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0 }; // -> 1 root
+
+    for (let seedNum = 0; seedNum < SEED_COUNT; seedNum++) {
+      const { renderer, state } = createBotanicalInternal();
+      renderer.init(createWorld(`single-root-fg-generous-sweep-seed-${seedNum}`, 0, SINGLE_ROOT_OVERRIDES));
+      expect(state.foregroundSystems[0]!.roots.length).toBe(1); // sanity: genuinely single-root
+
+      const firstFinalTick = new Map<number, number>();
+      let time = 0;
+      for (let t = 0; t < TICKS; t++) {
+        renderer.step({ v: 1, expansion: 0.6, speed: 0.6, symmetry: 0.6 }, INITIAL_SESSION_PARAMS, time, dt);
+        time += dt;
+
+        const layer = (renderer.sceneLayers?.() ?? []).find((l) => l.layerId === 'fg0')!;
+        strokeFinalFlags(layer.elements).forEach((final, i) => {
+          if (final && !firstFinalTick.has(i)) firstFinalTick.set(i, t);
+        });
+      }
+
+      const branches = state.foregroundSystems[0]!.branches.filter((b) => b.segments.length >= 2);
+      let violations = 0;
+      for (let j = 0; j < branches.length; j++) {
+        for (let i = 0; i < branches.length; i++) {
+          if (i === j) continue;
+          const a = branches[i]!;
+          const b = branches[j]!;
+          if (isAncestorOrDescendant(a.id, b.id)) continue;
+          const tickA = firstFinalTick.get(i);
+          const tickB = firstFinalTick.get(j);
+          if (tickA === undefined || tickB === undefined) continue;
+          if (tickB <= tickA) continue; // only a LATER bake can overwrite an earlier one
+          if (b.z <= a.z) continue; // only a FARTHER later bake is a violation
+          if (minSegmentDistance(a.segments, b.segments) <= CLOSE_THRESHOLD) violations++;
+        }
+      }
+
+      expect(violations).toBe(0);
+    }
+  });
+});
+
+// --- Session 019: bake-order safety extended to echo systems --------------
+// Sessions 017-018 only ever gated `state.foregroundSystems` -- resolveBake
+// Threats built its threats list from foreground branches alone, and
+// emitGrowthSystem's `applyBakeSafety` was hardcoded false at both echo call
+// sites, on the (correct-as-far-as-it-went, but incomplete) theory that
+// "echoes are their own separate compositor bucket, so they don't need this
+// check." Being a separate bucket means an echo's OWN branches never
+// threaten foreground or the other echo -- it does NOT mean an echo's own
+// sibling/cousin forked branches (spawnChildBranch's childZJitter applies to
+// echo branches exactly like foreground ones -- see ECHO_CONFIGS'
+// maxGenerationCap) can't threaten each other within that same bucket.
+// Session 019's pixel-diff evidence (renderScene() vs live-compositor,
+// docs/HANDOFF.md) found exactly this: an echo branch baking unconditionally
+// the instant it matured, permanently overwriting a farther-z unrelated
+// echo cousin still growing nearby. These tests mirror the equivalent
+// foreground describe blocks above (single-root-with-forking, the two-root
+// violation sweep, the reveal-pacing-vs-bake-safety distinction) but scoped
+// to `state.echoes` -- echoes have no "two-root" variant to mirror (each
+// ECHO_CONFIGS entry fixes `rootCount: 1`, not a world knob), so only the
+// forking-driven conflict applies, exactly like the foreground
+// single-root-WITH-forking case.
+describe('createBotanicalStyle — bake-order safety: echo systems (session 019)', () => {
+  it("withholds a mature ECHO branch's final flag when its own unrelated, farther-z cousin is still growing nearby (echo0)", () => {
+    const { renderer, state } = createBotanicalInternal({ crossRootBakeSafetyMargin: 0.4 }); // large margin -- easy to observe withholding within a bounded tick budget
+    renderer.init(createWorld('echo-forking-withhold-seed', 0, FAST_CYCLE_OVERRIDES));
+
+    const paramsAt = () => makeParams({ speed: 0.6, expansion: 0.6, symmetry: 0.4 });
+    let sawMatureNotYetFinal = false;
+    let sawFork = false;
+    let time = 0;
+    for (let t = 0; t < 1500 && !sawMatureNotYetFinal; t++) {
+      renderer.step(paramsAt(), INITIAL_SESSION_PARAMS, time, 16.67);
+      time += 16.67;
+
+      if (state.echoes[0]!.branches.some((b) => b.generation > 0)) sawFork = true;
+
+      const layer = (renderer.sceneLayers?.() ?? []).find((l) => l.layerId === 'echo0')!;
+      const branches = state.echoes[0]!.branches.filter((b) => b.segments.length >= 2);
+      strokeFinalFlags(layer.elements).forEach((final, i) => {
+        if (branches[i]!.lifecycle === 'mature' && !final) sawMatureNotYetFinal = true;
+      });
+    }
+
+    expect(sawFork).toBe(true); // sanity: forking actually happened -- this is what makes the conflict possible at all
+    expect(sawMatureNotYetFinal).toBe(true);
+  });
+
+  // FIXED (session 020) -- was `it.fails` through session 019, documenting
+  // a genuine, reproducible finding (2 of 5 seeds, 6 violating pairs) rather
+  // than hiding it: the algorithm resolveBucketBakeThreats/computeBakeThreats
+  // /isSafeToBake reused (unchanged in shape, per session 019's own
+  // contract) was a SNAPSHOT check -- a branch resolved safe against
+  // whichever OTHER branches already existed at the moment it was
+  // evaluated, then was marked `bakeResolved` and never re-examined. If a
+  // NEW farther-z sibling/cousin was spawned (forked) LATER -- after a
+  // nearer branch had already resolved safe and baked -- nothing revisited
+  // that earlier resolution; the new, farther branch could still legitimately
+  // mature and bake later, painting over the earlier, nearer, already-baked
+  // one. This was a gap in the ORIGINAL algorithm itself (sessions
+  // 017-018), not something session 019's bucket-grouping change
+  // introduced -- it was likely always theoretically possible for
+  // foreground too, just statistically rarer there (foreground's roots are
+  // z-separated by a full 1/rootCount gap; each ECHO_CONFIGS entry fixes
+  // `rootCount: 1`, so every branch in one echo system -- across every
+  // generation, every fork -- shares one much tighter z band, only
+  // `childZJitter` ever separating them).
+  //
+  // Session 020's fix (computeBakeThreats' own "THE SNAPSHOT-TIMING GAP"
+  // doc comment has the full mechanism): a still-GROWING branch's threat z
+  // is no longer its own current z -- it's a conservative upper bound on
+  // how far z could drift across every fork its lineage could still
+  // produce before hitting the bucket's generation cap
+  // (`z + (maxGeneration - generation) * childZJitterMax`, clamped to 1).
+  // This can only ever over-estimate a real future descendant's z, so it
+  // can only make the check MORE conservative, never introduce a new false
+  // "safe." Investigated separately (per that fix's own contract, see
+  // isAncestorOrDescendant's own investigation note): none of the 6
+  // originally-violating pairs were ancestor/descendant pairs, so the
+  // ancestor/descendant exclusion was never hiding anything here -- this
+  // was genuinely the snapshot-timing gap, not a lineage-exclusion bug.
+  it('no bake-order violation occurs between any two unrelated branches WITHIN echo0, or WITHIN echo1, across many ticks and several seeds', () => {
+    const CLOSE_THRESHOLD = 0.04; // world units -- roughly a branch stroke width or two
+    const dt = 16.67;
+    const TICKS = 1200;
+    const ECHO_LAYER_IDS = ['echo0', 'echo1'] as const;
+
+    for (let seedNum = 0; seedNum < 5; seedNum++) {
+      const { renderer, state } = createBotanicalInternal();
+      renderer.init(createWorld(`echo-bake-safety-seed-${seedNum}`, 0, FAST_CYCLE_OVERRIDES));
+
+      const firstFinalTickByLayer: Record<(typeof ECHO_LAYER_IDS)[number], Map<number, number>> = {
+        echo0: new Map(),
+        echo1: new Map(),
+      };
+      let time = 0;
+      for (let t = 0; t < TICKS; t++) {
+        renderer.step({ v: 1, expansion: 0.6, speed: 0.6, symmetry: 0.6 }, INITIAL_SESSION_PARAMS, time, dt);
+        time += dt;
+
+        for (const layerId of ECHO_LAYER_IDS) {
+          const layer = (renderer.sceneLayers?.() ?? []).find((l) => l.layerId === layerId)!;
+          strokeFinalFlags(layer.elements).forEach((final, i) => {
+            if (final && !firstFinalTickByLayer[layerId].has(i)) firstFinalTickByLayer[layerId].set(i, t);
+          });
+        }
+      }
+
+      ECHO_LAYER_IDS.forEach((layerId, echoIndex) => {
+        const branches = state.echoes[echoIndex]!.branches.filter((b) => b.segments.length >= 2);
+        const firstFinalTick = firstFinalTickByLayer[layerId];
+        let violations = 0;
+        for (let j = 0; j < branches.length; j++) {
+          for (let i = 0; i < branches.length; i++) {
+            if (i === j) continue;
+            const a = branches[i]!;
+            const b = branches[j]!;
+            if (isAncestorOrDescendant(a.id, b.id)) continue;
+            const tickA = firstFinalTick.get(i);
+            const tickB = firstFinalTick.get(j);
+            if (tickA === undefined || tickB === undefined) continue;
+            if (tickB <= tickA) continue; // only a LATER bake can overwrite an earlier one
+            if (b.z <= a.z) continue; // only a FARTHER later bake is a violation
+            if (minSegmentDistance(a.segments, b.segments) <= CLOSE_THRESHOLD) violations++;
+          }
+        }
+        expect(violations).toBe(0);
+      });
+    }
+  });
+
+  it("withholds an echo cluster's remaining blossoms open (a real bake-safety hold, not just reveal pacing) when a farther unrelated echo cousin branch is still growing nearby", () => {
+    // Same isolating trick as the foreground "blossomRevealIntervalMs=0"
+    // test above: with the pacing timer disabled, any blossom that IS safe
+    // reveals immediately, so a cluster staying open across ticks can only
+    // be explained by the bake-safety gate withholding it -- proof that
+    // echo blossom reveal (revealPendingBlossoms, shared code with
+    // foreground) is now actually gated, where before session 019 it never
+    // was (`safety === undefined` for every echo call site).
+    const { renderer, state } = createBotanicalInternal({ crossRootBakeSafetyMargin: 0.4, blossomRevealIntervalMs: 0 });
+    renderer.init(createWorld('echo-blossom-withhold-seed', 0, FAST_CYCLE_OVERRIDES));
+
+    const paramsAt = () => makeParams({ speed: 0.9, expansion: 0.9, symmetry: 0.5 });
+    let sawHeldOpenCluster = false;
+    let time = 0;
+    for (let t = 0; t < 1500 && !sawHeldOpenCluster; t++) {
+      renderer.step(paramsAt(), INITIAL_SESSION_PARAMS, time, 16.67);
+      time += 16.67;
+      if (state.echoes[0]!.pendingClusters.some((c) => c.revealedCount < c.blossoms.length)) sawHeldOpenCluster = true;
+    }
+
+    expect(sawHeldOpenCluster).toBe(true);
+  });
+
+  it('same seed produces identical scenes across two independent runs with echo bake-safety gating engaged (determinism holds)', () => {
+    const a = createBotanicalInternal();
+    const b = createBotanicalInternal();
+    a.renderer.init(createWorld('echo-bake-safety-determinism-seed', 0, FAST_CYCLE_OVERRIDES));
+    b.renderer.init(createWorld('echo-bake-safety-determinism-seed', 0, FAST_CYCLE_OVERRIDES));
+
+    const paramsAt = () => makeParams({ speed: 0.7, expansion: 0.6, symmetry: 0.4 });
+    runTicks(a.renderer, 900, 16.67, paramsAt);
+    runTicks(b.renderer, 900, 16.67, paramsAt);
+
     expect(a.renderer.scene()).toEqual(b.renderer.scene());
   });
 });

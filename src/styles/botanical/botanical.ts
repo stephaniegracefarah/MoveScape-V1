@@ -153,7 +153,28 @@ function createEmptyGrowthSystem(systemId: string): GrowthSystemState {
  * doc comment) to resolve whether a MATURE branch is itself still blocked.
  */
 export interface BakeSafetySystem {
-  branches: { id: string; rootX: number; reachX: number; z: number; lifecycle: 'growing' | 'mature' }[];
+  branches: { id: string; rootX: number; reachX: number; z: number; lifecycle: 'growing' | 'mature'; generation: number }[];
+}
+
+/**
+ * The generation cap and per-fork z-jitter magnitude for ONE compositor
+ * bucket -- everything computeBakeThreats needs to build a conservative
+ * upper bound on how far a still-growing branch's NOT-YET-SPAWNED
+ * descendants could still push z (see computeBakeThreats' own doc comment,
+ * "the snapshot-timing gap," session 019/020). `maxGeneration` is
+ * `state.tuning.maxGeneration` for the foreground bucket, or
+ * `Math.min(state.tuning.maxGeneration, echoConfig.maxGenerationCap)` for
+ * an echo bucket -- exactly the same value stepGrowthSystem's own
+ * `maxGenerationForSystem` argument already uses to gate real forking
+ * (`branch.generation < maxGenerationForSystem`), so this bound can never
+ * be looser than what the branch could actually still do.
+ * `childZJitterMax` is `state.tuning.childZJitter` -- the same constant
+ * spawnChildBranch already uses as the (exclusive) bound on a single
+ * fork's z offset, shared by every system (not bucket-specific).
+ */
+export interface ForkZBound {
+  maxGeneration: number;
+  childZJitterMax: number;
 }
 
 /** One currently-live bake threat, as far as isSafeToBake needs to know about it: its own id (for the ancestor/descendant exclusion), its own z, and its own rootX (see computeBakeThreats's own doc comment for why rootX, not tipX/reachX, is the right quantity here). */
@@ -235,17 +256,82 @@ export interface BakeThreatEntry {
  * No branch anywhere (every system empty, a degenerate/test-fixture case)
  * simply means an empty threat list, so isSafeToBake finds nothing to gate
  * against for any candidate.
+ *
+ * THE SNAPSHOT-TIMING GAP, and its fix (session 020, docs/HANDOFF.md): the
+ * paragraphs above describe a resolution that is only ever correct against
+ * branches that ALREADY EXIST at the moment it runs. `resolveBucketBake
+ * Threats` (botanical.ts) permanently excludes a once-resolved-safe branch
+ * from ever being re-examined (the perf bound the file-level doc comment on
+ * that function explains, guarding against session 013's unbounded-cost
+ * shape) -- which is exactly correct for THAT branch's own resolution
+ * (nothing later can make an already-correctly-ordered bake wrong), but
+ * says nothing about a branch that DIDN'T EXIST YET when a nearby, nearer
+ * branch resolved safe. A still-GROWING branch G can still fork new
+ * children for as long as `G.generation < maxGeneration` -- each fork's
+ * child, per spawnChildBranch, gets a z within `childZJitter` of ITS
+ * parent's z, and that child can itself fork again, and so on, up to the
+ * bucket's own generation cap. So G's own CURRENT z understates the
+ * farthest z any of its not-yet-spawned descendants could still reach --
+ * using only G's current z as its "threat" value let a nearer, unrelated
+ * branch resolve safe and bake BEFORE such a descendant existed, only for
+ * that descendant to fork later, mature, and bake even farther, painting
+ * over the already-permanent nearer content. Confirmed with real evidence,
+ * not assumed (docs/HANDOFF.md session 019's `it.fails` echo-violation
+ * test, 6 genuine violating pairs across 2 seeds, none of them ancestor/
+ * descendant pairs -- see isAncestorOrDescendant's own investigation note).
+ *
+ * The fix: a still-GROWING branch's threat z is no longer its own current
+ * z -- it's a CONSERVATIVE (worst-case) upper bound, `effectiveThreatZ`
+ * below, computed as `z + (maxGeneration - generation) * childZJitterMax`
+ * (clamped to 1, like every z value in this file) -- "how far z could
+ * possibly drift, generation by generation, if every remaining fork this
+ * branch's lineage could still produce jittered in the same, maximally
+ * unhelpful direction." This can only ever OVER-estimate a real future
+ * descendant's z, never under-estimate it, so it can only make the safety
+ * check MORE conservative (withhold more, never less) -- it cannot
+ * introduce a new false "safe." A MATURE branch's own threat z is
+ * unaffected (still its literal current z, unchanged from before): mature
+ * means `tickGrowing` will never run for it again (branch.ts), so it can
+ * never fork again either -- there is nothing left to conservatively bound.
+ * The sort below now sorts by this SAME effective value uniformly (mature
+ * branches' effective value being just their real z), which is what keeps
+ * the farthest-first walk's own invariant intact: a growing branch whose
+ * inflated bound is farther than some mature candidate M's real z is
+ * guaranteed to sort (and therefore land in `threats`) before M is
+ * resolved, exactly the ordering the walk already depended on.
  */
-export function computeBakeThreats(systems: BakeSafetySystem[], margin: number): BakeThreatEntry[] {
+function effectiveThreatZ(
+  branch: { z: number; generation: number; lifecycle: 'growing' | 'mature' },
+  forkZBound: ForkZBound,
+): number {
+  if (branch.lifecycle !== 'growing') return branch.z; // mature: can never fork again, no bound needed
+  const remainingGenerations = Math.max(0, forkZBound.maxGeneration - branch.generation);
+  return clamp01(branch.z + remainingGenerations * forkZBound.childZJitterMax);
+}
+
+export function computeBakeThreats(
+  systems: BakeSafetySystem[],
+  margin: number,
+  forkZBound: ForkZBound,
+): BakeThreatEntry[] {
   const all = systems.flatMap((system) => system.branches);
-  all.sort((a, b) => b.z - a.z); // farthest first, so every branch's own check sees only already-resolved farther entries
+  const withThreatZ = all.map((branch) => ({ branch, threatZ: effectiveThreatZ(branch, forkZBound) }));
+  // Farthest-first BY THE EFFECTIVE (possibly-inflated) value -- see this
+  // function's own "snapshot-timing gap" doc comment for why sorting by
+  // the uniform effective value (not raw z) is what preserves the walk's
+  // farthest-first invariant once growing branches' threat values can
+  // exceed their own current z.
+  withThreatZ.sort((a, b) => b.threatZ - a.threatZ);
 
   const threats: BakeThreatEntry[] = [];
-  for (const branch of all) {
+  for (const { branch, threatZ } of withThreatZ) {
     if (branch.lifecycle === 'growing') {
-      threats.push({ id: branch.id, z: branch.z, rootX: branch.rootX });
+      threats.push({ id: branch.id, z: threatZ, rootX: branch.rootX });
       continue;
     }
+    // A mature candidate's OWN z in its safety check is its real,
+    // unconditionally-current z (never inflated -- it can't fork anymore,
+    // per effectiveThreatZ above), unchanged from before this fix.
     const resolvedSafe = isSafeToBake({ id: branch.id, z: branch.z, tipX: branch.reachX, threats, margin });
     if (!resolvedSafe) {
       threats.push({ id: branch.id, z: branch.z, rootX: branch.rootX });
@@ -273,6 +359,20 @@ const CHILD_PATH_SEPARATOR_CHAR_CODE = 47; // '/'
  * not the underlying comparison logic -- a real, measured perf regression
  * this fix's own long-running tests caught, not a micro-optimization taken
  * on faith.
+ *
+ * INVESTIGATED (session 020, per the snapshot-timing-gap fix's own
+ * contract): does this exclusion hide any of the real overwrites the
+ * `it.fails` echo-violation test found (session 019, 6 violating pairs
+ * across seeds 0 and 3)? No -- checked every one directly: all 6 are
+ * sibling/cousin pairs forked from a common ancestor at DIFFERENT points
+ * (e.g. `echo0:root0:0/child0/child0/child1` vs `echo0:root0:0/child2`;
+ * `echo0:root0:0/child0/child0/child0` vs `echo0:root0:0/child0/child0/
+ * child1`), so `isAncestorOrDescendant` correctly returns false for every
+ * one of them -- none were being wrongly excluded from the threat count.
+ * The violations are a genuine gap in the OTHER mechanism (the snapshot-
+ * timing gap computeBakeThreats' own doc comment now describes), not this
+ * exclusion. Not investigated further per the contract's own scope (a
+ * separate decision if this exclusion is ever found to hide something).
  */
 export function isAncestorOrDescendant(a: string, b: string): boolean {
   if (a === b) return true;
@@ -303,9 +403,13 @@ export function isAncestorOrDescendant(a: string, b: string): boolean {
  * forking gives each child its own z jitter relative to its parent
  * (spawnChildBranch's childZJitter), with no guarantee a nearer-z cousin
  * matures before a farther-z one, even when they never span more than one
- * root. So every live threat across every foreground system is a potential
- * threat to every other piece of content, full stop -- EXCEPT its own
- * ancestors/descendants, per the exclusion below.
+ * root. So every live threat within the SAME compositor bucket -- every
+ * foreground system together, or one echo system on its own (session 019 --
+ * see BakeSafety's own doc comment) -- is a potential threat to every other
+ * piece of content in that same bucket, full stop -- EXCEPT its own
+ * ancestors/descendants, per the exclusion below. `threats` here is always
+ * already scoped to one bucket by the caller (resolveBucketBakeThreats),
+ * this function itself has no bucket concept of its own.
  *
  * The ancestor/descendant exclusion is required, not optional -- without
  * it, this function would deadlock every branch that ever forks. A forked
@@ -348,30 +452,63 @@ export function isSafeToBake(args: {
 }
 
 /**
- * Bundles everything isSafeToBake needs about the current foreground state
- * -- computed once per tick (stepState, for blossom-reveal gating) or once
- * per scene emission (buildScene/buildSceneLayers, for stroke finality
- * gating), then threaded down to each individual branch's or blossom's own
- * isSafeToBake call rather than recomputed per-element. `threats` is always
- * built from `state.foregroundSystems` via computeBakeThreats -- echoes are
- * each their own separate compositor bucket (live-compositor.ts's
- * bucketFor), so they neither need this check applied to them nor
- * participate as a threat in anyone else's check (see stepState/buildScene:
- * echo calls pass `undefined` for this instead of a BakeSafety).
+ * Bundles everything isSafeToBake needs about ONE compositor bucket's
+ * current state -- computed once per tick (stepState, for blossom-reveal
+ * gating) or once per scene emission (buildScene/buildSceneLayers, for
+ * stroke finality gating), then threaded down to each individual branch's
+ * or blossom's own isSafeToBake call rather than recomputed per-element.
+ *
+ * BUCKET-SCOPED (session 019 fix -- docs/HANDOFF.md): a bucket is exactly
+ * live-compositor.ts's own `bucketFor` grouping -- one shared 'foreground'
+ * bucket (every entry of `state.foregroundSystems` together, since they're
+ * all painted into the same persistent buffer) plus one bucket PER echo
+ * system (`state.echoes[i]`, each with its OWN persistent buffer, entirely
+ * independent of the others and of foreground). `threats` for a given
+ * BakeSafety is therefore only ever built from branches sharing that same
+ * bucket -- see resolveBakeThreats, which now resolves one BakeSafety per
+ * bucket instead of a single foreground-only one.
+ *
+ * Originally (sessions 017-018) this was foreground-only, on the theory
+ * that "echoes are each their own separate compositor bucket... so they
+ * neither need this check applied to them nor participate as a threat in
+ * anyone else's check" -- true as far as it went (echoes indeed never
+ * threaten foreground or each other), but wrong in what it concluded: being
+ * a separate bucket means echo branches need their OWN, separately-scoped
+ * version of this exact check applied WITHIN that bucket, not that the
+ * check can be skipped for echoes entirely. Session 019's pixel-diff
+ * evidence (a renderScene() vs live-compositor diff, docs/HANDOFF.md) found
+ * exactly the bug this gap predicts: an echo branch could mature and bake
+ * (unconditionally -- `applyBakeSafety` was hardcoded false for echoes at
+ * both emitGrowthSystem call sites) while a farther, unrelated sibling/
+ * cousin branch in the SAME echo system (echo branches fork via
+ * spawnChildBranch/childZJitter exactly like foreground ones -- see
+ * ECHO_CONFIGS' own maxGenerationCap) was still growing nearby -- the
+ * identical bug class sessions 017-018 fixed for foreground, just never
+ * extended to echoes.
  */
 interface BakeSafety {
   threats: BakeThreatEntry[];
   margin: number;
 }
 
+/** One BakeSafety per compositor bucket that can bake independently (see BakeSafety's own doc comment) -- `foreground` covers every entry of `state.foregroundSystems` together (unchanged from the original fix), `echoes` is parallel to `state.echoes`/ECHO_CONFIGS, one independently-scoped BakeSafety per echo system. */
+interface BakeSafetyByBucket {
+  foreground: BakeSafety;
+  echoes: BakeSafety[];
+}
+
 /**
  * Resolves bake-order safety for every currently UNRESOLVED branch (still
- * `growing`, or `mature` but not yet `bakeResolved`) across all foreground
- * systems, permanently marking `branch.bakeResolved = true` on each mature
- * one that newly resolves safe (see Branch.bakeResolved's own doc comment
- * for why this is safe to never revisit), and returns the resulting
- * threats list (every entry still open -- growing, or mature-and-still-
- * blocked) for blossom-reveal gating this same tick.
+ * `growing`, or `mature` but not yet `bakeResolved`) within `systems`,
+ * permanently marking `branch.bakeResolved = true` on each mature one that
+ * newly resolves safe (see Branch.bakeResolved's own doc comment for why
+ * this is safe to never revisit), and returns the resulting threats list
+ * (every entry still open -- growing, or mature-and-still-blocked) for
+ * blossom-reveal gating this same tick. `systems` is always exactly one
+ * compositor bucket's worth of growth systems (see resolveBakeThreats,
+ * BakeSafety's own doc comment) -- this function itself has no notion of
+ * "foreground" or "echo," it just resolves whatever systems it's handed
+ * against each other, which is what makes it directly reusable for both.
  *
  * PERFORMANCE, not just correctness (session 018's third correction, found
  * the same way as the other two -- by testing, not assumed up front): this
@@ -387,7 +524,9 @@ interface BakeSafety {
  * generalization did exactly that and made two long-running tests
  * (unrelated to this fix -- "bounded branch/element count" and the
  * growth-plateau hand-off determinism check, both running thousands of
- * ticks) time out.
+ * ticks) time out. Session 019's echo extension preserves this bound
+ * per-bucket: each echo system's own unresolved-branch count is small and
+ * independently bounded (maxConcurrentBranches), exactly like foreground's.
  *
  * The fix: once a branch resolves safe, it has effectively already baked,
  * permanently, correctly ordered -- nothing that happens later can ever
@@ -398,9 +537,8 @@ interface BakeSafety {
  * itself -- stays roughly constant regardless of how long the session has
  * run, instead of scaling with the session's entire history.
  */
-function resolveBakeThreats(state: BotanicalState): BakeSafety {
-  const margin = state.tuning.crossRootBakeSafetyMargin;
-  const systems: BakeSafetySystem[] = state.foregroundSystems.map((system) => ({
+function resolveBucketBakeThreats(systems: GrowthSystemState[], margin: number, forkZBound: ForkZBound): BakeSafety {
+  const bakeSystems: BakeSafetySystem[] = systems.map((system) => ({
     branches: system.branches
       .filter((branch) => branch.lifecycle === 'growing' || !branch.bakeResolved)
       .map((branch) => ({
@@ -409,11 +547,12 @@ function resolveBakeThreats(state: BotanicalState): BakeSafety {
         reachX: branchMaxReachX(branch),
         z: branch.z,
         lifecycle: branch.lifecycle,
+        generation: branch.generation,
       })),
   }));
-  const threats = computeBakeThreats(systems, margin);
+  const threats = computeBakeThreats(bakeSystems, margin, forkZBound);
   const stillBlockedIds = new Set(threats.map((t) => t.id));
-  for (const system of state.foregroundSystems) {
+  for (const system of systems) {
     for (const branch of system.branches) {
       if (branch.lifecycle === 'mature' && !branch.bakeResolved && !stillBlockedIds.has(branch.id)) {
         branch.bakeResolved = true;
@@ -423,7 +562,39 @@ function resolveBakeThreats(state: BotanicalState): BakeSafety {
   return { threats, margin };
 }
 
-/** True if the next not-yet-revealed blossom in `pending` (if any) is safe to reveal right now per the bake-order safety check -- `safety === undefined` (echo systems, which never need this check) always returns true. The blossom's own "id" for the ancestor/descendant exclusion is its owning branch's id (`branchId`) -- a blossom is never a threat to its own owning branch's lineage, same logic as a branch never threatening its own lineage. */
+/**
+ * Resolves bake-order safety independently per compositor bucket (session
+ * 019 -- see BakeSafety's own doc comment for why): the 'foreground' bucket
+ * across all of `state.foregroundSystems` together (exactly the original
+ * fix's own scope, unchanged), plus one independently-scoped bucket per
+ * echo system in `state.echoes` -- echo0's branches are only ever threatened
+ * by other echo0 branches, never by echo1's or foreground's, and vice
+ * versa, matching live-compositor.ts's own bucketFor (each echo gets its
+ * own persistent buffer, entirely separate from foreground and from each
+ * other). Delegates the actual per-bucket resolution to
+ * resolveBucketBakeThreats, unchanged from the original single-bucket
+ * algorithm -- only the grouping/call-site is new.
+ */
+function resolveBakeThreats(state: BotanicalState): BakeSafetyByBucket {
+  const margin = state.tuning.crossRootBakeSafetyMargin;
+  const childZJitterMax = state.tuning.childZJitter;
+  const foreground = resolveBucketBakeThreats(state.foregroundSystems, margin, {
+    maxGeneration: state.tuning.maxGeneration,
+    childZJitterMax,
+  });
+  const echoes = state.echoes.map((echoSystem, i) =>
+    resolveBucketBakeThreats([echoSystem], margin, {
+      // Same cap stepGrowthSystem's own ECHO_CONFIGS.forEach call site already
+      // uses for this echo's real forking gate -- see ForkZBound's own doc
+      // comment for why this has to match exactly.
+      maxGeneration: Math.min(state.tuning.maxGeneration, ECHO_CONFIGS[i]!.maxGenerationCap),
+      childZJitterMax,
+    }),
+  );
+  return { foreground, echoes };
+}
+
+/** True if the next not-yet-revealed blossom in `pending` (if any) is safe to reveal right now per the bake-order safety check -- `safety === undefined` always returns true (no gating), a defensive fallback rather than a real call shape: every real call site (stepState, for both foreground and echo systems since session 019) always passes its own bucket-scoped BakeSafety now. The blossom's own "id" for the ancestor/descendant exclusion is its owning branch's id (`branchId`) -- a blossom is never a threat to its own owning branch's lineage, same logic as a branch never threatening its own lineage. */
 function isNextBlossomSafe(pending: PendingBlossomCluster, safety: BakeSafety | undefined): boolean {
   if (safety === undefined) return true;
   const next = pending.blossoms[pending.revealedCount]!;
@@ -455,8 +626,10 @@ function isNextBlossomSafe(pending: PendingBlossomCluster, safety: BakeSafety | 
  * pending: the timer is NOT decremented and the blossom is NOT pushed, so
  * `revealTimerMs` keeps accumulating (already incremented this tick, above
  * the while loop) and gets rechecked next tick without losing progress or
- * double-counting. `safety === undefined` (echo systems) skips this check
- * entirely, reproducing the pre-fix behavior exactly.
+ * double-counting. Since session 019, this applies to echo systems' clusters
+ * too (each gated against its own echo's own bucket-scoped BakeSafety, not
+ * foreground's) -- `safety === undefined` is a defensive fallback only, not
+ * a real call shape (see isNextBlossomSafe's own doc comment).
  */
 function revealPendingBlossoms(
   system: GrowthSystemState,
@@ -883,15 +1056,16 @@ function stepState(state: BotanicalState, params: MovementParams, sessionParams:
 
   // Resolved once per tick, before the per-system loop -- doesn't depend on
   // which system/branch/blossom is being checked, so every foreground
-  // system this tick shares the same snapshot for blossom-reveal gating
-  // (docs/HANDOFF.md bake-order fix). This reflects state as of the END of
-  // the PREVIOUS tick (nothing has grown yet this tick). Echoes never
-  // receive this (see BakeSafety's own doc comment) -- each echo is its own
-  // separate compositor bucket.
+  // system this tick shares the same 'foreground'-bucket snapshot for
+  // blossom-reveal gating (docs/HANDOFF.md bake-order fix), and each echo
+  // system gets its own independently-scoped snapshot from its own bucket
+  // (session 019 -- see resolveBakeThreats/BakeSafety's own doc comments).
+  // This reflects state as of the END of the PREVIOUS tick (nothing has
+  // grown yet this tick).
   const bakeSafety = resolveBakeThreats(state);
 
   for (const system of state.foregroundSystems) {
-    stepGrowthSystem(state, system, system.systemId, params, dt, state.tuning.maxGeneration, bakeSafety);
+    stepGrowthSystem(state, system, system.systemId, params, dt, state.tuning.maxGeneration, bakeSafety.foreground);
   }
   maybeSpawnNextForegroundSystem(state);
 
@@ -903,7 +1077,7 @@ function stepState(state: BotanicalState, params: MovementParams, sessionParams:
       params,
       dt,
       Math.min(state.tuning.maxGeneration, echoConfig.maxGenerationCap),
-      undefined,
+      bakeSafety.echoes[i],
     );
   });
 
@@ -965,10 +1139,13 @@ function emitGrowthSystem(
     // resolveBakeThreats (stepState) -- `branch.bakeResolved` is simply read
     // here, not recomputed, which is also what keeps scene()/sceneLayers()
     // trivially, always in agreement (both just read the same persisted
-    // field). `applyBakeSafety` is false for echo systems (their own
-    // separate compositor bucket -- no such risk there, and bakeResolved is
-    // never set for echo branches in the first place), where this is
-    // exactly the pre-fix check.
+    // field). `applyBakeSafety` is true for every system as of session 019
+    // (foreground AND each echo -- see BakeSafety's own doc comment for why
+    // echoes needed their own bucket-scoped version of this, not exemption
+    // from it); every call site now passes `true`, so this parameter exists
+    // for callers that construct a scene without ever having resolved
+    // bake-safety at all (e.g. a hand-built test fixture), not as a real
+    // foreground-vs-echo distinction.
     const final = branch.lifecycle === 'mature' && (!applyBakeSafety || branch.bakeResolved);
 
     elements.push({
@@ -1008,17 +1185,20 @@ function emitGrowthSystem(
 
 function buildScene(state: BotanicalState): Scene {
   const elements: SceneElement[] = [];
-  // `applyBakeSafety: true` for foreground systems only -- bake-order
-  // safety is already fully resolved per tick by resolveBakeThreats
-  // (stepState), so this just reads each branch's own persisted
-  // `bakeResolved` flag (docs/HANDOFF.md bake-order fix); no per-call
-  // computation happens here anymore. Echoes are each their own separate
-  // compositor bucket, so they're emitted exactly as before (unGATED).
+  // `applyBakeSafety: true` for every system, foreground AND each echo
+  // (session 019) -- bake-order safety is already fully resolved per tick,
+  // per bucket, by resolveBakeThreats (stepState), so this just reads each
+  // branch's own persisted `bakeResolved` flag (docs/HANDOFF.md bake-order
+  // fix); no per-call computation happens here. Echoes are each their own
+  // separate compositor bucket (live-compositor.ts's bucketFor), so an
+  // echo branch's `bakeResolved` reflects safety WITHIN its own echo
+  // system only -- it was never threatened by, and never threatens,
+  // foreground or the other echo.
   for (const system of state.foregroundSystems) {
     emitGrowthSystem(elements, state, system, 0, 1, true);
   }
   ECHO_CONFIGS.forEach((echoConfig, i) => {
-    emitGrowthSystem(elements, state, state.echoes[i]!, echoConfig.zOffset, echoConfig.opacityMultiplier);
+    emitGrowthSystem(elements, state, state.echoes[i]!, echoConfig.zOffset, echoConfig.opacityMultiplier, true);
   });
 
   return { elements };
@@ -1037,7 +1217,8 @@ function buildScene(state: BotanicalState): Scene {
  */
 function buildSceneLayers(state: BotanicalState): SceneLayer[] {
   const layers: SceneLayer[] = [];
-  // Same bakeResolved-reading contract as buildScene above -- both just
+  // Same bakeResolved-reading contract as buildScene above (including
+  // `applyBakeSafety: true` for echoes as of session 019) -- both just
   // read each branch's own persisted flag, so this stays byte-for-byte
   // consistent with buildScene's own `final` values for the same state
   // (sceneLayers' own doc comment / the "never silently out of sync with
@@ -1050,7 +1231,7 @@ function buildSceneLayers(state: BotanicalState): SceneLayer[] {
   }
   ECHO_CONFIGS.forEach((echoConfig, i) => {
     const elements: SceneElement[] = [];
-    emitGrowthSystem(elements, state, state.echoes[i]!, echoConfig.zOffset, echoConfig.opacityMultiplier);
+    emitGrowthSystem(elements, state, state.echoes[i]!, echoConfig.zOffset, echoConfig.opacityMultiplier, true);
     layers.push({ layerId: echoConfig.systemId, elements });
   });
 
