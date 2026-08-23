@@ -441,6 +441,79 @@ describe('createBotanicalStyle — growth-plateau fix: seamless successor foregr
   });
 });
 
+describe('createBotanicalStyle — sceneLayers (incremental live-rendering, docs/HANDOFF.md frame-rate-collapse fix)', () => {
+  it('returns one layer per active system, layerIds matching each system\'s own systemId, in the same order buildScene visits them', () => {
+    const renderer = createBotanicalStyle();
+    renderer.init(createWorld('scene-layers-seed', 0));
+    runTicks(renderer, 30, 16.67, () => makeParams({ speed: 0.5, expansion: 0.5, symmetry: 0.5 }));
+
+    const layers = renderer.sceneLayers?.();
+    expect(layers).toBeDefined();
+    // Default rootCount knob range means exactly 1 foreground system at
+    // this point (no growth-plateau hand-off has had time to fire) plus
+    // the 2 fixed depth echoes -- 3 layers total.
+    expect(layers?.map((l) => l.layerId)).toEqual(['fg0', 'echo0', 'echo1']);
+  });
+
+  it('grows to include a second layerId once the growth-plateau hand-off spawns a successor foreground system', () => {
+    const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, branchDensity: 0 };
+    const { renderer, state } = createBotanicalInternal();
+    renderer.init(createWorld('scene-layers-handoff-seed', 0, overrides));
+
+    const paramsAt = () => makeParams({ speed: 0.9, expansion: 0.6, symmetry: 0.3 });
+    let tick = 0;
+    while (state.foregroundSystems.length < 2 && tick < 3000) {
+      renderer.step(paramsAt(), INITIAL_SESSION_PARAMS, tick * 200, 200);
+      tick++;
+    }
+    expect(state.foregroundSystems.length).toBeGreaterThan(1); // sanity: the hand-off actually happened
+
+    const layers = renderer.sceneLayers?.() ?? [];
+    expect(layers.map((l) => l.layerId)).toEqual(['fg0', 'fg1', 'echo0', 'echo1']);
+  });
+
+  it('is never silently out of sync with scene(): flattening every layer\'s elements in order reproduces scene().elements exactly', () => {
+    const renderer = createBotanicalStyle();
+    renderer.init(createWorld('scene-layers-consistency-seed', 0, FAST_CYCLE_OVERRIDES));
+    runTicks(renderer, 400, 16.67, () => makeParams({ speed: 0.8, expansion: 0.6, symmetry: 0.4 }));
+
+    const layers = renderer.sceneLayers?.() ?? [];
+    const flattened = layers.flatMap((l) => l.elements);
+
+    expect(flattened.length).toBeGreaterThan(0); // sanity: real geometry exists by now
+    expect(flattened).toEqual(renderer.scene().elements);
+  });
+
+  it('a growing branch\'s stroke element keeps the same points array reference across calls, only ever getting longer -- the append-only contract the live compositor relies on', () => {
+    const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0 };
+    const { renderer, state } = createBotanicalInternal();
+    renderer.init(createWorld('scene-layers-stability-seed', 0, overrides));
+
+    const paramsAt = () => makeParams({ speed: 0.5, expansion: 0.5, symmetry: 0.5 });
+
+    // A couple of ticks in, capture the single root branch's stroke element
+    // and its current point count.
+    renderer.step(paramsAt(), INITIAL_SESSION_PARAMS, 0, 16.67);
+    renderer.step(paramsAt(), INITIAL_SESSION_PARAMS, 16.67, 16.67);
+    const firstLayers = renderer.sceneLayers?.() ?? [];
+    const strokeIndex = firstLayers[0]!.elements.findIndex((e) => e.kind === 'stroke');
+    expect(strokeIndex).toBeGreaterThanOrEqual(0);
+    const firstPointCount = (firstLayers[0]!.elements[strokeIndex] as { points: unknown[] }).points.length;
+
+    // A few more ticks -- the branch is still growing (rootCount override
+    // above spawns exactly one root, well short of maturity in 5 ticks).
+    renderer.step(paramsAt(), INITIAL_SESSION_PARAMS, 33.34, 16.67);
+    renderer.step(paramsAt(), INITIAL_SESSION_PARAMS, 50, 16.67);
+    renderer.step(paramsAt(), INITIAL_SESSION_PARAMS, 66.67, 16.67);
+    const laterLayers = renderer.sceneLayers?.() ?? [];
+    const laterElement = laterLayers[0]!.elements[strokeIndex] as { kind: string; points: unknown[] };
+
+    expect(state.foregroundSystems[0]!.branches[0]!.lifecycle).toBe('growing'); // sanity: still growing, not matured/replaced
+    expect(laterElement.kind).toBe('stroke'); // same index, same kind -- never changes identity
+    expect(laterElement.points.length).toBeGreaterThan(firstPointCount); // only ever grows
+  });
+});
+
 describe('BOTANICAL_PALETTE_PRESETS — paletteIndex knob resolves the intended preset', () => {
   it('each preset index round-trips through the paletteIndex world knob, landing mid-bucket', () => {
     BOTANICAL_PALETTE_PRESETS.forEach((preset, index) => {

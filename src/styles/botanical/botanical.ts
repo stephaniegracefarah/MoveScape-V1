@@ -21,7 +21,7 @@ import { clamp01 } from '../../shared/math';
 import { createLabeledNoise } from '../../world/labeled-noise';
 import { createLabeledStream } from '../../world/labeled-stream';
 import type { World } from '../../world/world';
-import type { Scene, SceneElement, StyleRenderer } from '../style-renderer';
+import type { Scene, SceneElement, SceneLayer, StyleRenderer } from '../style-renderer';
 import {
   checkCrossedForks,
   computeChildBaseWidth,
@@ -541,6 +541,12 @@ function emitGrowthSystem(
       taperExponent: state.tuning.taperExponent,
       color: branch.color,
       opacity: state.tuning.branchBaseOpacity * opacityMultiplier,
+      // The live compositor's own taper-freezing fix (docs/HANDOFF.md):
+      // once mature, a branch's segments array never grows again (branch.ts
+      // only appends via tickGrowing, which only runs while 'growing'), so
+      // its taper is safe to bake once, in full, at its true final
+      // points.length -- see StrokeElement.final's own doc comment.
+      final: branch.lifecycle === 'mature',
     });
   }
 
@@ -573,6 +579,34 @@ function buildScene(state: BotanicalState): Scene {
   });
 
   return { elements };
+}
+
+/**
+ * The incremental-rendering counterpart to buildScene (src/compositor/
+ * live-compositor.ts) -- same systems, same emitGrowthSystem calls, same
+ * per-element depth-offset/opacity-multiplier math, just kept as one
+ * SceneLayer per growth system instead of flattened into buildScene's
+ * single shared array. `layerId` is each system's own `systemId`, which
+ * stays stable and unique for the life of a session (foregroundSystems only
+ * ever grows via maybeSpawnNextForegroundSystem; echoes are fixed). Does
+ * not affect buildScene/scene()/finish() in any way -- this is purely
+ * additive.
+ */
+function buildSceneLayers(state: BotanicalState): SceneLayer[] {
+  const layers: SceneLayer[] = [];
+
+  for (const system of state.foregroundSystems) {
+    const elements: SceneElement[] = [];
+    emitGrowthSystem(elements, state, system, 0, 1);
+    layers.push({ layerId: system.systemId, elements });
+  }
+  ECHO_CONFIGS.forEach((echoConfig, i) => {
+    const elements: SceneElement[] = [];
+    emitGrowthSystem(elements, state, state.echoes[i]!, echoConfig.zOffset, echoConfig.opacityMultiplier);
+    layers.push({ layerId: echoConfig.systemId, elements });
+  });
+
+  return layers;
 }
 
 /**
@@ -613,6 +647,10 @@ export function createBotanicalInternal(tuning?: Partial<BotanicalTuningConfig>)
 
     finish(): Scene {
       return buildScene(state);
+    },
+
+    sceneLayers(): SceneLayer[] {
+      return buildSceneLayers(state);
     },
   };
 
