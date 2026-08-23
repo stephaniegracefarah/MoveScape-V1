@@ -84,6 +84,23 @@ export const POSE_PARAM_TUNING = {
   SPEED_RATE_SCALE: 0.28,
 
   /**
+   * Floor (torso-units/sec) subtracted from the raw displacement rate before
+   * scaling -- landmark jitter (MediaPipe's per-frame inference noise, worse
+   * in dim light) is real, nonzero displacement even when the person is
+   * genuinely motionless, so a floor of 0 lets that noise read as movement.
+   * First-pass value back-calculated from a founder-reported real reading
+   * (session 011: speed=0.35 while sitting still) to land the idle speed
+   * reading around the founder's own target of ~0.05-0.10 -- not verified
+   * against a live camera in this environment (no camera access here), so
+   * treat as a starting point and retune by feel once tested for real.
+   * Movement genuinely above the floor is unaffected -- this only suppresses
+   * displacement at or below typical sensor-noise magnitude, which is
+   * sensor-stability calibration (like the EMA below), not noise-blending
+   * the speed signal itself (invariant 6).
+   */
+  SPEED_JITTER_FLOOR: 0.85,
+
+  /**
    * EMA smoothing factor for speed (0–1; higher = less smoothing, faster
    * response), applied for sensor stability only (invariant 6) — never
    * noise-blended. Kept high so the smoothed value converges within the
@@ -212,7 +229,8 @@ export function computeMovementParams(
     }, 0);
     const avgDisplacement = totalDisplacement / SPEED_LANDMARK_INDICES.length;
     const ratePerSecond = avgDisplacement / torsoSize / dtSeconds;
-    rawSpeed = clamp01((ratePerSecond * POSE_PARAM_TUNING.SPEED_RATE_SCALE) / POSE_PARAM_TUNING.SPEED_CEILING);
+    const aboveJitterFloor = Math.max(0, ratePerSecond - POSE_PARAM_TUNING.SPEED_JITTER_FLOOR);
+    rawSpeed = clamp01((aboveJitterFloor * POSE_PARAM_TUNING.SPEED_RATE_SCALE) / POSE_PARAM_TUNING.SPEED_CEILING);
   }
   const priorEma = previous ? previous.emaSpeed : rawSpeed;
   const emaSpeed = clamp01(priorEma + POSE_PARAM_TUNING.SPEED_EMA_ALPHA * (rawSpeed - priorEma));

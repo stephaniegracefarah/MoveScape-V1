@@ -97,10 +97,45 @@ describe('computeMovementParams — symmetry', () => {
   });
 });
 
+/** Shifts every one of the 22 speed-relevant landmarks (shoulders through feet, indices 11-32) by the same small delta -- simulates MediaPipe's own per-frame inference jitter (real, nonzero displacement even when a person is genuinely motionless), as opposed to buildLandmarks' overrides, which only move the specific named points a test cares about. */
+function jitterAllSpeedLandmarks(base: readonly PoseLandmarkPoint[], delta: number): PoseLandmarkPoint[] {
+  const jittered = base.map((p) => ({ ...p }));
+  for (let i = 11; i <= 32; i++) {
+    jittered[i] = { x: jittered[i]!.x + delta, y: jittered[i]!.y, z: jittered[i]!.z };
+  }
+  return jittered;
+}
+
 describe('computeMovementParams — speed', () => {
   it('reads 0 on the first frame (nothing yet to compare against)', () => {
     const result = computeMovementParams(buildLandmarks(), 0, null);
     expect(result.params.speed).toBe(0);
+  });
+
+  it('small landmark jitter (sensor noise while genuinely still) reads as zero speed, not a false-positive reading', () => {
+    const frameIntervalMs = 1000 / 30;
+    const still = buildLandmarks();
+    // A small, consistent per-landmark shift -- plausible MediaPipe
+    // inference jitter magnitude, well below any intentional movement.
+    const jittered = jitterAllSpeedLandmarks(still, 0.002);
+
+    const frame1 = computeMovementParams(still, 0, null);
+    const frame2 = computeMovementParams(jittered, frameIntervalMs, frame1.state);
+
+    expect(frame2.params.speed).toBe(0);
+  });
+
+  it('a jitter floor still lets slow-but-real movement register above zero once it clears sensor-noise magnitude', () => {
+    const frameIntervalMs = 1000 / 30;
+    const still = buildLandmarks();
+    // A larger, deliberate shift -- above SPEED_JITTER_FLOOR's threshold,
+    // simulating real (if gentle) movement rather than noise.
+    const movedSlightly = jitterAllSpeedLandmarks(still, 0.01);
+
+    const frame1 = computeMovementParams(still, 0, null);
+    const frame2 = computeMovementParams(movedSlightly, frameIntervalMs, frame1.state);
+
+    expect(frame2.params.speed).toBeGreaterThan(0);
   });
 
   it('EMA-smoothed speed converges within about 2 frames of sustained fast movement', () => {
