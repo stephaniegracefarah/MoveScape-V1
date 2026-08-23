@@ -106,6 +106,9 @@ export interface BotanicalTuningConfig {
   blossomRevealIntervalMs: number;
   /** Fraction of full reveal-rate that still applies at speed=0, mirroring branch growth's own speedFloor (growthStepFor in branch.ts) -- reveal pacing ties to how fast the user is actually moving rather than advancing at a fixed real-time rate, so blossoms still creep forward at rest but reveal faster the more the user moves. Kept as its own field, independent from branch growth's speedFloor, so the founder can tune blossom-reveal pacing separately via the dev tuning panel. Per the spec's immediacy-budget principle, this scales by the tick's own honestly-recorded speed -- never noise -- so the determinism invariant (same recorded speed + dt sequence -> identical result, live or replay) still holds. */
   blossomRevealSpeedFloor: number;
+
+  /** Cross-root bake-order safety margin (world units, same scale as targetLengthBase): the minimum lead a farther root's own growth frontier must have over a nearer branch's tipX (or a nearer blossom's own x) before that nearer content is allowed to bake permanently into the live compositor's persistent buffer (isSafeToBake in botanical.ts). Guards against the bug where two roots sharing one growth system start bunched close together near the left edge -- root index alone always makes a higher-index root farther (paler) -- so if the nearer root's branch matures and bakes first while the farther root is still catching up nearby, the farther root's later, paler bake would permanently overwrite the nearer, richer one once it arrives at the same screen position (the live compositor's own within-frame z-sort can't reconcile bakes that happen on different frames). A still-catching-up farther root can never again paint over content that already required it to be this far ahead. */
+  crossRootBakeSafetyMargin: number;
 }
 
 export const DEFAULT_BOTANICAL_TUNING_CONFIG: BotanicalTuningConfig = {
@@ -154,4 +157,5 @@ export const DEFAULT_BOTANICAL_TUNING_CONFIG: BotanicalTuningConfig = {
   blossomCrossDrawProbability: 0.4,
   blossomRevealIntervalMs: 300,
   blossomRevealSpeedFloor: 0,
+  crossRootBakeSafetyMargin: 0.15,
 };

@@ -22,6 +22,8 @@ export type BranchLifecycle = 'growing' | 'mature';
 export interface Branch {
   id: string;
   generation: number;
+  /** Which root (0-based, within its own growth system) this branch's lineage descends from -- set explicitly at spawn (spawnRootBranch in botanical.ts) and inherited unchanged by every forked descendant (spawnChildBranch), so a branch's own root lineage is always known directly rather than needing to be parsed back out of its `id` string. Used by the cross-root bake-order safety check (isSafeToBake in botanical.ts) to tell which of a system's roots a given branch belongs to. */
+  rootIndex: number;
   z: number;
   color: string;
 
@@ -42,6 +44,23 @@ export interface Branch {
   /** Counts up while mature. For a generation-0 branch, reaching matureDurationMs triggers the next sibling at this root (front-driven new growth) and resets to 0 -- see botanical.ts's stepGrowthSystem. Non-root branches just carry it, unused, once mature. */
   lifecycleTimer: number;
   matureDurationMs: number;
+
+  /**
+   * True once this branch's bake-order safety has been permanently resolved
+   * safe (botanical.ts's resolveBakeThreats/isSafeToBake) -- meaning it has
+   * effectively already baked into the live compositor's persistent buffer,
+   * correctly z-ordered, and can never again be a threat to anything else
+   * (docs/HANDOFF.md session 018's bake-order fix generalization). Starts
+   * false and, once flipped true, stays true forever -- this is what lets
+   * resolveBakeThreats skip already-resolved branches on every later tick
+   * instead of re-examining the whole session's ever-growing branch history
+   * each time (see resolveBakeThreats's own doc comment for why that bound
+   * matters: without it, this fix would reintroduce the exact unbounded
+   * per-frame cost shape docs/HANDOFF.md session 013's frame-rate-collapse
+   * fix eliminated). Meaningless for echo branches (never gated, never set)
+   * and for a branch still `growing` (can't have resolved yet either way).
+   */
+  bakeResolved: boolean;
 
   forkFractions: number[];
   forkedFractions: boolean[];
@@ -131,6 +150,7 @@ export function computeMatureDurationMs(baseMatureDurationMs: number, jitterDraw
 export interface SpawnBranchArgs {
   id: string;
   generation: number;
+  rootIndex: number;
   z: number;
   color: string;
   rootX: number;
@@ -151,6 +171,7 @@ export function spawnBranch(args: SpawnBranchArgs): Branch {
   return {
     id: args.id,
     generation: args.generation,
+    rootIndex: args.rootIndex,
     z: args.z,
     color: args.color,
     rootX: args.rootX,
@@ -167,6 +188,7 @@ export function spawnBranch(args: SpawnBranchArgs): Branch {
     lifecycle: 'growing',
     lifecycleTimer: 0,
     matureDurationMs: 0,
+    bakeResolved: false,
     forkFractions: args.forkFractions,
     forkedFractions: args.forkFractions.map(() => false),
   };

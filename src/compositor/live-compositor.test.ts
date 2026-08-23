@@ -106,15 +106,19 @@ function createFakeBufferFactory(): OffscreenBufferFactory & {
   createdBuffers: (CanvasLike & { calls: RecordedCall[] })[];
   growCalls: { bufferIndex: number; size: CanvasSize }[];
   blitOrder: number[];
+  /** `dest.globalAlpha` as observed AT THE MOMENT each blitTo call fired, same index alignment as blitOrder -- session 024's globalAlpha-leak regression test reads this directly (a real `drawImage`-based blitTo, like main.ts's or the harness's, would composite using exactly this value, so recording it here is what lets a test assert "this blit would have landed opaque" without needing a real canvas). */
+  blitAlphas: number[];
 } {
   const createdBuffers: (CanvasLike & { calls: RecordedCall[] })[] = [];
   const growCalls: { bufferIndex: number; size: CanvasSize }[] = [];
   const blitOrder: number[] = [];
+  const blitAlphas: number[] = [];
 
   return {
     createdBuffers,
     growCalls,
     blitOrder,
+    blitAlphas,
     create(size: CanvasSize): OffscreenBuffer {
       const bufferIndex = createdBuffers.length;
       const canvas = createMockCanvas();
@@ -124,6 +128,7 @@ function createFakeBufferFactory(): OffscreenBufferFactory & {
         ctx: canvas,
         blitTo(dest: CanvasLike) {
           blitOrder.push(bufferIndex);
+          blitAlphas.push(dest.globalAlpha);
           const target = dest as CanvasLike & { calls?: RecordedCall[] };
           target.calls?.push({ method: 'blitTo', args: [bufferIndex] });
         },
@@ -142,8 +147,9 @@ function makeStroke(points: { x: number; y: number }[], overrides: Partial<Strok
   return { kind: 'stroke', z: 0, points, baseWidth: 0.05, taperExponent: 1, color: 'blue', opacity: 1, ...overrides };
 }
 
+/** Defaults `final: true` -- most tests in this file that use makeCircle() are exercising bake-exactly-once behavior, unaffected by session 021's new "a circle can be revealed but not yet safe to bake" state (see the dedicated describe block below for that). Override `final: false` explicitly to opt into the new live-redraw path instead. */
 function makeCircle(overrides: Partial<CircleElement> = {}): CircleElement {
-  return { kind: 'circle', z: 0, x: 0.5, y: 0.5, radius: 0.1, color: 'red', opacity: 1, ...overrides };
+  return { kind: 'circle', z: 0, x: 0.5, y: 0.5, radius: 0.1, color: 'red', opacity: 1, final: true, ...overrides };
 }
 
 const CANVAS_SIZE: CanvasSize = { width: 200, height: 100 };
@@ -346,6 +352,117 @@ describe('createLiveCompositor — bake-exactly-once for circles (unaffected by 
     // strokeA: 2 segments, strokeB: 1 segment => 3 stroke() calls total.
     expect(foregroundBuffer.calls.filter((c) => c.method === 'stroke')).toHaveLength(3);
     // circle1 + circle2 => exactly 2 fill() calls total, not re-baked.
+    expect(foregroundBuffer.calls.filter((c) => c.method === 'fill')).toHaveLength(2);
+  });
+});
+
+describe('createLiveCompositor — revealed-but-not-yet-safe circles are drawn live, not invisible (session 021)', () => {
+  // Session 021 (docs/HANDOFF.md): before this, a circle had no `final`
+  // concept at all -- it was baked unconditionally the instant it appeared,
+  // because reveal itself was gated on bake-order safety (so a "revealed"
+  // circle was already known-safe by construction). That coupling caused a
+  // real founder-reported regression (blossoms invisible until their area
+  // scrolled off-screen) once session 020's more conservative bake-safety
+  // bound made the invisibility window large. Reveal and bake-safety are
+  // now decoupled: a circle can be `final: false` (revealed, visible,
+  // not yet safe to permanently bake) exactly like a still-growing stroke.
+
+  it('a non-final circle is drawn fresh on destCtx every frame (never baked) -- visible immediately, exactly like a blocked stroke', () => {
+    const factory = createFakeBufferFactory();
+    const compositor = createLiveCompositor(factory);
+    const dest = DEST();
+    const layers: SceneLayer[] = [{ layerId: 'fg0', elements: [makeCircle({ final: false, color: 'blocked-circle' })] }];
+
+    for (let i = 0; i < 5; i++) {
+      compositor.renderFrame(layers, dest, CANVAS_SIZE, 'seed-live-circle');
+    }
+
+    const foregroundBuffer = factory.createdBuffers[2]!;
+    expect(foregroundBuffer.calls.filter((c) => c.method === 'fill')).toHaveLength(0); // never baked
+    // Drawn fresh onto destCtx every single frame it stays non-final.
+    expect(dest.calls.filter((c) => c.method === 'setFillStyle' && c.args[0] === 'blocked-circle')).toHaveLength(5);
+  });
+
+  it('once a circle flips to final: true, it bakes exactly once and stops being drawn live', () => {
+    const factory = createFakeBufferFactory();
+    const compositor = createLiveCompositor(factory);
+    const dest = DEST();
+    const circle = makeCircle({ final: false, color: 'now-safe' });
+
+    compositor.renderFrame([{ layerId: 'fg0', elements: [circle] }], dest, CANVAS_SIZE, 'seed-flip');
+    compositor.renderFrame([{ layerId: 'fg0', elements: [circle] }], dest, CANVAS_SIZE, 'seed-flip');
+    const foregroundBuffer = factory.createdBuffers[2]!;
+    expect(foregroundBuffer.calls.filter((c) => c.method === 'fill')).toHaveLength(0);
+
+    circle.final = true; // mirrors botanical.ts flipping blossom.bakeResolved -> emitGrowthSystem's `final`
+    compositor.renderFrame([{ layerId: 'fg0', elements: [circle] }], dest, CANVAS_SIZE, 'seed-flip');
+    expect(foregroundBuffer.calls.filter((c) => c.method === 'fill')).toHaveLength(1); // baked exactly once
+
+    for (let i = 0; i < 3; i++) {
+      compositor.renderFrame([{ layerId: 'fg0', elements: [circle] }], dest, CANVAS_SIZE, 'seed-flip');
+    }
+    expect(foregroundBuffer.calls.filter((c) => c.method === 'fill')).toHaveLength(1); // never rebaked
+  });
+
+  it('non-final circles are z-sorted together with non-final strokes when drawn live (mixed kinds, one bucket)', () => {
+    const factory = createFakeBufferFactory();
+    const compositor = createLiveCompositor(factory);
+    const dest = DEST();
+
+    const nearCircle = makeCircle({ final: false, z: 0.1, color: 'near-live-circle' });
+    const farStroke = makeStroke(
+      [
+        { x: 0, y: 0.5 },
+        { x: 0.1, y: 0.5 },
+      ],
+      { final: false, z: 0.9, color: 'far-live-stroke' },
+    );
+
+    // Circle listed first, on purpose -- the farther stroke must still draw
+    // first (i.e. underneath) regardless of array order.
+    compositor.renderFrame([{ layerId: 'fg0', elements: [nearCircle, farStroke] }], dest, CANVAS_SIZE, 'seed-live-z');
+
+    const paintEvents = dest.calls
+      .filter((c) => c.method === 'setStrokeStyle' || c.method === 'setFillStyle')
+      .map((c) => c.args[0]);
+    expect(paintEvents).toContain('far-live-stroke');
+    expect(paintEvents).toContain('near-live-circle');
+    expect(paintEvents.indexOf('far-live-stroke')).toBeLessThan(paintEvents.indexOf('near-live-circle'));
+  });
+
+  it('the in-order bake constraint (LayerBakeState.circlesBaked): a later circle that is already final cannot bake ahead of an earlier, still-blocked one in the same layer', () => {
+    const factory = createFakeBufferFactory();
+    const compositor = createLiveCompositor(factory);
+    const dest = DEST();
+
+    const blockedFirst = makeCircle({ final: false, color: 'blocked-first' });
+    const safeSecond = makeCircle({ final: true, color: 'safe-second' });
+
+    compositor.renderFrame(
+      [{ layerId: 'fg0', elements: [blockedFirst, safeSecond] }],
+      dest,
+      CANVAS_SIZE,
+      'seed-in-order',
+    );
+
+    const foregroundBuffer = factory.createdBuffers[2]!;
+    // Neither bakes: circlesBaked stays 0 (blockedFirst, index 0, isn't
+    // final), so index 1 (safeSecond) -- despite itself being final -- is
+    // not the "next in the contiguous prefix" and is correctly withheld
+    // too. Both are still visible, though: drawn live via drawLiveElements.
+    expect(foregroundBuffer.calls.filter((c) => c.method === 'fill')).toHaveLength(0);
+    expect(dest.calls.filter((c) => c.method === 'setFillStyle' && c.args[0] === 'blocked-first')).toHaveLength(1);
+    expect(dest.calls.filter((c) => c.method === 'setFillStyle' && c.args[0] === 'safe-second')).toHaveLength(1);
+
+    // Once the first one also resolves safe, BOTH bake in one pass (in
+    // z-order among themselves, same as any other same-frame batch).
+    blockedFirst.final = true;
+    compositor.renderFrame(
+      [{ layerId: 'fg0', elements: [blockedFirst, safeSecond] }],
+      dest,
+      CANVAS_SIZE,
+      'seed-in-order',
+    );
     expect(foregroundBuffer.calls.filter((c) => c.method === 'fill')).toHaveLength(2);
   });
 });
@@ -647,5 +764,59 @@ describe('createLiveCompositor — reset', () => {
     // reset() actually cleared the tracked "already baked" state, not just
     // the buffers.
     expect(secondForegroundBuffer.calls.filter((c) => c.method === 'stroke')).toHaveLength(2);
+  });
+});
+
+describe('createLiveCompositor — globalAlpha invariant (session 024, docs/HANDOFF.md)', () => {
+  it("a low-alpha live element in an EARLIER bucket does not leak its globalAlpha into a LATER bucket's blitTo call -- the exact mechanism behind the founder-reported 'whole branch segments vanish in a single step' bug", () => {
+    // Reproduces session 024's forensic trace precisely: echo1 draws a
+    // still-growing (non-final) element with a very low opacity --
+    // drawCircleElement/drawStrokeSegment (render-scene.ts) set
+    // `ctx.globalAlpha` to exactly that value and, pre-fix, nothing ever
+    // reset it afterward. A real `blitTo` (main.ts's DOM implementation,
+    // render-divergence-harness.ts's Node one) is a bare `drawImage` that
+    // composites using WHATEVER `globalAlpha` its target already holds --
+    // this fake's blitAlphas records exactly that value, so this test can
+    // assert what a real blit would have done without needing a real
+    // canvas (this file's own established convention -- see its top
+    // comment).
+    const factory = createFakeBufferFactory();
+    const compositor = createLiveCompositor(factory);
+    const dest = DEST();
+
+    const fadedLiveCircle = makeCircle({ final: false, opacity: 0.05, color: 'faded-echo-circle' });
+    const bakedStroke = makeStroke(
+      [
+        { x: 0, y: 0.5 },
+        { x: 0.1, y: 0.5 },
+      ],
+      { final: true, color: 'baked-foreground-stroke' },
+    );
+
+    compositor.renderFrame(
+      [
+        { layerId: 'echo1', elements: [fadedLiveCircle] },
+        { layerId: 'fg0', elements: [bakedStroke] },
+      ],
+      dest,
+      CANVAS_SIZE,
+      'seed-alpha-leak',
+    );
+
+    // Sanity: the leak precondition genuinely existed this frame -- echo1's
+    // own low-opacity live circle really was drawn onto `dest` (otherwise
+    // this test would trivially pass for the wrong reason).
+    expect(dest.calls.some((c) => c.method === 'setFillStyle' && c.args[0] === 'faded-echo-circle')).toBe(true);
+
+    // blitOrder/blitAlphas are index-aligned, in creation order (echo1=0,
+    // echo0=1, foreground=2 -- see createFakeBufferFactory's own doc
+    // comment); the foreground bucket's own blit is what composites
+    // `bakedStroke` onto `dest`. Pre-fix, this read 0.05 (the leaked echo1
+    // circle's own alpha) -- a real blitTo would have rendered the whole
+    // foreground buffer at 5% opacity, visually indistinguishable from
+    // "vanished" against a light paper background.
+    const foregroundBlitIndex = factory.blitOrder.indexOf(2);
+    expect(foregroundBlitIndex).toBeGreaterThanOrEqual(0);
+    expect(factory.blitAlphas[foregroundBlitIndex]).toBe(1);
   });
 });
