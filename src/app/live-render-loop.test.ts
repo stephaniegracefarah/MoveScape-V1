@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { MovementParams } from '../adapters/movement-params';
+import type { OffscreenBuffer, OffscreenBufferFactory } from '../compositor/live-compositor';
 import type { CanvasLike } from '../compositor/render-scene';
 import { SIMULATION_TICK_MS } from '../engine/replay';
 import type { Scene, StyleRenderer } from '../styles/style-renderer';
@@ -47,6 +48,22 @@ function createStubCanvas(): CanvasLike {
   };
 }
 
+/**
+ * A buffer factory that throws if `create` is ever called -- every style
+ * used in this file omits `sceneLayers`, so the live render loop must never
+ * touch the buffer factory at all (it should stay on the plain full-redraw
+ * path). Using a throwing stub (rather than a working fake) turns "the loop
+ * incorrectly went down the incremental path" into an immediate test
+ * failure instead of a silent pass.
+ */
+function createUnusedBufferFactory(): OffscreenBufferFactory {
+  return {
+    create(): OffscreenBuffer {
+      throw new Error('bufferFactory.create() should never be called for a style without sceneLayers');
+    },
+  };
+}
+
 /** Stubs requestAnimationFrame/cancelAnimationFrame so a test can drive frames manually by calling the captured callback with a chosen timestamp. */
 function stubRaf(): { fireNextFrame: (now: number) => void; cancelled: boolean } {
   let pendingCallback: ((now: number) => void) | null = null;
@@ -73,7 +90,15 @@ describe('createLiveRenderLoop — feed', () => {
   it('drops a sample whose elapsed time does not exceed the last recorded sample', () => {
     const raf = stubRaf();
     const { style } = createStubStyle();
-    const loop = createLiveRenderLoop(style, createStubWorld(), createStubCanvas(), 10, () => {}, () => false);
+    const loop = createLiveRenderLoop(
+      style,
+      createStubWorld(),
+      createStubCanvas(),
+      10,
+      () => {},
+      () => false,
+      createUnusedBufferFactory(),
+    );
 
     // First frame establishes lastFrameTimestamp with no elapsed delta yet.
     raf.fireNextFrame(0);
@@ -109,6 +134,7 @@ describe('createLiveRenderLoop — the Scroll: dynamic canvas resizing', () => {
       100,
       (size) => resizeCalls.push(size),
       () => false,
+      createUnusedBufferFactory(),
     );
 
     raf.fireNextFrame(0);
@@ -117,6 +143,60 @@ describe('createLiveRenderLoop — the Scroll: dynamic canvas resizing', () => {
     // height is always the fixed 100; width fits x=2 + radius=0.1 + the
     // 0.3-world-unit padding computeCanvasSize adds, i.e. (2.1 + 0.3) * 100.
     expect(resizeCalls[0]).toEqual({ width: 240, height: 100 });
+
+    loop.stop();
+  });
+});
+
+describe('createLiveRenderLoop — sceneLayers wiring', () => {
+  it('a style with sceneLayers renders via the LiveCompositor (bufferFactory.create gets called), still resizing the canvas correctly', () => {
+    const raf = stubRaf();
+    const resizeCalls: { width: number; height: number }[] = [];
+    const style: StyleRenderer = {
+      id: 'stub-incremental',
+      name: 'Stub Incremental',
+      aestheticFamily: 'organic',
+      worldKnobs: () => [],
+      init: () => {},
+      step: () => {},
+      scene: (): Scene => ({ elements: [] }),
+      finish: (): Scene => ({ elements: [] }),
+      sceneLayers: () => [
+        {
+          layerId: 'fg0',
+          elements: [{ kind: 'circle', z: 0, x: 1, y: 0.5, radius: 0.1, color: 'red', opacity: 1 }],
+        },
+      ],
+    };
+
+    let createCalls = 0;
+    const bufferFactory: OffscreenBufferFactory = {
+      create(): OffscreenBuffer {
+        createCalls++;
+        return {
+          ctx: createStubCanvas(),
+          blitTo: () => {},
+          growTo: () => {},
+        };
+      },
+    };
+
+    const loop = createLiveRenderLoop(
+      style,
+      createStubWorld(),
+      createStubCanvas(),
+      100,
+      (size) => resizeCalls.push(size),
+      () => false,
+      bufferFactory,
+    );
+
+    raf.fireNextFrame(0);
+
+    expect(createCalls).toBeGreaterThan(0); // the compositor path was actually taken
+    expect(resizeCalls).toHaveLength(1);
+    // Sized from sceneLayers' own elements (x=1 + radius=0.1 + 0.3 padding) * height(100).
+    expect(resizeCalls[0]).toEqual({ width: 140, height: 100 });
 
     loop.stop();
   });
@@ -134,6 +214,7 @@ describe('createLiveRenderLoop — pause freezes tick advancement', () => {
       10,
       () => {},
       () => paused,
+      createUnusedBufferFactory(),
     );
 
     raf.fireNextFrame(0);

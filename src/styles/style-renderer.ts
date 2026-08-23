@@ -54,11 +54,36 @@ export interface StrokeElement {
   taperExponent: number;
   color: string;
   opacity: number;
+  /**
+   * True once this stroke's `points` array will never grow again -- the
+   * live compositor (src/compositor/live-compositor.ts) may then safely
+   * bake it once, in full, using this call's `points.length`, and never
+   * revisit it. Absent or false means still-changing (e.g. a branch still
+   * growing): the compositor must redraw it fresh, in full, every frame
+   * instead of baking it, since taper width (`width(t)` above) depends on
+   * `points.length` -- baking a growing stroke early would freeze each
+   * segment's `t` at whatever it was the instant it was baked, never
+   * "thickening" toward its true final width as the branch keeps growing
+   * past it. Purely additive: ignored entirely by renderScene() and by
+   * export (finish()), so neither is affected by a style setting this.
+   */
+  final?: boolean;
 }
 
 export type SceneElement = CircleElement | StrokeElement;
 
 export interface Scene {
+  elements: SceneElement[];
+}
+
+/**
+ * One independent, incrementally-bakeable layer of a style's scene (see
+ * StyleRenderer.sceneLayers below). `layerId` is stable and unique for the
+ * life of a session -- e.g. Botanical's foreground growth systems ('fg0',
+ * 'fg1', ...) and depth echoes ('echo0', 'echo1').
+ */
+export interface SceneLayer {
+  layerId: string;
   elements: SceneElement[];
 }
 
@@ -74,4 +99,32 @@ export interface StyleRenderer {
   scene(): Scene;
   /** Called at session end; returns the final scene. */
   finish(): Scene;
+  /**
+   * Optional: styles with permanent, ever-accumulating geometry (e.g.
+   * Botanical) implement this so the live compositor can render
+   * incrementally instead of redrawing the whole scene every frame.
+   * Each returned layer's `elements` must stay in stable APPEND order
+   * across repeated calls within one session -- elements already present
+   * in a previous call's array, at the same index, must never change
+   * their kind or be removed/reordered; new elements only ever get
+   * appended at the end, OR an existing stroke element's `points` array
+   * may grow longer (new points appended to its end) representing a
+   * branch still growing. This is what lets the compositor safely bake
+   * new content once and never revisit old pixels. Styles that omit this
+   * method get the plain full-redraw-every-frame path (today's behavior,
+   * unchanged) from the live render loop.
+   *
+   * Implementation note (src/compositor/live-compositor.ts): the
+   * "index" the compositor tracks an element's bake progress by is that
+   * element's own position among same-`kind` elements within this
+   * layer's array (its Nth stroke, or its Nth circle), NOT its raw mixed
+   * position in `elements`. This is what lets a layer's array interleave
+   * strokes and circles in any order (e.g. all strokes first, then all
+   * circles, as Botanical's own emission does) without a later-appended
+   * stroke -- landing, in the raw array, before an earlier-baked circle
+   * -- being mistaken for a change to that circle's identity: each kind's
+   * own relative order is independently append-only even though the
+   * flattened array's raw indices are not.
+   */
+  sceneLayers?(): SceneLayer[];
 }

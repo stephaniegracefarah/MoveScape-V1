@@ -14,7 +14,7 @@
  * grown, not the other way around.
  */
 import { clamp01 } from '../shared/math';
-import type { Scene } from '../styles/style-renderer';
+import type { CircleElement, Scene, StrokeElement } from '../styles/style-renderer';
 
 /**
  * A hand-written structural interface, not a DOM type -- this module never
@@ -69,6 +69,75 @@ const DEPTH_RADIUS_FALLOFF = 0.6;
 const MIN_STROKE_WIDTH_PX = 0.5;
 
 /**
+ * Draws one circle element (fill plus its optional ring-outline detail) onto
+ * `ctx`, at `worldUnitPx` (the world-to-pixel scale -- always
+ * canvasSize.height, see the coordinate-convention doc comment above).
+ * Extracted so both renderScene (a full-redraw of every element, every
+ * call) and src/compositor/live-compositor.ts (which bakes a circle exactly
+ * once, the first frame it appears) share the identical depth/ring math --
+ * neither reimplements it. Pure with respect to `element`/`worldUnitPx`;
+ * only `ctx` is mutated.
+ */
+export function drawCircleElement(ctx: CanvasLike, element: CircleElement, worldUnitPx: number): void {
+  const displayOpacity = clamp01(element.opacity * (1 - element.z * DEPTH_OPACITY_FALLOFF));
+  const displayRadiusPx = element.radius * (1 - element.z * DEPTH_RADIUS_FALLOFF) * worldUnitPx;
+
+  ctx.globalAlpha = displayOpacity;
+  ctx.fillStyle = element.color;
+  ctx.beginPath();
+  ctx.arc(element.x * worldUnitPx, element.y * worldUnitPx, displayRadiusPx, 0, 2 * Math.PI);
+  ctx.fill();
+
+  if (element.ringColor !== undefined) {
+    const ringBaseOpacity = element.ringOpacity ?? element.opacity;
+    const ringDisplayOpacity = clamp01(ringBaseOpacity * (1 - element.z * DEPTH_OPACITY_FALLOFF));
+    ctx.globalAlpha = ringDisplayOpacity;
+    ctx.strokeStyle = element.ringColor;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(element.x * worldUnitPx, element.y * worldUnitPx, displayRadiusPx, 0, 2 * Math.PI);
+    ctx.stroke();
+  }
+}
+
+/**
+ * Draws one stroke element's segment `[i, i+1]` onto `ctx`, at `worldUnitPx`
+ * -- the taper/depth-fade math for a single segment, in isolation. Extracted
+ * so both renderScene (which calls this for every segment of every stroke,
+ * full-redraw) and live-compositor.ts (which calls this only for a growing
+ * stroke's newly-added tail segments) share the identical taper formula
+ * (docs/styles/botanical.md section 1) rather than either reimplementing
+ * it. Pure with respect to `element`/`i`/`worldUnitPx`; only `ctx` is
+ * mutated. Requires `element.points.length >= 2` and `0 <= i <
+ * element.points.length - 1`.
+ */
+export function drawStrokeSegment(ctx: CanvasLike, element: StrokeElement, i: number, worldUnitPx: number): void {
+  const lastIndex = element.points.length - 1;
+  const tStart = i / lastIndex;
+  const tEnd = (i + 1) / lastIndex;
+  const widthStart = element.baseWidth * (1 - tStart) ** element.taperExponent;
+  const widthEnd = element.baseWidth * (1 - tEnd) ** element.taperExponent;
+  const segmentWidth = (widthStart + widthEnd) / 2;
+  const displayOpacity = clamp01(element.opacity * (1 - element.z * DEPTH_OPACITY_FALLOFF));
+  const displayWidthPx = Math.max(
+    MIN_STROKE_WIDTH_PX,
+    segmentWidth * (1 - element.z * DEPTH_RADIUS_FALLOFF) * worldUnitPx,
+  );
+
+  const p0 = element.points[i]!;
+  const p1 = element.points[i + 1]!;
+
+  ctx.globalAlpha = displayOpacity;
+  ctx.strokeStyle = element.color;
+  ctx.lineCap = 'round';
+  ctx.lineWidth = displayWidthPx;
+  ctx.beginPath();
+  ctx.moveTo(p0.x * worldUnitPx, p0.y * worldUnitPx);
+  ctx.lineTo(p1.x * worldUnitPx, p1.y * worldUnitPx);
+  ctx.stroke();
+}
+
+/**
  * Paints each scene element -- circles and tapered strokes alike -- farthest
  * (largest z) first so nearer elements paint over farther ones, applying a
  * simple depth fade to opacity and radius/width as it goes.
@@ -89,54 +158,12 @@ export function renderScene(ctx: CanvasLike, scene: Scene, canvasSize: CanvasSiz
   const worldUnitPx = canvasSize.height;
 
   for (const element of farthestFirst) {
-    const displayOpacity = clamp01(element.opacity * (1 - element.z * DEPTH_OPACITY_FALLOFF));
-
     if (element.kind === 'circle') {
-      const displayRadiusPx = element.radius * (1 - element.z * DEPTH_RADIUS_FALLOFF) * worldUnitPx;
-
-      ctx.globalAlpha = displayOpacity;
-      ctx.fillStyle = element.color;
-      ctx.beginPath();
-      ctx.arc(element.x * worldUnitPx, element.y * canvasSize.height, displayRadiusPx, 0, 2 * Math.PI);
-      ctx.fill();
-
-      if (element.ringColor !== undefined) {
-        const ringBaseOpacity = element.ringOpacity ?? element.opacity;
-        const ringDisplayOpacity = clamp01(ringBaseOpacity * (1 - element.z * DEPTH_OPACITY_FALLOFF));
-        ctx.globalAlpha = ringDisplayOpacity;
-        ctx.strokeStyle = element.ringColor;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.arc(element.x * worldUnitPx, element.y * canvasSize.height, displayRadiusPx, 0, 2 * Math.PI);
-        ctx.stroke();
-      }
+      drawCircleElement(ctx, element, worldUnitPx);
     } else {
-      const pixelPoints = element.points.map((p) => ({ x: p.x * worldUnitPx, y: p.y * canvasSize.height }));
-      const lastIndex = pixelPoints.length - 1;
-
-      ctx.globalAlpha = displayOpacity;
-      ctx.strokeStyle = element.color;
-      ctx.lineCap = 'round';
-
+      const lastIndex = element.points.length - 1;
       for (let i = 0; i < lastIndex; i++) {
-        const tStart = i / lastIndex;
-        const tEnd = (i + 1) / lastIndex;
-        const widthStart = element.baseWidth * (1 - tStart) ** element.taperExponent;
-        const widthEnd = element.baseWidth * (1 - tEnd) ** element.taperExponent;
-        const segmentWidth = (widthStart + widthEnd) / 2;
-        const displayWidthPx = Math.max(
-          MIN_STROKE_WIDTH_PX,
-          segmentWidth * (1 - element.z * DEPTH_RADIUS_FALLOFF) * worldUnitPx,
-        );
-
-        const p0 = pixelPoints[i]!;
-        const p1 = pixelPoints[i + 1]!;
-
-        ctx.lineWidth = displayWidthPx;
-        ctx.beginPath();
-        ctx.moveTo(p0.x, p0.y);
-        ctx.lineTo(p1.x, p1.y);
-        ctx.stroke();
+        drawStrokeSegment(ctx, element, i, worldUnitPx);
       }
     }
   }

@@ -12,6 +12,7 @@ import { createPauseGate } from './app/pause-gate';
 import { createActivationTokenSource } from './app/activation-token';
 import { getOrCreateUserId } from './app/user-identity';
 import { createLiveRenderLoop, type LiveRenderLoop } from './app/live-render-loop';
+import type { OffscreenBuffer, OffscreenBufferFactory } from './compositor/live-compositor';
 import type { CanvasLike, CanvasSize } from './compositor/render-scene';
 import { createWorld, type World, type WorldOverrides } from './world/world';
 import { deriveWorldSeed, formatLocalDate } from './world/seed';
@@ -30,6 +31,63 @@ import type { MovementRecording } from './engine/recording';
 // live-render-loop.ts's resizeCanvas callback below, which sets the real
 // canvas element's width every frame to fit the current scene.
 const CANVAS_HEIGHT_PX = 480;
+
+/**
+ * The real OffscreenBufferFactory (the fix for the frame-rate collapse,
+ * docs/HANDOFF.md): implements src/compositor/live-compositor.ts's
+ * OffscreenBuffer/OffscreenBufferFactory DI boundary against a real
+ * `<canvas>` element, so live-compositor.ts itself never has to import a
+ * DOM canvas type. One instance is created once (see below) and reused
+ * across sessions -- it holds no session-specific state itself, since each
+ * `create()` call hands back a brand-new, independent offscreen canvas.
+ */
+function createDomOffscreenBufferFactory(): OffscreenBufferFactory {
+  return {
+    create(size: CanvasSize): OffscreenBuffer {
+      let canvas = document.createElement('canvas');
+      canvas.width = size.width;
+      canvas.height = size.height;
+      let activeCtx = canvas.getContext('2d');
+      if (!activeCtx) throw new Error('2D context unavailable for an offscreen live-compositor buffer');
+
+      return {
+        // A getter, not a plain value: growTo below swaps in a fresh
+        // canvas/context when the buffer grows, so `ctx` must always
+        // reflect whichever context is current, not whatever it was at
+        // construction time. See render-scene.ts's own CanvasLike doc
+        // comment for why this cast is safe: CanvasLike is the
+        // plain-string-fillStyle subset of CanvasRenderingContext2D this
+        // app ever assigns.
+        get ctx(): CanvasLike {
+          return activeCtx as unknown as CanvasLike;
+        },
+        blitTo(dest: CanvasLike): void {
+          (dest as unknown as CanvasRenderingContext2D).drawImage(canvas, 0, 0);
+        },
+        growTo(newSize: CanvasSize): void {
+          // Resizing a canvas element's width/height attributes clears its
+          // pixel contents, so snapshot the existing content onto a second
+          // canvas first, resize the real one, then draw the snapshot back
+          // -- growTo's own contract (live-compositor.ts) requires old
+          // content to survive at (0,0), never a clear-and-resize.
+          const snapshot = document.createElement('canvas');
+          snapshot.width = canvas.width;
+          snapshot.height = canvas.height;
+          const snapshotCtx = snapshot.getContext('2d');
+          snapshotCtx?.drawImage(canvas, 0, 0);
+
+          canvas = document.createElement('canvas');
+          canvas.width = newSize.width;
+          canvas.height = newSize.height;
+          const freshCtx = canvas.getContext('2d');
+          if (!freshCtx) throw new Error('2D context unavailable while growing an offscreen live-compositor buffer');
+          if (snapshotCtx) freshCtx.drawImage(snapshot, 0, 0);
+          activeCtx = freshCtx;
+        },
+      };
+    },
+  };
+}
 
 const app = document.querySelector<HTMLDivElement>('#app');
 
@@ -174,6 +232,14 @@ if (app) {
     const canvasCtx = canvasEl.getContext('2d');
 
     const readout = createParamsReadout(readoutEl);
+    // Created once, reused across every session/restart -- see the factory's
+    // own doc comment above for why this is safe (each create() call hands
+    // back an independent offscreen canvas; the factory itself holds no
+    // per-session state). Each startLiveLoop() call below constructs a
+    // fresh LiveRenderLoop (and therefore a fresh LiveCompositor internally,
+    // src/app/live-render-loop.ts), which is what guarantees a new
+    // session's buffers start empty -- no explicit reset() call needed here.
+    const offscreenBufferFactory = createDomOffscreenBufferFactory();
     let liveLoop: LiveRenderLoop | null = null;
     let selectedPaletteId: BotanicalPaletteId = 'default';
     // Opened once at app startup; awaited wherever a save/import actually
@@ -277,6 +343,7 @@ if (app) {
         CANVAS_HEIGHT_PX,
         resizeCanvas,
         () => pauseGate.isPaused(),
+        offscreenBufferFactory,
       );
     }
 

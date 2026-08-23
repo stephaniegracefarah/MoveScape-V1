@@ -20,8 +20,19 @@
  * painting. `resizeCanvas` is injected (rather than this module reaching
  * into a real HTMLCanvasElement directly) so it stays testable without a
  * DOM, the same reasoning `ctx: CanvasLike` already uses.
+ *
+ * Incremental rendering (docs/HANDOFF.md, "Known issues / debt" -- frame
+ * rate collapsing over the course of a session): if `style.sceneLayers`
+ * exists, every frame is rendered through a `LiveCompositor`
+ * (src/compositor/live-compositor.ts, constructed once here, outside the
+ * frame loop) instead of the plain compute-size/paper-ground/renderScene
+ * full-redraw path, so already-drawn geometry costs zero draw calls on
+ * frames where it hasn't changed. Styles that omit `sceneLayers` (e.g. the
+ * M3 placeholder `drifting-circles`) get exactly today's full-redraw path,
+ * unchanged.
  */
 import type { MovementParams, MovementSample } from '../adapters/movement-params';
+import { createLiveCompositor, type OffscreenBufferFactory } from '../compositor/live-compositor';
 import { renderPaperGround } from '../compositor/paper-ground';
 import { computeCanvasSize, renderScene, type CanvasLike, type CanvasSize } from '../compositor/render-scene';
 import { recordSample, type MovementRecording } from '../engine/recording';
@@ -48,6 +59,8 @@ export function createLiveRenderLoop(
   /** Called every frame with the size the canvas needs to be to fit the current scene, before painting. The caller applies it to the real canvas (e.g. setting canvas.width/height). */
   resizeCanvas: (size: CanvasSize) => void,
   isPaused: () => boolean,
+  /** DI'd the same way `ctx`/`resizeCanvas` are (testable without a real canvas) -- only ever used if `style.sceneLayers` exists. Passed to a LiveCompositor constructed once below, for the life of this session. */
+  bufferFactory: OffscreenBufferFactory,
 ): LiveRenderLoop {
   style.init(world);
 
@@ -59,6 +72,7 @@ export function createLiveRenderLoop(
   const accumulator = createSessionParamsAccumulator();
   let stopped = false;
   let rafHandle: number | null = null;
+  const compositor = createLiveCompositor(bufferFactory);
 
   function feed(params: MovementParams): void {
     const last = recording[recording.length - 1];
@@ -87,11 +101,20 @@ export function createLiveRenderLoop(
       }
     }
 
-    const scene = style.scene();
-    const canvasSize = computeCanvasSize(scene, fixedHeightPx);
-    resizeCanvas(canvasSize);
-    renderPaperGround(ctx, canvasSize, world.worldSeed);
-    renderScene(ctx, scene, canvasSize);
+    if (style.sceneLayers) {
+      const layers = style.sceneLayers();
+      // Sized from the same layer data that's about to be baked/blitted --
+      // avoids a second full scene() rebuild just for sizing.
+      const canvasSize = computeCanvasSize({ elements: layers.flatMap((layer) => layer.elements) }, fixedHeightPx);
+      resizeCanvas(canvasSize);
+      compositor.renderFrame(layers, ctx, canvasSize, world.worldSeed);
+    } else {
+      const scene = style.scene();
+      const canvasSize = computeCanvasSize(scene, fixedHeightPx);
+      resizeCanvas(canvasSize);
+      renderPaperGround(ctx, canvasSize, world.worldSeed);
+      renderScene(ctx, scene, canvasSize);
+    }
     rafHandle = requestAnimationFrame(frame);
   }
 
