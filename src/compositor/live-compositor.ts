@@ -180,18 +180,45 @@ export interface LiveCompositor {
   reset(): void;
 }
 
-type Bucket = 'echo1' | 'echo0' | 'foreground';
+export type Bucket = 'echo1' | 'echo0' | 'foreground';
 
-/** Paint order back-to-front onto destCtx, so the foreground ends up on top (nearest), matching the compositor's general depth intent. */
-const BUCKET_PAINT_ORDER: Bucket[] = ['echo1', 'echo0', 'foreground'];
+/**
+ * FOUNDER DECISION (2026-08-23, docs/HANDOFF.md): this fixed bucket paint
+ * order -- echoes always painted behind foreground, regardless of any
+ * individual element's own z -- is the INTENDED look, not a bug or an
+ * approximation to be reconciled away. Through session 019, the repo's own
+ * pixel-divergence harness (render-divergence-harness.ts) compared this
+ * against render-scene.ts's renderScene(), which z-sorts every element
+ * globally in one pass; wherever an echo's and the foreground's z-ranges
+ * overlap on screen, the two disagreed (~4-6k px residual divergence,
+ * "cross-bucket z-overlap" in docs/HANDOFF.md's "Still open" list at the
+ * time). The founder's call: for styles that implement sceneLayers() (like
+ * Botanical), THIS fixed bucket order is the authority -- renderScene()'s
+ * global sort remains correct and unchanged for styles that do NOT
+ * implement sceneLayers() (it's still what session-end export and the
+ * determinism tests use), but was never meant to be the reference for a
+ * style that has declared its own bucket structure. The harness's reference
+ * renderer was updated to match (renderSceneByBucket in render-divergence-
+ * harness.ts), not this file.
+ */
+/**
+ * Paint order back-to-front onto destCtx, so the foreground ends up on top
+ * (nearest), matching the compositor's general depth intent. Exported (for
+ * the high-resolution export path, src/compositor/export-render.ts) so that
+ * module can replicate this exact bucket order at export time instead of
+ * re-declaring its own copy -- the founder decision above requires the
+ * exported PNG to match this fixed order, not just a global z-sort.
+ */
+export const BUCKET_PAINT_ORDER: Bucket[] = ['echo1', 'echo0', 'foreground'];
 
 /**
  * Every non-echo layerId (Botanical's foreground growth systems: 'fg0',
  * 'fg1', 'fg2', ...) shares the single 'foreground' bucket -- they're all
  * the same depth band and meant to read as one continuous sweep. 'echo0'
- * and 'echo1' each get their own dedicated buffer.
+ * and 'echo1' each get their own dedicated buffer. Exported for the same
+ * reason as BUCKET_PAINT_ORDER above -- see that doc comment.
  */
-function bucketFor(layerId: string): Bucket {
+export function bucketFor(layerId: string): Bucket {
   if (layerId === 'echo0') return 'echo0';
   if (layerId === 'echo1') return 'echo1';
   return 'foreground';
@@ -246,8 +273,14 @@ function createLayerBakeState(): LayerBakeState {
   return { bakedStrokeIndices: new Set(), circlesBaked: 0 };
 }
 
-/** Draws one stroke element's entire polyline (every segment, 0..points.length-2) onto `ctx` at its CURRENT points.length -- the same "compute taper fresh over the true point count" shape renderScene() uses for one element. Shared by the bake-when-final path (baking once, at the final point count) and the live still-growing path (redrawing fresh every frame, at whatever point count it currently has). */
-function drawStrokeElementFully(ctx: CanvasLike, element: StrokeElement, worldUnitPx: number): void {
+/**
+ * Draws one stroke element's entire polyline (every segment, 0..points.length-2) onto `ctx` at its CURRENT points.length -- the same "compute taper fresh over the true point count" shape renderScene() uses for one element. Shared by the bake-when-final path (baking once, at the final point count) and the live still-growing path (redrawing fresh every frame, at whatever point count it currently has).
+ *
+ * Exported so src/compositor/export-render.ts's bucket-ordered export
+ * render can draw a stroke element the same way this file's own bake/live
+ * paths do, without duplicating the segment loop.
+ */
+export function drawStrokeElementFully(ctx: CanvasLike, element: StrokeElement, worldUnitPx: number): void {
   const lastIndex = element.points.length - 1;
   for (let i = 0; i < lastIndex; i++) {
     drawStrokeSegment(ctx, element, i, worldUnitPx);

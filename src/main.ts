@@ -14,12 +14,14 @@ import { getOrCreateUserId } from './app/user-identity';
 import { createLiveRenderLoop, type LiveRenderLoop } from './app/live-render-loop';
 import type { OffscreenBuffer, OffscreenBufferFactory } from './compositor/live-compositor';
 import type { CanvasLike, CanvasSize } from './compositor/render-scene';
+import { renderStyleToExportCanvas, type ExportRenderCanvas, type ExportRenderCanvasFactory } from './compositor/export-render';
 import { createWorld, type World, type WorldOverrides } from './world/world';
 import { deriveWorldSeed, formatLocalDate } from './world/seed';
 import { POSE_PARAM_TUNING } from './adapters/webcam/params-from-landmarks';
 import { createBotanicalStyle } from './styles/botanical/botanical';
 import { BOTANICAL_PALETTE_PRESETS, type BotanicalPaletteId } from './styles/botanical/palettes';
 import { DEFAULT_BOTANICAL_TUNING_CONFIG, type BotanicalTuningConfig } from './styles/botanical/tuning-config';
+import type { StyleRenderer } from './styles/style-renderer';
 import { openRecipeStore, type RecipeStore } from './storage/recipe-store';
 import { nextSessionIndexFor } from './storage/next-session-index';
 import { exportCanvasAsPng } from './storage/image-export';
@@ -84,6 +86,35 @@ function createDomOffscreenBufferFactory(): OffscreenBufferFactory {
           if (!freshCtx) throw new Error('2D context unavailable while growing an offscreen live-compositor buffer');
           if (snapshotCtx) freshCtx.drawImage(snapshot, 0, 0);
           activeCtx = freshCtx;
+        },
+      };
+    },
+  };
+}
+
+/**
+ * The real ExportRenderCanvasFactory (src/compositor/export-render.ts):
+ * hands back a brand-new offscreen `<canvas>`, sized exactly for one
+ * export, wired directly to that same canvas element's own real `toBlob` --
+ * a real HTMLCanvasElement satisfies both `ctx: CanvasLike` (via its 2D
+ * context, same cast rationale as createDomOffscreenBufferFactory above)
+ * and ExportRenderCanvas's `toBlob` with zero extra plumbing. Unlike
+ * createDomOffscreenBufferFactory's buffers, an export canvas is never
+ * grown or reused across calls -- each saveSession() gets its own, sized up
+ * front to its final (already-clamped) pixel dimensions.
+ */
+function createDomExportRenderCanvasFactory(): ExportRenderCanvasFactory {
+  return {
+    create(size: CanvasSize): ExportRenderCanvas {
+      const canvas = document.createElement('canvas');
+      canvas.width = size.width;
+      canvas.height = size.height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('2D context unavailable for the export-render offscreen canvas');
+      return {
+        ctx: ctx as unknown as CanvasLike,
+        toBlob(callback: (blob: unknown) => void, type?: string): void {
+          canvas.toBlob(callback, type);
         },
       };
     },
@@ -245,6 +276,11 @@ if (app) {
     // src/app/live-render-loop.ts), which is what guarantees a new
     // session's buffers start empty -- no explicit reset() call needed here.
     const offscreenBufferFactory = createDomOffscreenBufferFactory();
+    // Created once, reused across every save -- see createDomExportRenderCanvasFactory's
+    // own doc comment: unlike offscreenBufferFactory's grow-in-place buffers,
+    // each create() call here is a fresh, independent, exactly-sized canvas,
+    // so the factory itself needs no per-session state either.
+    const exportRenderCanvasFactory = createDomExportRenderCanvasFactory();
     let liveLoop: LiveRenderLoop | null = null;
     let selectedPaletteId: BotanicalPaletteId = 'default';
     // Opened once at app startup; awaited wherever a save/import actually
@@ -271,11 +307,17 @@ if (app) {
     // -- captured so a saved recipe's userChoices matches what was actually
     // rendered, not recomputed from possibly-stale UI state.
     let currentOverrides: WorldOverrides = {};
-    // The finished session's own recording + world, captured by
+    // The finished session's own recording + world + style, captured by
     // finishSession() and consumed by saveSession()/discardSession() --
     // null whenever no finished-but-undecided session is pending.
+    // pendingStyle is saveSession()'s handle onto the frozen scene state
+    // (style.scene()/sceneLayers() below) for the high-resolution export
+    // render -- the same style instance the live loop was just painting
+    // from, still holding every element ever drawn this session (permanent
+    // ink) since nothing resets it between finishSession() and this save.
     let pendingRecording: MovementRecording | null = null;
     let pendingWorld: World | null = null;
+    let pendingStyle: StyleRenderer | null = null;
     const pauseGate = createPauseGate((params, timestampMs) => {
       readout.update(params, timestampMs);
       liveLoop?.feed(params);
@@ -295,6 +337,11 @@ if (app) {
     // sliders from the world's actual current seed-derived values instead of
     // 0. Harmless and string-free in production -- stays null forever there.
     let currentWorld: World | null = null;
+    // Same rationale as currentWorld above, one level further out:
+    // finishSession() copies this into pendingStyle so saveSession() can
+    // still reach the style's current scene state after startLiveLoop()
+    // rebuilds a fresh style for the *next* session.
+    let currentStyle: StyleRenderer | null = null;
 
     // Dev tuning panel hand-off state. These four stay inert (null/undefined,
     // never read meaningfully) in a production build, where the panel's own
@@ -344,8 +391,12 @@ if (app) {
       const world = createWorld(worldSeed, currentSessionIndex, overrides);
       currentWorld = world;
       currentOverrides = overrides ?? {};
+      // Named distinctly from the top-level `style` <style> element in this
+      // same closure (line ~134) -- shares no relationship with it.
+      const botanicalStyle = createBotanicalStyle(panelTuningConfig);
+      currentStyle = botanicalStyle;
       liveLoop = createLiveRenderLoop(
-        createBotanicalStyle(panelTuningConfig),
+        botanicalStyle,
         world,
         // CanvasRenderingContext2D.fillStyle is `string | CanvasGradient |
         // CanvasPattern`; CanvasLike only needs the plain-string subset this
@@ -476,6 +527,7 @@ if (app) {
       // discarded too, not left in limbo behind a hidden panel.
       pendingRecording = null;
       pendingWorld = null;
+      pendingStyle = null;
       sessionEndEl.hidden = true;
       stopBtn.hidden = true;
       pauseBtn.hidden = true;
@@ -492,9 +544,10 @@ if (app) {
      * only two ways out of the pending state this leaves behind.
      */
     function finishSession(): void {
-      if (!liveLoop || !currentWorld) return;
+      if (!liveLoop || !currentWorld || !currentStyle) return;
       pendingRecording = liveLoop.getRecording();
       pendingWorld = currentWorld;
+      pendingStyle = currentStyle;
       activeAdapter?.stop();
       activeAdapter = null;
       readout.reset();
@@ -532,6 +585,7 @@ if (app) {
     function discardSession(): void {
       pendingRecording = null;
       pendingWorld = null;
+      pendingStyle = null;
       sessionEndEl.hidden = true;
       stopLiveLoop();
       setStartButtonsDisabled(false);
@@ -546,7 +600,7 @@ if (app) {
      * recipe backup" control below), not part of this routine save path.
      */
     async function saveSession(): Promise<void> {
-      if (!pendingRecording || !pendingWorld) return;
+      if (!pendingRecording || !pendingWorld || !pendingStyle) return;
       savePieceBtn.disabled = true;
       discardPieceBtn.disabled = true;
       sessionEndStatusEl.hidden = false;
@@ -564,10 +618,27 @@ if (app) {
         };
         await store.save(recipe);
         const baseName = `movescape-${recipe.worldSeed}-session${recipe.sessionIndex}`;
-        exportCanvasAsPng(canvasEl, `${baseName}.png`);
+        // High-resolution export (founder backlog: exported PNGs were
+        // pixelated when zoomed, since this used to just re-encode the live
+        // on-screen canvas's own 480px-tall pixels). Re-renders the whole
+        // frozen scene fresh, at DEFAULT_EXPORT_SCALE (3x) the live canvas's
+        // current pixel size, replicating the live bucket paint order (see
+        // export-render.ts's own top doc comment) rather than exporting
+        // canvasEl's pixels directly -- canvasEl.width/height here is still
+        // whatever size the live loop last resized it to (finishSession()
+        // only freezes the loop, it never touches the canvas element), i.e.
+        // exactly the "base" 1x size this session's piece actually needs.
+        const { canvas: exportCanvas } = renderStyleToExportCanvas(
+          pendingStyle,
+          recipe.worldSeed,
+          { width: canvasEl.width, height: canvasEl.height },
+          exportRenderCanvasFactory,
+        );
+        exportCanvasAsPng(exportCanvas, `${baseName}.png`);
         downloadJsonFile(serializeRecipe(recipe), `${baseName}.json`);
         pendingRecording = null;
         pendingWorld = null;
+        pendingStyle = null;
         savePieceBtn.hidden = true;
         discardPieceBtn.hidden = true;
         sessionEndStatusEl.textContent = 'Saved — image and recipe backup downloaded, stored locally.';
