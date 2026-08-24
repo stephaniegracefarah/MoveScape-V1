@@ -1,0 +1,385 @@
+# Develop — Low-Fidelity Wireframes
+
+*2026-08-23. Output of the Develop phase (see `UX_PLAN.md`). Six low-fidelity wireframes, two structural variants per key screen, each variant a real answer to one of Define's open questions rather than an arbitrary layout guess. Boxes and labels only — no color, type, or spacing decisions; that's Deliver's job.*
+
+**Feedback pass (2026-08-23):** decisions and revisions below each screen's original variants — kept, not overwritten, so the exploration stays visible per this project's own documentation convention.
+
+**Cross-screen layout principle (new, applies to all three screens):** every screen's session-level controls live in the same top row, above the content area — not one screen's controls above the canvas and another's below. `[ Start ]` on Idle becomes `[ Pause ]`/`[ Resume ]` in that exact slot during the live session, and the same slot is replaced by the three save/discard decision buttons once a session finishes — one control zone throughout the whole flow, never a second location.
+
+## Idle / first-load
+
+*Testing: how does the page build trust and set expectations using only itself (Define's success criterion 3)?*
+
+**A — minimal, art-forward**
+
+```
++------------------------------------------+
+|  MoveScape                                |
+|                                            |
+|  +--------------------------------------+ |
+|  |                                      | |
+|  |                                      | |
+|  |         (empty paper canvas)         | |
+|  |                                      | |
+|  |                                      | |
+|  +--------------------------------------+ |
+|                                            |
+|              [ Start ]                    |
+|                                            |
+|  On-device only. Camera never leaves      |
+|  this device.                             |
++------------------------------------------+
+```
+
+Lets the empty canvas and a single line of privacy reassurance do all the work. Fastest path to starting; relies on the visual alone to communicate what MoveScape is.
+
+**B — trust-building intro**
+
+```
++------------------------------------------+
+|  MoveScape                                |
+|                                            |
+|  +--------------------------------------+ |
+|  | Make art with your body.              | |
+|  |                                        | |
+|  | Your camera stays on this device --   | |
+|  | nothing is ever uploaded.             | |
+|  |                                        | |
+|  | Move however you want. The art        | |
+|  | responds live, while you move.        | |
+|  +--------------------------------------+ |
+|                                            |
+|              [ Start ]                    |
+|                                            |
+|      (faint hint of today's palette)      |
++------------------------------------------+
+```
+
+Spends a moment explaining the concept and the privacy model explicitly before asking for camera access, since (Discover finding) MoveScape has no gallery room or attendant to do this priming for it. Slower to "Start," but nothing is left for the user to infer.
+
+**Decision: B.** Revised to put `[ Start ]` in the top control row rather than below the text card, per the cross-screen layout principle above:
+
+```
++------------------------------------------+
+|  MoveScape                    [ Start ]   |
+|                                            |
+|  +--------------------------------------+ |
+|  | Make art with your body.              | |
+|  |                                        | |
+|  | Your camera stays on this device --   | |
+|  | nothing is ever uploaded.             | |
+|  |                                        | |
+|  | Move however you want. The art        | |
+|  | responds live, while you move.        | |
+|  +--------------------------------------+ |
+|                                            |
+|      (faint hint of today's palette)      |
++------------------------------------------+
+```
+
+**Refinement (second feedback pass):** `[ Start ]` moves to be the first button, directly under the "MoveScape" title, not floated on the title's own line. This is also what carries the top-row zone forward into the live session below — `[ Start ]` becomes `[ Pause ]` in that same slot once a session begins, rather than being a separate button.
+
+```
++------------------------------------------+
+|  MoveScape                                |
+|  [ Start ]                                |
+|                                            |
+|  +--------------------------------------+ |
+|  | Make art with your body.              | |
+|  |                                        | |
+|  | Your camera stays on this device --   | |
+|  | nothing is ever uploaded.             | |
+|  |                                        | |
+|  | Move however you want. The art        | |
+|  | responds live, while you move.        | |
+|  +--------------------------------------+ |
+|                                            |
+|      (faint hint of today's palette)      |
++------------------------------------------+
+```
+
+## Live session
+
+*Testing: should the movement-tracking mechanism be visible or hidden (Discover/Define's central open tension)?*
+
+**A — mechanism hidden**
+
+```
++------------------------------------------+
+|  [Pause]   [Finish]              [Stop]   |
+|                                            |
+|  +--------------------------------------+ |
+|  |                                      | |
+|  |                                      | |
+|  |      (growing artwork --             | |
+|  |       full width/height focus)       | |
+|  |                                      | |
+|  |                                      | |
+|  +--------------------------------------+ |
+|                                            |
++------------------------------------------+
+```
+
+No readout at all. Movement becomes art with nothing else on screen to look at — closest to "the live canvas is the experience" taken literally.
+
+**B — mechanism visible, reframed**
+
+```
++------------------------------------------+
+|  [Pause]   [Finish]              [Stop]   |
+|                                            |
+|  +--------------------------------------+ |
+|  |                                      | |
+|  |      (growing artwork)               | |
+|  |                                      | |
+|  +--------------------------------------+ |
+|                                            |
+|   ~~~ reaching · steady · in motion ~~~   |
+|      (ambient, qualitative, not the       |
+|       raw Expansion/Speed/Symmetry        |
+|       decimals)                          |
++------------------------------------------+
+```
+
+**Decision: neither A nor B.** Feedback: the camera feed should be visible alongside the canvas by default (not hidden, reversing today's actual default), with an option to hide it — and a dedicated **"Show the magic"** control that, while the camera is visible, overlays the body-tracking skeleton on the feed and exposes the real mechanism: the raw input decimals plus the actual, verbatim source of whichever function is computing that behavior right now.
+
+**C — canvas + camera default, "Show the magic" toggle**
+
+Default state (magic off):
+
+```
++------------------------------------------+
+|  [Pause] [Finish]  [Show the magic] [Stop]|
+|                                            |
+|  +----------------------+  +------------+ |
+|  |                      |  |  (camera   | |
+|  |   (growing artwork)  |  |   preview, | |
+|  |                      |  |   visible  | |
+|  |                      |  |   default) | |
+|  +----------------------+  +------------+ |
+|                              [hide camera] |
++------------------------------------------+
+```
+
+With "Show the magic" toggled on:
+
+```
++------------------------------------------+
+|  [Pause] [Finish]  [Hide the magic] [Stop]|
+|                                            |
+|  +----------------------+  +------------+ |
+|  |                      |  | (camera +  | |
+|  |   (growing artwork)  |  |  pose-     | |
+|  |                      |  |  tracking  | |
+|  |                      |  |  skeleton  | |
+|  +----------------------+  |  overlay)  | |
+|                             +------------+ |
+|                              [hide camera] |
+|                                            |
+|  expansion 0.62   speed 0.41   symmetry 0.88 |
+|                                            |
+|  growthStep = baseRate x dt x (floor +    |
+|               speed x (1 - floor))        |
+|             = 0.00005 x 16.67 x (0.06 +   |
+|               0.41 x 0.94)                |
+|             = 0.00035                     |
++------------------------------------------+
+```
+
+The skeleton overlay depends on the camera feed being visible (it draws on top of it); the decimals and live-formula view don't strictly need to, and could stay available even with the camera hidden — worth deciding explicitly rather than assuming, when this gets built.
+
+**Refinement (second feedback pass):**
+- `[ Start ]` (from Idle) becomes `[ Pause ]` in the same top-row slot — not a separate button. Clicking it toggles the label to `[ Resume ]` in place.
+- `[Show the magic]` moves out of the top control row entirely — it's a canvas-viewing option, not a session control, so it now sits under the canvas.
+- The decimals go back to the app's existing bar-plus-number style (`readout.ts`'s current pattern), not a plain text line.
+- `[ Stop ]` is removed — too easy to confuse with `[ Finish ]`, the same adjacency risk flagged earlier in this whole exercise. In its place: an optional `[ Restart ]`, which abandons the current piece and begins a fresh one, gated behind a confirmation (since it's destructive in a way Pause/Finish aren't), and carries forward the session's current camera/magic display settings rather than resetting them.
+- **Sub-question resolved (third feedback pass, 2026-08-23):** raw source, not a curated formula. The honesty bar the founder set: someone who reads code should be able to watch the panel and verify what's actually running, not trust a summary of it — a formula translated for readability, however faithful, is still a claim standing between the viewer and the code, and can only be trusted, not checked. Scoped to the function actually computing the behavior (not the whole file it lives in), so the crop is a function boundary, not an editorial choice about what counts as "the mechanism." Checked against the real code (`branch.ts`, `params-from-landmarks.ts`) and confirmed the mechanism isn't one function per readout number — Speed drives its own function (`growthStepFor`); Expansion and Symmetry are both inputs to one shared function (`wanderDeltaFor`), not two independent ones. So the panel gives the viewer two lenses matching the two real functions, not three matching the three readout numbers, which would have implied a separation the code doesn't have. **This is illustrative of the pattern, not a locked contract** — the app is still in active dev, and `growthStepFor`/`wanderDeltaFor` may be renamed, split, or restructured before Deliver. The decision that survives any such refactor: two tabs, each grouped by real function boundary (not by readout label), each showing that function verbatim with its live argument values annotated inline, whatever that function is called by the time this gets built.
+
+```
++------------------------------------------+
+|  [ Pause ]      [ Finish ]     [Restart]  |
+|                                            |
+|  +----------------------+  +------------+ |
+|  |                      |  |  (camera   | |
+|  |   (growing artwork)  |  |   preview) | |
+|  |                      |  |            | |
+|  +----------------------+  +------------+ |
+|                              [hide camera] |
+|                                            |
+|            [ Show the magic ]             |
++------------------------------------------+
+```
+
+With the magic shown (and mid-pause, to demonstrate the label toggle):
+
+```
++------------------------------------------+
+|  [ Resume ]     [ Finish ]     [Restart]  |
+|                                            |
+|  +----------------------+  +------------+ |
+|  |                      |  | (camera +  | |
+|  |   (growing artwork)  |  |  skeleton  | |
+|  |                      |  |  overlay)  | |
+|  +----------------------+  +------------+ |
+|                              [hide camera] |
+|                                            |
+|            [ Hide the magic ]             |
+|                                            |
+|  [ Speed -> growth ]  [ Expansion & Symmetry -> wander ] |
+|  +--------------------------------------+ |
+|  | branch.ts : growthStepFor()           | |
+|  |                                        | |
+|  | export function growthStepFor(args: { | |
+|  |   dt: number,        // 16.67         | |
+|  |   speed: number,     // 0.41          | |
+|  |   baseGrowthPerTick, // 0.00005       | |
+|  |   tuning,                             | |
+|  | }): number {                          | |
+|  |   const speedFloor = tuning.speedFloor;|
+|  |                      // 0.06          | |
+|  |   return baseGrowthPerTick * dt *     | |
+|  |     (speedFloor + speed*(1-speedFloor)); |
+|  | }                                     | |
+|  |                                        | |
+|  |   -> 0.00035                          | |
+|  +--------------------------------------+ |
+|  (illustrative -- real fn as of 2026-08-23; |
+|   whichever fn actually does this by build) |
+|                                            |
+|  Expansion   [======------]  0.62         |
+|  Speed       [====--------]  0.41         |
+|  Symmetry    [========----]  0.88         |
++------------------------------------------+
+```
+
+The other tab swaps the code block to that function's own real source (`wanderDeltaFor` as of this writing) with its own live-annotated arguments — same pattern, different function. The bar-plus-number readout for all three params stays visible underneath regardless of which tab is selected.
+
+`[ Restart ]`'s confirmation, since it's the one destructive action left on this screen:
+
+```
++------------------------------------------+
+|  Restart?                                 |
+|  This discards the current piece and      |
+|  starts a fresh one. Your camera and      |
+|  magic display settings carry over.       |
+|                                            |
+|         [ Cancel ]      [ Restart ]       |
++------------------------------------------+
+```
+
+One thing worth flagging rather than deciding silently: putting `[Restart]` back in the same top row as `[Finish]` risks quietly recreating the exact adjacency problem Stop just got removed for. The confirmation dialog is a real safety net, but `[Restart]`'s visual treatment (color, spacing) should stay clearly distinct from `[Finish]` in Deliver, not just rely on the confirm step to do all the work.
+
+## Finish / save-discard
+
+*Testing: binary Save/Discard, or a multi-path decision point (the Midjourney-inspired synthesis theme)?*
+
+**A — binary, hierarchy fixed**
+
+```
++------------------------------------------+
+|  Session finished.                        |
+|                                            |
+|  +--------------------------------------+ |
+|  |       (frozen finished piece)         | |
+|  +--------------------------------------+ |
+|                                            |
+|         [ Keep this piece ]               |
+|                                            |
+|              discard                      |
+|         (small, quiet, text-only)         |
++------------------------------------------+
+```
+
+Same two outcomes as today, but no longer equal-weight adjacent buttons — Keep is the obvious primary action, Discard is deliberately smaller and separated, closing the earlier Stop/Finish-style misclick risk without changing the underlying model.
+
+**B — multi-path**
+
+```
++------------------------------------------+
+|  Session finished.                        |
+|                                            |
+|  +--------------------------------------+ |
+|  |       (frozen finished piece)         | |
+|  +--------------------------------------+ |
+|                                            |
+|   [ Keep ]      [ Keep moving ]           |
+|                                            |
+|              discard                      |
+|         (small, quiet, text-only)         |
++------------------------------------------+
+```
+
+A real third path — "Keep moving" resumes the same session instead of forcing a hard stop, the direct answer to the Midjourney finding (keep/reroll/vary/discard, not just a binary).
+
+**Decision: neither A nor B as drawn.** Feedback: all three paths at the same level, as real equal-status buttons — Discard included. Explicitly rejected the earlier "small, quiet, text-only" treatment for Discard as a dark pattern: discarding is a genuinely equally valid choice (the same principle the product already applies to effort — no judgment between valid options), so visually diminishing it would nudge against a choice the product itself claims not to rank. A distinct, more neutral/muted color for Discard is fine, purely to lower the odds of an accidental misclick — but same size, same weight, same button treatment as the other two. "Keep" renamed to "Save this piece" for concreteness.
+
+**C — three equal-weight buttons, one row**
+
+```
++------------------------------------------+
+|  Session finished.                        |
+|                                            |
+|  +--------------------------------------+ |
+|  |       (frozen finished piece)         | |
+|  +--------------------------------------+ |
+|                                            |
+|  [ Save this piece ] [ Keep moving ]      |
+|  [ Discard ]                              |
+|  (Discard: same size/weight as the        |
+|   other two, distinct muted color only)   |
++------------------------------------------+
+```
+
+**Refinement (second feedback pass):** rather than a separate button row below the canvas, the three decision buttons *replace* the top control row directly — the same zone that held `[Pause] [Finish] [Restart]` a moment earlier now holds the decision buttons instead, so every session-level control lives in exactly one place throughout the whole flow, never a second location.
+
+```
++------------------------------------------+
+|  [Save this piece] [Keep moving][Discard] |
+|                                            |
+|  +--------------------------------------+ |
+|  |       (frozen finished piece)         | |
+|  +--------------------------------------+ |
++------------------------------------------+
+```
+
+`[ Restart ]` doesn't reappear here — it's a mid-session, still-growing-piece action; once Finish has already been clicked, `[ Keep moving ]` covers the "I'm not actually done" case instead, which is a resume, not a full discard-and-restart.
+
+## Dev tools zone
+
+*Out of scope for this doc's actual subject (the real, shipped user's experience — a dev/QA user is a genuinely different persona from the one everything above is designed for), but explicitly addressed here so a builder reading this doc later doesn't mistake silence for "remove these." All three of the app's existing dev-only affordances — the slider input adapter, the pose-tuning jitter slider, and the backend-knobs tuning panel — are consolidated into one clearly-marked zone, instead of staying scattered across the main controls row and two separate divs the way they are today. Never appears in a production build; this whole zone is dev-build-only, same as it is now.*
+
+Collapsed by default, sitting outside and below the real session flow entirely — never inside the top control row that Idle/live-session/finish share:
+
+```
++------------------------------------------+
+|  ... (real app content above) ...         |
+|                                            |
+|  --------------------------------------   |
+|  [ Show dev tools ]  (dev builds only)    |
++------------------------------------------+
+```
+
+Expanded:
+
+```
++------------------------------------------+
+|  DEV TOOLS -- never shown in production   |
+|  +--------------------------------------+ |
+|  | Input source:                         | |
+|  |   [ Use camera ]   [ Use sliders ]    | |
+|  |                                        | |
+|  | Pose jitter floor  [====------] 0.15  | |
+|  |                                        | |
+|  | World knobs / tuning config           | |
+|  |   hueBase          [=====-----]       | |
+|  |   branchDensity    [===-------]       | |
+|  |   ... (remaining knob/tuning sliders) | |
+|  |                                        | |
+|  |   [ Export current values ]           | |
+|  +--------------------------------------+ |
++------------------------------------------+
+```
+
+---
+
+*Done: a direction is now chosen for all three screens (Idle: B, revised; Live session: C; Finish: C) — see the "Decision" note under each screen above. The one open sub-question (curated formula vs. raw source for "Show the magic") is now resolved in favor of raw source, verbatim, windowed to whichever real function drives the behavior — see the third-feedback-pass note under Live session. Develop is complete.*
