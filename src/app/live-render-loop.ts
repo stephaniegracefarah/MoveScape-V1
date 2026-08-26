@@ -46,8 +46,21 @@ export interface LiveRenderLoop {
   feed(params: MovementParams): void;
   /** Cancel the render loop. Does not touch the style, world, or canvas contents. */
   stop(): void;
+  /**
+   * Re-schedules the render loop after `stop()` -- the "Keep moving" flow
+   * (UX Stage 1): the same style/world/recording/accumulator state picks up
+   * exactly where it left off (permanent-ink geometry already drawn stays
+   * drawn), since nothing about this session is rebuilt. Resets
+   * `lastFrameTimestamp` so the wall-clock gap between stop() and resume()
+   * is never counted as elapsed session time -- the same reasoning
+   * pause-awareness already uses. A no-op if the loop isn't currently
+   * stopped, so a stray double-call can't schedule two competing rAF loops.
+   */
+  resume(): void;
   /** The session's recording so far -- read by the caller at session end (M5) to build a PieceRecipe. Never mutated externally. */
   getRecording(): MovementRecording;
+  /** Total simulated session time elapsed so far, in ms -- pause-aware (frozen while `isPaused()` is true) and frozen at its last value once `stop()` has been called. Drives the header session timer (UX Stage 1). */
+  getElapsedMs(): number;
 }
 
 export function createLiveRenderLoop(
@@ -126,8 +139,17 @@ export function createLiveRenderLoop(
       stopped = true;
       if (rafHandle !== null) cancelAnimationFrame(rafHandle);
     },
+    resume(): void {
+      if (!stopped) return;
+      stopped = false;
+      lastFrameTimestamp = null;
+      rafHandle = requestAnimationFrame(frame);
+    },
     getRecording(): MovementRecording {
       return recording;
+    },
+    getElapsedMs(): number {
+      return sessionElapsedMs;
     },
   };
 }

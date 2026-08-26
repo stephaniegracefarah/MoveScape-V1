@@ -235,3 +235,112 @@ describe('createLiveRenderLoop — pause freezes tick advancement', () => {
     expect(raf.cancelled).toBe(true);
   });
 });
+
+describe('createLiveRenderLoop — getElapsedMs', () => {
+  it('tracks the same pause-aware elapsed time the tick-advance logic uses internally', () => {
+    const raf = stubRaf();
+    const { style } = createStubStyle();
+    let paused = false;
+    const loop = createLiveRenderLoop(
+      style,
+      createStubWorld(),
+      createStubCanvas(),
+      10,
+      () => {},
+      () => paused,
+      createUnusedBufferFactory(),
+    );
+
+    expect(loop.getElapsedMs()).toBe(0);
+
+    raf.fireNextFrame(0);
+    raf.fireNextFrame(1000);
+    expect(loop.getElapsedMs()).toBe(1000);
+
+    paused = true;
+    raf.fireNextFrame(5000); // 4000ms of wall-clock time passes while paused
+    expect(loop.getElapsedMs()).toBe(1000); // must not have advanced
+
+    paused = false;
+    raf.fireNextFrame(6000);
+    expect(loop.getElapsedMs()).toBe(2000); // resumes counting from where it froze
+
+    loop.stop();
+    expect(loop.getElapsedMs()).toBe(2000); // frozen at its last value once stopped
+  });
+});
+
+describe('createLiveRenderLoop — resume', () => {
+  it('re-schedules the render loop after stop(), without resetting elapsed time or recorded ticks', () => {
+    const raf = stubRaf();
+    const { style, stepCalls } = createStubStyle();
+    const loop = createLiveRenderLoop(
+      style,
+      createStubWorld(),
+      createStubCanvas(),
+      10,
+      () => {},
+      () => false,
+      createUnusedBufferFactory(),
+    );
+
+    raf.fireNextFrame(0);
+    loop.feed(PARAMS);
+    raf.fireNextFrame(SIMULATION_TICK_MS * 3);
+    const stepsBeforeStop = stepCalls.length;
+    const elapsedBeforeStop = loop.getElapsedMs();
+    expect(stepsBeforeStop).toBeGreaterThan(0);
+
+    loop.stop();
+    expect(raf.cancelled).toBe(true);
+
+    loop.resume();
+    expect(loop.getElapsedMs()).toBe(elapsedBeforeStop); // resume alone must not move the clock
+
+    // The wall-clock gap between stop() and the next frame after resume()
+    // must not be counted as elapsed session time -- resume() resets
+    // lastFrameTimestamp, so this next frame only re-establishes a
+    // baseline rather than adding (10000 - elapsedBeforeStop) of "frozen
+    // gap" time.
+    raf.fireNextFrame(10000);
+    expect(loop.getElapsedMs()).toBe(elapsedBeforeStop);
+
+    // A further frame after that baseline advances normally again.
+    raf.fireNextFrame(10000 + SIMULATION_TICK_MS * 2);
+    expect(loop.getElapsedMs()).toBeCloseTo(elapsedBeforeStop + SIMULATION_TICK_MS * 2);
+    expect(stepCalls.length).toBeGreaterThan(stepsBeforeStop);
+
+    loop.stop();
+  });
+
+  it('is a no-op when the loop is not currently stopped', () => {
+    let rafCallCount = 0;
+    const pending: { callback: ((now: number) => void) | null } = { callback: null };
+    vi.stubGlobal('requestAnimationFrame', (cb: (now: number) => void) => {
+      rafCallCount++;
+      pending.callback = cb;
+      return rafCallCount;
+    });
+    vi.stubGlobal('cancelAnimationFrame', () => {});
+
+    const { style } = createStubStyle();
+    const loop = createLiveRenderLoop(
+      style,
+      createStubWorld(),
+      createStubCanvas(),
+      10,
+      () => {},
+      () => false,
+      createUnusedBufferFactory(),
+    );
+    expect(rafCallCount).toBe(1); // the loop's own initial schedule
+
+    loop.resume(); // running (never stopped) -- must not add a second schedule
+    expect(rafCallCount).toBe(1);
+
+    pending.callback?.(0); // the one real pending frame still fires normally
+    expect(rafCallCount).toBe(2); // the frame's own next-frame schedule, not a leftover from resume()
+
+    loop.stop();
+  });
+});
