@@ -342,7 +342,10 @@ describe('createBotanicalStyle — expansion scales blossom cluster size', () =>
 });
 
 describe('createBotanicalStyle — gradual "watercolor" blossom reveal', () => {
-  it('a freshly-matured cluster reveals a few blossoms at a time, not all at once', () => {
+  // 60s timeout: the 3000-tick run below takes ~7s in isolation on the dev
+  // machine but far longer under a full-suite run's load; the assertions, not
+  // the clock, carry this test's meaning, so the budget is deliberately loose.
+  it('a freshly-matured cluster reveals a few blossoms at a time, not all at once', { timeout: 60_000 }, () => {
     const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0 };
     const { renderer, state } = createBotanicalInternal({ blossomRevealIntervalMs: 40 });
     renderer.init(createWorld('gradual-reveal-seed', 0, overrides));
@@ -651,7 +654,10 @@ describe('createBotanicalStyle — bounded branch/element count', () => {
     // that session's own handoff entry) -- this specific FAST_CYCLE_OVERRIDES
     // + large-dt scenario produces enough concurrent unresolved blossoms
     // to need more wall-clock time than the default budget, not a hang.
-    30000,
+    // Re-bumped 30s -> 120s in session 022: measured 43.6s in isolation on
+    // the dev machine (timing out at 30s), and slower still under full-suite
+    // load -- the bound this test guards is the element-count ratio, not speed.
+    120_000,
   );
 });
 

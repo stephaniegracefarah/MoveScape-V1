@@ -54,8 +54,26 @@ const SEED_LABEL_SEPARATOR = String.fromCharCode(1);
  * `canvasSize`. Same seed always paints byte-identical pixels: every
  * position/radius/opacity/color-index draw comes from one seeded stream,
  * in the fixed order documented inline below.
+ *
+ * `grainScale` (default 1, added for src/compositor/export-render.ts's
+ * high-resolution export path): a multiplier on the fine-grain pass's
+ * device-pixel radius only. The mottling pass already sizes itself as a
+ * fraction of `shorterSide`, so it scales itself correctly for free at any
+ * `canvasSize` -- but the grain pass's radius (GRAIN_RADIUS_MIN_PX/SPAN_PX
+ * above) is a fixed *device-pixel* count, deliberately NOT normalized
+ * (this file's own top doc comment). Rendered at export resolution (e.g. 3x
+ * the live canvas's pixel dimensions) with `grainScale` left at 1, the same
+ * ~450 flecks at the same ~1px radius would occupy a proportionally smaller
+ * fraction of the (now 3x wider/taller) canvas than they do live -- the
+ * grain would visually thin out relative to the artwork instead of looking
+ * like the same paper at higher fidelity. Passing the export's pixel scale
+ * here (e.g. 3) keeps each fleck's radius proportional to the artwork's own
+ * resolution, so grain density reads the same regardless of export scale.
+ * Purely a post-multiply on each draw's radius -- never changes the seeded
+ * stream's draw order/count, so this stays exactly as deterministic as
+ * before (same seed + same grainScale always paints byte-identical pixels).
  */
-export function renderPaperGround(ctx: CanvasLike, canvasSize: CanvasSize, seed: string): void {
+export function renderPaperGround(ctx: CanvasLike, canvasSize: CanvasSize, seed: string, grainScale = 1): void {
   const draw = createMulberry32(cyrb53(`${seed}${SEED_LABEL_SEPARATOR}paper-ground`));
   const shorterSide = Math.min(canvasSize.width, canvasSize.height);
 
@@ -86,7 +104,7 @@ export function renderPaperGround(ctx: CanvasLike, canvasSize: CanvasSize, seed:
   for (let i = 0; i < GRAIN_COUNT; i++) {
     const x = draw();
     const y = draw();
-    const radiusPx = GRAIN_RADIUS_MIN_PX + draw() * GRAIN_RADIUS_SPAN_PX;
+    const radiusPx = (GRAIN_RADIUS_MIN_PX + draw() * GRAIN_RADIUS_SPAN_PX) * grainScale;
     const opacity = GRAIN_OPACITY_MIN + draw() * GRAIN_OPACITY_SPAN;
     const colorIndex = Math.floor(draw() * TONE_PALETTE.length);
 

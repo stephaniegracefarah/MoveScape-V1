@@ -1,29 +1,58 @@
 /**
  * Committed pixel-divergence regression test (docs/HANDOFF.md, session 019's
  * investigation): asserts the live incremental compositor produces pixels
- * IDENTICAL to the old, correct-by-construction renderScene() at every
- * checkpoint, across several seeds, under realistic movement pacing plus a
+ * IDENTICAL to the per-bucket reference renderer at every checkpoint, across
+ * several seeds, under realistic movement pacing plus a
  * FAST_CYCLE_OVERRIDES-style stress scenario -- see render-divergence-
  * harness.ts's own doc comment for the full method (session 018's proven
  * technique, now a committed, reusable tool instead of an ad hoc script
  * rebuilt from scratch every time this bug class is suspected).
  *
- * RED ON PURPOSE, right now: at this branch's current tip
- * (fix-cross-root-bake-order), this test FAILS. Session 019's diagnostic
- * sweep (docs/HANDOFF.md) found real, growing, non-self-healing divergence
- * starting a few simulated seconds into a realistic session (default
- * tuning, rootCount forced to 2) -- confirming the founder's still-open
- * "still happening" report is a real, currently-unfixed bug, not a
- * synthetic-stress-only artifact. Gated behind the RENDER_DIVERGENCE=1 env
- * var (not a permanent .skip) so the default `npm test` run stays green
- * while this remains unresolved:
+ * STATUS AS OF THE 2026-08-23 FOUNDER-DECISION SESSION: the harness's
+ * reference renderer was realigned to paint in the SAME fixed bucket order
+ * (echo1 -> echo0 -> foreground) the live compositor uses, per the founder's
+ * decision that this ordering is the intended look, not a bug (see
+ * render-divergence-harness.ts's own top doc comment and live-compositor.ts's
+ * BUCKET_PAINT_ORDER comment). That realignment eliminated the ~4-6k px
+ * "cross-bucket z-overlap" divergence this test used to report structurally
+ * (confirmed: the divergence documented below has a DIFFERENT signature --
+ * small onset, growing over tens of seconds, localized to blossom-dense
+ * regions -- not the broad, near-immediate divergence the old global-z-sort
+ * reference produced).
+ *
+ * STILL RED, for a real, DIFFERENT, and already partly self-documented
+ * reason: re-running all 4 scenarios after the realignment (all 3 realistic
+ * seeds plus the stress scenario) still shows non-zero, GROWING divergence
+ * -- e.g. seed div-regress-1: 308px at 15.0s growing to ~22.6k px by 60s;
+ * div-regress-2: 359px at 27.0s growing to ~5.6k px by 60s; div-regress-3:
+ * 8px at 21.0s growing to ~4.1k px by 60s; the stress scenario: 26px at 7.0s
+ * growing to ~5.7k px by 25s. Traced (render-divergence-harness.ts's
+ * traceElementsNear + runPermanenceOracleScenario) to a SEPARATE, PRE-
+ * EXISTING gap already called out in botanical.ts's own doc comment
+ * (resolveBucketBakeThreats, "BLOSSOMS TOO" section, session 021): a
+ * revealed blossom's bake safety is checked against other content's
+ * threats, but a blossom, once resolved and baked, is never itself ADDED to
+ * the threat list other unresolved content (branches or later blossoms)
+ * checks against -- so a farther-z branch/blossom can still bake AFTER an
+ * already-baked nearer blossom and get drawn on top of it in the wrong
+ * order. The permanence oracle found zero whole-segment "vanish" events in
+ * the same window (content replaced by bare paper) -- consistent with this
+ * being a content-OVER-content overwrite (a mispainted stacking order, both
+ * layers still dark/content-colored), which that oracle is not designed to
+ * catch, not a contradiction of the finding. NOT fixed here -- out of this
+ * session's scope (Task 1 was harness alignment only, not new compositor
+ * fixes) -- reported per the investigation brief instead of being papered
+ * over with a tolerance/threshold.
+ *
+ * Still gated behind the RENDER_DIVERGENCE=1 env var (not a permanent
+ * .skip) so the default `npm test` run stays green while this remains
+ * unresolved:
  *
  *   RENDER_DIVERGENCE=1 npx vitest run src/compositor/render-divergence.test.ts
  *
  * Un-gate this (drop the RUN indirection below, always use `describe`) in
- * the SAME PR that lands the actual fix -- this test passing is meant to be
- * the fix's own acceptance criterion, not a side observation collected
- * after the fact.
+ * the SAME PR that lands a fix for the blossom-threat gap above -- this
+ * test passing is meant to be that fix's own acceptance criterion.
  */
 import { describe, expect, it } from 'vitest';
 import type { WorldOverrides } from '../world/world';

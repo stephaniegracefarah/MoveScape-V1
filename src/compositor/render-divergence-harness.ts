@@ -1,22 +1,41 @@
 /**
  * A committed pixel-divergence diagnostic harness for the live incremental
- * compositor (live-compositor.ts) vs. the old, correct-by-construction
- * full-redraw renderer (render-scene.ts's renderScene). Promotes session
- * 018's ad hoc, never-committed pixel-diff tool (docs/HANDOFF.md, "Worth
- * considering") into a real, reusable module, so it doesn't need to be
- * rebuilt from scratch every time this bug class is suspected.
+ * compositor (live-compositor.ts) vs. a per-bucket reference renderer built
+ * on render-scene.ts's renderScene(). Promotes session 018's ad hoc,
+ * never-committed pixel-diff tool (docs/HANDOFF.md, "Worth considering")
+ * into a real, reusable module, so it doesn't need to be rebuilt from
+ * scratch every time this bug class is suspected.
  *
- * Method (session 018's proven technique, replicated exactly): drive ONE
- * botanical instance through the REAL live path every tick --
+ * FOUNDER DECISION (2026-08-23, docs/HANDOFF.md): the live compositor's
+ * fixed bucket paint order (echo1 -> echo0 -> foreground, echoes always
+ * behind foreground, see live-compositor.ts's BUCKET_PAINT_ORDER and its own
+ * doc comment) IS the intended look for styles that implement sceneLayers().
+ * Through session 019, this harness's reference render called plain
+ * `renderScene()` on the WHOLE scene at once, which z-sorts globally --
+ * disagreeing with the live compositor wherever echo and foreground z-ranges
+ * overlap on screen (~4-6k px residual divergence, "cross-bucket z-overlap"
+ * in docs/HANDOFF.md's "Still open" list). That made the reference the
+ * deviant, not the live compositor: renderScene()'s global sort is correct
+ * for styles that DON'T implement sceneLayers() (unchanged, still what
+ * export/finish() and the determinism tests use), but was never the right
+ * authority for a style that has declared its own bucket structure. The
+ * reference below (`renderSceneByBucket`) is now correct-by-construction for
+ * that design: it groups elements into the SAME buckets live-compositor.ts
+ * uses, and paints them in the SAME fixed order, reusing renderScene()'s own
+ * z-sort/draw logic once per bucket (never reimplementing the draw math).
+ *
+ * Method (session 018's proven technique, still the same otherwise): drive
+ * ONE botanical instance through the REAL live path every tick --
  * `renderer.step()` then `sceneLayers()` -> `computeCanvasSize()` ->
  * `compositor.renderFrame()`, exactly like src/app/live-render-loop.ts's
  * frame() does -- using a real @napi-rs/canvas-backed OffscreenBufferFactory
  * (the same DI boundary main.ts's DOM implementation satisfies). At
- * checkpoints, render the SAME state fresh through the old, provably-correct
- * `renderScene()` on a separate canvas of the identical size, and diff raw
- * RGBA pixels. Any divergence is unambiguous evidence of a real live-
- * compositor bug -- render-scene.ts re-sorts and repaints every element
- * fresh, every call, so it cannot itself have a permanent-bake-ordering bug.
+ * checkpoints, render the SAME state fresh through `renderSceneByBucket` on
+ * a separate canvas of the identical size, and diff raw RGBA pixels. Any
+ * remaining divergence is unambiguous evidence of a real live-compositor
+ * bug -- the reference re-sorts and repaints every element fresh, every
+ * call, within each bucket, so it cannot itself have a permanent-bake-
+ * ordering bug.
  *
  * @napi-rs/canvas is a devDependency imported ONLY from this file and its
  * companion test (render-divergence.test.ts) -- never from production
@@ -54,9 +73,38 @@ import { computeCanvasSize, renderScene, type CanvasLike, type CanvasSize } from
 import type { Branch } from '../styles/botanical/branch';
 import { createBotanicalInternal, type BotanicalState } from '../styles/botanical/botanical';
 import type { BotanicalTuningConfig } from '../styles/botanical/tuning-config';
-import type { SceneLayer } from '../styles/style-renderer';
+import type { SceneElement, SceneLayer } from '../styles/style-renderer';
 import type { WorldOverrides } from '../world/world';
 import { createWorld } from '../world/world';
+
+/** Same fixed paint order as live-compositor.ts's own (unexported) BUCKET_PAINT_ORDER -- duplicated here for the same reason bucketForLayerId below duplicates bucketFor: this harness must mirror the real module's behavior, not import its internals. */
+const BUCKET_PAINT_ORDER: ('echo1' | 'echo0' | 'foreground')[] = ['echo1', 'echo0', 'foreground'];
+
+/**
+ * The correct-by-construction reference renderer for a style that
+ * implements sceneLayers() (see this file's own top doc comment for the
+ * founder decision this encodes). Groups every layer's elements into the
+ * same three buckets live-compositor.ts uses (echo1/echo0/foreground, via
+ * bucketForLayerId below -- the same bucket assignment as live-
+ * compositor.ts's own bucketFor), then paints bucket by bucket, in
+ * BUCKET_PAINT_ORDER, straight onto `ctx` -- each bucket a fresh call to the
+ * real `renderScene()` (so within-bucket z-sort/draw math is never
+ * reimplemented, just reused), one bucket's paint compositing directly on
+ * top of the previous bucket's, exactly matching live-compositor.ts's own
+ * blit-then-live-draw sequence per bucket. renderScene() does not clear the
+ * canvas itself (its own doc comment) -- calling it three times in a row on
+ * the same `ctx` IS the "composited in bucket order onto one reference
+ * canvas" this function exists to do; no separate compositing step needed.
+ */
+export function renderSceneByBucket(ctx: CanvasLike, layers: SceneLayer[], canvasSize: CanvasSize): void {
+  const byBucket: Record<'echo1' | 'echo0' | 'foreground', SceneElement[]> = { echo1: [], echo0: [], foreground: [] };
+  for (const layer of layers) {
+    byBucket[bucketForLayerId(layer.layerId)].push(...layer.elements);
+  }
+  for (const bucket of BUCKET_PAINT_ORDER) {
+    renderScene(ctx, { elements: byBucket[bucket] }, canvasSize);
+  }
+}
 
 // --- Real-canvas OffscreenBufferFactory (main.ts's DOM implementation, ---
 // --- ported to @napi-rs/canvas) -----------------------------------------
@@ -356,7 +404,7 @@ export function traceElementsNear(state: BotanicalState, worldBBox: PixelBBox): 
   return entries;
 }
 
-/** Min/max z actually EMITTED right now (i.e. read straight off the SceneLayer output both renderers consume -- botanical.ts's emitGrowthSystem already folds each echo's zOffset into element.z, `clamp01(branch.z/blossom.z + zOffset)`, so this is the true on-screen depth value, not the raw pre-offset internal z the branch/blossom object itself carries), split by bucket ('echo0'/'echo1'/'foreground' -- mirrors live-compositor.ts's own bucketFor grouping exactly, duplicated here rather than imported since bucketFor itself isn't exported). Used to check the echo-vs-foreground z-range overlap red herring named in the investigation brief: if these ranges overlap, renderScene's global z-sort and the live compositor's fixed echo1->echo0->foreground bucket paint order can legitimately disagree wherever echo and foreground content overlap on screen, independent of any bake-order bug. */
+/** Min/max z actually EMITTED right now (i.e. read straight off the SceneLayer output both renderers consume -- botanical.ts's emitGrowthSystem already folds each echo's zOffset into element.z, `clamp01(branch.z/blossom.z + zOffset)`, so this is the true on-screen depth value, not the raw pre-offset internal z the branch/blossom object itself carries), split by bucket ('echo0'/'echo1'/'foreground' -- mirrors live-compositor.ts's own bucketFor grouping exactly, duplicated here rather than imported since bucketFor itself isn't exported). Historical note (pre-2026-08-23 founder decision, see this file's top doc comment): this was originally built to check whether echo/foreground z-ranges overlap, since a plain global-sort reference would legitimately disagree with the live compositor's fixed bucket order wherever they did. Now that the reference itself (renderSceneByBucket) paints in the same fixed bucket order, an echo/foreground z overlap is no longer a source of expected divergence -- kept as general diagnostic evidence for tracing any divergence that DOES occur. */
 export interface ZRangeReport {
   foreground: { min: number; max: number } | null;
   echo0: { min: number; max: number } | null;
@@ -497,7 +545,7 @@ export function runDivergenceScenario(options: RunScenarioOptions): ScenarioRunR
 
     const ground = createDestCanvas(canvasSize);
     renderPaperGround(ground.ctx, canvasSize, world.worldSeed);
-    renderScene(ground.ctx, renderer.scene(), canvasSize);
+    renderSceneByBucket(ground.ctx, layers, canvasSize);
 
     const liveImageData = (dest.ctx as unknown as { getImageData(x: number, y: number, w: number, h: number): { data: Uint8ClampedArray } }).getImageData(0, 0, canvasSize.width, canvasSize.height);
     const groundImageData = (ground.ctx as unknown as { getImageData(x: number, y: number, w: number, h: number): { data: Uint8ClampedArray } }).getImageData(0, 0, canvasSize.width, canvasSize.height);
