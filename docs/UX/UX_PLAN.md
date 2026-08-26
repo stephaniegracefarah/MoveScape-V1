@@ -23,7 +23,7 @@ Compatible with, and can be cited alongside, **ISO 9241-210** ("Ergonomics of hu
 | Discover | **Done** — see [`discover-findings.md`](./discover-findings.md) |
 | Define | **Done** — see [`define.md`](./define.md) |
 | Develop | **Done** — see [`develop.md`](./develop.md); direction chosen for all 3 screens, "Show the magic" resolved in favor of raw source |
-| Deliver | Not started |
+| Deliver | **In progress** — visual design done ("Typewriter Utility"): [`deliver-style-guide/style-guide.md`](./deliver-style-guide/style-guide.md) + the founder's hi-fi mockups in the same folder. Remaining: implementation, then the cold-start usability test deferred from Discover, then refinement checked against Define's success criteria. |
 
 ---
 

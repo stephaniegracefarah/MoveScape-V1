@@ -6,6 +6,23 @@
 
 **Cross-screen layout principle (new, applies to all three screens):** every screen's session-level controls live in the same top row, above the content area — not one screen's controls above the canvas and another's below. `[ Start ]` on Idle becomes `[ Pause ]`/`[ Resume ]` in that exact slot during the live session, and the same slot is replaced by the three save/discard decision buttons once a session finishes — one control zone throughout the whole flow, never a second location.
 
+**Fourth feedback pass (2026-08-24) — full-bleed canvas, from the founder's own hi-fi mockups.** Several structural decisions came out of a real style pass (visual direction: "Typewriter Utility" — warm paper, near-black ink, IBM Plex Mono, plain 1px rectangles, bracket-style `[ Label ]` buttons; "artwork supplies the color," meaning UI chrome carries no color of its own). These are structural, not just visual, so recorded here rather than only in the style guide:
+
+- **The canvas is full-bleed.** It's not a boxed panel inset within the page — it *is* the page background, edge to edge, on every screen. All UI (header, control zone, magic panel, camera) floats on top of it rather than living beside or below it in its own frame. This also settles the earlier open palette question in `UX_PLAN.md`'s Develop phase: the UI doesn't get a separate neutral palette after all — it shares the canvas's own paper tone directly, since the canvas *is* the backdrop everywhere, not a panel next to a separate chrome.
+- **Semi-opaque, canvas-tinted backing on every floating UI element.** Any button, label, or panel that can sit over the canvas gets a background tinted to match the canvas's own base paper color at reduced opacity — invisible (reads as plain paper) wherever there's no art underneath, and a legible scrim wherever there is. This is the resolution to the real legibility risk floating UI over unpredictable art color creates.
+- **Camera moves from an equal-sized side panel to a small picture-in-picture**, bottom-right corner of the canvas, secondary and unobtrusive — consistent with the camera/skeleton already being an opt-in reveal behind "Show the magic," not a default focal point.
+- **"Show the magic" now floats over the canvas itself, docked left**, rather than living in normal flow under the canvas. Deliberate: the canvas is full-bleed now, so the panel has to float *somewhere* over it; left is chosen because growth sweeps left-to-right (`docs/styles/botanical.md`'s "the Scroll"), so the left edge is typically the calmer, already-grown part of the piece rather than the active growth front. Exact size/shape (short vs. tall, compact vs. long) is explicitly deferred until real stats are sitting in it and it can be judged by eye.
+- **A session elapsed-time readout** (`08:42`-style) joins the header next to the wordmark during a live session. Deliberately just elapsed time, not framed as a countdown, streak, or pace metric — checked against Discover's explicit rejection of fitness-gamification framing (theme 5 / competitive analysis) and judged to be on the right side of that line: it's information about the session, not a score.
+- **Discard's button color is revised back to monochrome**, overriding the Finish-section decision below that gave it "a distinct, more neutral/muted color... purely to lower the odds of an accidental misclick." Under the new "artwork supplies all color" discipline, no UI chrome carries color, Discard included — so misclick protection has to come from layout (spacing, order, never adjacent to the equivalent of the old Stop/Finish risk) rather than a color cue. Flagged, not silently dropped: this is a real reversal of an explicit earlier decision, worth double-checking holds up once the three Finish buttons are actually sitting next to each other in bracket-button form.
+
+**Fifth feedback pass (2026-08-25) — the finished hi-fi mockups** (`deliver-style-guide/movescape - high fidelity mockups.png`, four frames: Idle / Live / Finish / Live with magic shown). The mockups confirm the fourth-pass structure throughout, and add three decisions not previously recorded anywhere:
+
+- **The canvas scrolls horizontally as the art grows.** A scroll bar appears at the bottom of the canvas once the piece outgrows the viewport — the full-bleed canvas is a window onto the growing Scroll, not a fixed frame the art is squeezed into. New structural element; nothing earlier in this doc covered what happens when the piece gets longer than the screen.
+- **Finish-screen heading is "This piece is yours."** — replacing the wireframes' placeholder "Session finished." Decided copy, not a sketch.
+- **The Idle explainer card gains two lines**: "…The art responds live while you move **(or don't move)**." and "**Please use a desktop browser for the best experience.**" Both decided copy.
+
+The mockups' own style note that "text / controls will need to be color-responsive or otherwise visible against a variety of colors on the canvas" is already resolved by the fourth-pass scrim decision above — noted here so the mockup annotation isn't mistaken for an open question.
+
 ## Idle / first-load
 
 *Testing: how does the page build trust and set expectations using only itself (Define's success criterion 3)?*
@@ -98,6 +115,8 @@ Spends a moment explaining the concept and the privacy model explicitly before a
 +------------------------------------------+
 ```
 
+**Fourth-pass layout (2026-08-24):** same full-bleed rule as the other two screens — the paper background runs edge to edge behind the header, `[ Start ]`, and the explainer card, all sitting on the semi-opaque canvas-tinted backing described in the fourth-pass note above (here it just blends into plain paper, since there's no art yet to scrim against).
+
 ## Live session
 
 *Testing: should the movement-tracking mechanism be visible or hidden (Discover/Define's central open tension)?*
@@ -166,7 +185,7 @@ With "Show the magic" toggled on:
 ```
 +------------------------------------------+
 |  [Pause] [Finish]  [Hide the magic] [Stop]|
-|                                            |
+|                                           |
 |  +----------------------+  +------------+ |
 |  |                      |  | (camera +  | |
 |  |   (growing artwork)  |  |  pose-     | |
@@ -195,64 +214,71 @@ The skeleton overlay depends on the camera feed being visible (it draws on top o
 - `[ Stop ]` is removed — too easy to confuse with `[ Finish ]`, the same adjacency risk flagged earlier in this whole exercise. In its place: an optional `[ Restart ]`, which abandons the current piece and begins a fresh one, gated behind a confirmation (since it's destructive in a way Pause/Finish aren't), and carries forward the session's current camera/magic display settings rather than resetting them.
 - **Sub-question resolved (third feedback pass, 2026-08-23):** raw source, not a curated formula. The honesty bar the founder set: someone who reads code should be able to watch the panel and verify what's actually running, not trust a summary of it — a formula translated for readability, however faithful, is still a claim standing between the viewer and the code, and can only be trusted, not checked. Scoped to the function actually computing the behavior (not the whole file it lives in), so the crop is a function boundary, not an editorial choice about what counts as "the mechanism." Checked against the real code (`branch.ts`, `params-from-landmarks.ts`) and confirmed the mechanism isn't one function per readout number — Speed drives its own function (`growthStepFor`); Expansion and Symmetry are both inputs to one shared function (`wanderDeltaFor`), not two independent ones. So the panel gives the viewer two lenses matching the two real functions, not three matching the three readout numbers, which would have implied a separation the code doesn't have. **This is illustrative of the pattern, not a locked contract** — the app is still in active dev, and `growthStepFor`/`wanderDeltaFor` may be renamed, split, or restructured before Deliver. The decision that survives any such refactor: two tabs, each grouped by real function boundary (not by readout label), each showing that function verbatim with its live argument values annotated inline, whatever that function is called by the time this gets built.
 
+**Fourth-pass layout (full-bleed canvas, PiP camera):**
+
 ```
 +------------------------------------------+
+|  MoveScape                        08:42   |
 |  [ Pause ]      [ Finish ]     [Restart]  |
 |                                            |
-|  +----------------------+  +------------+ |
-|  |                      |  |  (camera   | |
-|  |   (growing artwork)  |  |   preview) | |
-|  |                      |  |            | |
-|  +----------------------+  +------------+ |
+|                                            |
+|      (full-bleed growing artwork --       |
+|       the canvas IS the page background,  |
+|       edge to edge, not an inset panel)   |
+|                                            |
+|                                            |
+|                                  +------+  |
+|                                  |camera|  |
+|                                  | PiP  |  |
+|                                  +------+  |
 |                              [hide camera] |
 |                                            |
 |            [ Show the magic ]             |
 +------------------------------------------+
 ```
 
-With the magic shown (and mid-pause, to demonstrate the label toggle):
+Header, control-zone buttons, `[hide camera]`, and `[ Show the magic ]` all sit on a semi-opaque canvas-tinted backing (see the fourth-pass note above) so they stay legible over busy art and disappear into plain paper where there isn't any.
+
+With the magic shown (and mid-pause, to demonstrate the label toggle) — fourth-pass layout: full-bleed canvas behind everything, camera stays a PiP bottom-right, and the magic panel is now a floating card docked to the *left* edge of the canvas (not living under it in normal flow), on the same semi-opaque canvas-tinted backing as the rest of the chrome:
 
 ```
 +------------------------------------------+
+|  MoveScape                        08:42   |
 |  [ Resume ]     [ Finish ]     [Restart]  |
 |                                            |
-|  +----------------------+  +------------+ |
-|  |                      |  | (camera +  | |
-|  |   (growing artwork)  |  |  skeleton  | |
-|  |                      |  |  overlay)  | |
-|  +----------------------+  +------------+ |
+|  +--------------------+                   |
+|  | SHOW THE MAGIC     |                   |
+|  | actual code + live |     (full-bleed   |
+|  |       values       |      growing      |
+|  |                    |      artwork,     |
+|  | [Speed->growth]    |      edge to      |
+|  | [Expansion+Symmetry|      edge, behind |
+|  |  ->wander]         |      everything)  |
+|  |                    |                   |
+|  | branch.ts :        |                   |
+|  |  growthStepFor()   |                   |
+|  |                    |                   |
+|  | export function    |                   |
+|  |  growthStepFor(    |                   |
+|  |   args: {          |                   |
+|  |  dt,     // 16.67  |                   |
+|  |  speed,  // 0.41   |                   |
+|  |  ...               |                   |
+|  |  -> 0.00035        |                   |
+|  |                    |                   |
+|  | Expansion   0.62   |                   |
+|  | Speed       0.41   |                   |
+|  | Symmetry    0.88   |                   |
+|  +--------------------+          +------+ |
+|                                   |camera| |
+|                                   | PiP  | |
+|                                   +------+ |
 |                              [hide camera] |
-|                                            |
 |            [ Hide the magic ]             |
-|                                            |
-|  [ Speed -> growth ]  [ Expansion & Symmetry -> wander ] |
-|  +--------------------------------------+ |
-|  | branch.ts : growthStepFor()           | |
-|  |                                        | |
-|  | export function growthStepFor(args: { | |
-|  |   dt: number,        // 16.67         | |
-|  |   speed: number,     // 0.41          | |
-|  |   baseGrowthPerTick, // 0.00005       | |
-|  |   tuning,                             | |
-|  | }): number {                          | |
-|  |   const speedFloor = tuning.speedFloor;|
-|  |                      // 0.06          | |
-|  |   return baseGrowthPerTick * dt *     | |
-|  |     (speedFloor + speed*(1-speedFloor)); |
-|  | }                                     | |
-|  |                                        | |
-|  |   -> 0.00035                          | |
-|  +--------------------------------------+ |
-|  (illustrative -- real fn as of 2026-08-23; |
-|   whichever fn actually does this by build) |
-|                                            |
-|  Expansion   [======------]  0.62         |
-|  Speed       [====--------]  0.41         |
-|  Symmetry    [========----]  0.88         |
 +------------------------------------------+
 ```
 
-The other tab swaps the code block to that function's own real source (`wanderDeltaFor` as of this writing) with its own live-annotated arguments — same pattern, different function. The bar-plus-number readout for all three params stays visible underneath regardless of which tab is selected.
+Size and shape of the floating magic panel (short/wide vs. tall/compact, how much padding, whether the tabs sit above or beside the code) is explicitly left open until it's holding real content and can be judged by eye — this ASCII shape is a placeholder for "floats left, sits on top," not a locked proportion. The other tab swaps the code block to that function's own real source (`wanderDeltaFor` as of this writing) with its own live-annotated arguments — same pattern, different function. The bar-plus-number readout for all three params stays visible underneath regardless of which tab is selected.
 
 `[ Restart ]`'s confirmation, since it's the one destructive action left on this screen:
 
@@ -313,6 +339,8 @@ A real third path — "Keep moving" resumes the same session instead of forcing 
 
 **Decision: neither A nor B as drawn.** Feedback: all three paths at the same level, as real equal-status buttons — Discard included. Explicitly rejected the earlier "small, quiet, text-only" treatment for Discard as a dark pattern: discarding is a genuinely equally valid choice (the same principle the product already applies to effort — no judgment between valid options), so visually diminishing it would nudge against a choice the product itself claims not to rank. A distinct, more neutral/muted color for Discard is fine, purely to lower the odds of an accidental misclick — but same size, same weight, same button treatment as the other two. "Keep" renamed to "Save this piece" for concreteness.
 
+*Revised, fourth feedback pass (2026-08-24):* Discard's distinct color is dropped — see the fourth-pass note under "Live session" above. Under the "artwork supplies all color" rule that came out of the real style pass, no button gets a color cue, Discard included; same size, same weight, same bracket-button treatment as the other two, now including color. Misclick protection has to come from spacing/order instead. Flagged there as worth double-checking once real buttons are sitting next to each other.
+
 **C — three equal-weight buttons, one row**
 
 ```
@@ -339,6 +367,18 @@ A real third path — "Keep moving" resumes the same session instead of forcing 
 |  +--------------------------------------+ |
 |  |       (frozen finished piece)         | |
 |  +--------------------------------------+ |
++------------------------------------------+
+```
+
+**Fourth-pass layout (2026-08-24):** same full-bleed treatment as Live session — the frozen piece is the page background edge to edge, not an inset panel, and the three decision buttons sit on the semi-opaque canvas-tinted backing. All three are now monochrome (see the revision note above):
+
+```
++------------------------------------------+
+|  MoveScape                                |
+|  [Save this piece] [Keep moving][Discard] |
+|                                            |
+|      (full-bleed frozen finished piece,   |
+|       edge to edge, page background)      |
 +------------------------------------------+
 ```
 
@@ -382,4 +422,4 @@ Expanded:
 
 ---
 
-*Done: a direction is now chosen for all three screens (Idle: B, revised; Live session: C; Finish: C) — see the "Decision" note under each screen above. The one open sub-question (curated formula vs. raw source for "Show the magic") is now resolved in favor of raw source, verbatim, windowed to whichever real function drives the behavior — see the third-feedback-pass note under Live session. Develop is complete.*
+*Done: a direction is now chosen for all three screens (Idle: B, revised; Live session: C; Finish: C) — see the "Decision" note under each screen above. The one open sub-question (curated formula vs. raw source for "Show the magic") is now resolved in favor of raw source, verbatim, windowed to whichever real function drives the behavior — see the third-feedback-pass note under Live session. A fourth feedback pass (2026-08-24), prompted by the founder's own hi-fi mockups, moved the canvas to full-bleed, the camera to a PiP, floated the magic panel over the canvas, added a session timer, and reverted Discard to monochrome — see the fourth-pass notes throughout. A fifth pass (2026-08-25) against the finished mockups added the horizontal canvas scroll, the "This piece is yours." finish copy, and the expanded idle copy. Develop is complete; the visual system lives in `deliver-style-guide/style-guide.md`, with the mockups alongside it as the visual reference.*
