@@ -5,6 +5,8 @@
  * reached only through a dynamic import gated behind `import.meta.env.DEV`,
  * so `vite build` (production) never includes its module in the bundle.
  */
+import '@fontsource/ibm-plex-mono/400.css';
+import '@fontsource/ibm-plex-mono/500.css';
 import { createWebcamAdapter } from './adapters/webcam';
 import type { InputAdapter } from './adapters/input-adapter';
 import { createParamsReadout } from './app/readout';
@@ -125,116 +127,271 @@ const app = document.querySelector<HTMLDivElement>('#app');
 
 if (app) {
   app.innerHTML = `
-    <main class="ms-shell">
-      <h1>MoveScape</h1>
-      <p class="ms-privacy">
-        Your camera never leaves this device — all processing happens locally.
-      </p>
-      <div class="ms-controls" id="ms-controls">
-        <button id="ms-start-camera" type="button">Start camera</button>
-        <button id="ms-pause" type="button" hidden>Pause</button>
-        <button id="ms-toggle-preview" type="button" hidden>Show camera</button>
-        <button id="ms-finish" type="button" hidden>Finish</button>
-        <button id="ms-stop" type="button" hidden>Stop</button>
-        <span id="ms-activating" class="ms-activating" hidden>Starting…</span>
+    <div class="ms-canvas-wrap" id="ms-canvas-wrap">
+      <canvas id="ms-canvas" class="ms-canvas" width="${CANVAS_HEIGHT_PX}" height="${CANVAS_HEIGHT_PX}"></canvas>
+    </div>
+
+    <div class="ms-left-stack" id="ms-left-stack">
+      <header class="ms-float ms-header" id="ms-header">
+        <span class="ms-wordmark">movescape</span>
+        <span id="ms-timer" class="ms-timer" hidden>00:00</span>
+      </header>
+
+      <div class="ms-float ms-control-zone" id="ms-controls">
+        <button id="ms-start-camera" type="button" class="ms-btn">[ Start ]</button>
+        <span id="ms-activating" class="ms-activating-label" hidden>Starting…</span>
+        <button id="ms-pause" type="button" class="ms-btn" hidden>[ Pause ]</button>
+        <button id="ms-finish" type="button" class="ms-btn" hidden>[ Finish ]</button>
+        <button id="ms-restart" type="button" class="ms-btn ms-restart-gap" hidden>[ Restart ]</button>
+        <button id="ms-save-piece" type="button" class="ms-btn" hidden>[ Save this piece ]</button>
+        <button id="ms-keep-moving" type="button" class="ms-btn" hidden>[ Keep moving ]</button>
+        <button id="ms-discard-piece" type="button" class="ms-btn" hidden>[ Discard ]</button>
       </div>
-      <div class="ms-controls" id="ms-palette-controls"></div>
-      <div class="ms-canvas-wrap" id="ms-canvas-wrap">
-        <canvas id="ms-canvas" class="ms-canvas" width="${CANVAS_HEIGHT_PX}" height="${CANVAS_HEIGHT_PX}"></canvas>
-      </div>
-      <p id="ms-error" class="ms-error" hidden></p>
-      <div class="ms-session-end" id="ms-session-end" hidden>
-        <p>Session finished. Keep this piece?</p>
-        <div class="ms-controls">
-          <button id="ms-save-piece" type="button">Save piece</button>
-          <button id="ms-discard-piece" type="button">Discard</button>
+
+      <p id="ms-error" class="ms-float ms-status-line" hidden></p>
+      <p id="ms-finish-status" class="ms-float ms-status-line" hidden></p>
+
+      <div id="ms-idle-block" class="ms-idle-block">
+        <div class="ms-panel ms-explainer" id="ms-explainer">
+          <p>Make art with your movement.</p>
+          <p>Your camera feed stays on this device. Nothing is ever uploaded.</p>
+          <p>Move however you want. The art responds live while you move (or don't move).</p>
+          <p>Please use a desktop browser for the best experience.</p>
         </div>
-        <p id="ms-session-end-status" class="ms-status" hidden></p>
+        <div class="ms-float ms-palette-row" id="ms-palette-controls"></div>
       </div>
-      <div id="ms-readout"></div>
-      <div id="ms-pose-tuning"></div>
+    </div>
+
+    <div class="ms-float ms-pip" id="ms-preview-pip" hidden>
       <div id="ms-preview"></div>
-      <div class="ms-backup">
-        <button id="ms-import-recipe" type="button">Import recipe backup…</button>
-        <input id="ms-import-recipe-file" type="file" accept="application/json" hidden />
-        <p id="ms-import-status" class="ms-status" hidden></p>
+      <button id="ms-toggle-preview" type="button" class="ms-btn">[ hide camera ]</button>
+    </div>
+
+    <div class="ms-modal-backdrop" id="ms-restart-dialog" hidden>
+      <div class="ms-panel ms-modal">
+        <p class="ms-modal-title">Restart?</p>
+        <p>This discards the current piece and starts a fresh one. Your camera and magic display settings carry over.</p>
+        <div class="ms-modal-actions">
+          <button id="ms-restart-cancel" type="button" class="ms-btn">[ Cancel ]</button>
+          <button id="ms-restart-do" type="button" class="ms-btn">[ Restart ]</button>
+        </div>
       </div>
-    </main>
+    </div>
+
+    <div class="ms-float ms-backup" id="ms-backup">
+      <button id="ms-import-recipe" type="button" class="ms-btn">[ Import recipe backup… ]</button>
+      <input id="ms-import-recipe-file" type="file" accept="application/json" hidden />
+      <p id="ms-import-status" class="ms-status-line" hidden></p>
+    </div>
+
+    <div id="ms-readout"></div>
+
+    <div id="ms-dev-zone"></div>
   `;
 
   const style = document.createElement('style');
   style.textContent = `
-    body { background: #0f0f13; margin: 0; }
-    .ms-shell { max-width: 480px; margin: 0 auto; padding: 40px 20px;
-      font-family: system-ui, sans-serif; color: #f2f2f2; }
-    .ms-privacy { font-size: 13px; opacity: 0.75; }
-    .ms-controls { display: flex; gap: 8px; margin: 16px 0; flex-wrap: wrap; }
-    .ms-controls button { font: inherit; padding: 8px 14px; border-radius: 6px;
-      border: 1px solid #444; background: #1c1c22; color: #f2f2f2; cursor: pointer; }
-    .ms-controls button:hover { background: #26262e; }
-    .ms-controls button:disabled { opacity: 0.5; cursor: default; }
-    .ms-activating { font-size: 12px; opacity: 0.75; align-self: center; }
-    .ms-error { color: #ff8080; font-size: 13px; }
-    .ms-session-end { margin: 8px 0 16px; padding: 12px; border: 1px solid #444; border-radius: 8px; }
-    .ms-session-end p { margin: 0 0 8px; }
-    .ms-status { font-size: 13px; opacity: 0.85; margin: 8px 0 0; }
-    .ms-status.ms-status-error { color: #ff8080; }
-    .ms-backup { margin-top: 24px; padding-top: 16px; border-top: 1px solid #333; }
-    .ms-backup button { font: inherit; padding: 8px 14px; border-radius: 6px;
-      border: 1px solid #444; background: #1c1c22; color: #f2f2f2; cursor: pointer; }
-    .ms-canvas-wrap { overflow-x: auto; max-width: 100%; border-radius: 8px;
-      margin: 4px 0 16px; background: #f7f0e3; }
-    .ms-canvas { display: block; height: ${CANVAS_HEIGHT_PX}px; width: auto; }
-    #ms-readout.ms-paused { opacity: 0.55; }
-    .ms-preview-video { display: block; margin-top: 12px; max-width: 320px; width: 100%;
-      border-radius: 8px; transform: scaleX(-1); background: #000; }
+    :root {
+      --paper: #f7f0e3;
+      --ink: #241a17;
+      --scrim: rgba(247, 240, 227, 0.88);
+    }
+
+    html, body {
+      margin: 0;
+      height: 100%;
+      overflow: hidden;
+      background: var(--paper);
+    }
+
+    body {
+      font-family: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+      color: var(--ink);
+    }
+
+    .ms-canvas-wrap {
+      position: fixed;
+      inset: 0;
+      overflow-x: auto;
+      overflow-y: hidden;
+      background: var(--paper);
+      z-index: 0;
+    }
+    .ms-canvas { height: 100%; width: auto; display: block; }
+
+    .ms-left-stack {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      z-index: 10;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      max-width: 380px;
+    }
+
+    .ms-float { background: var(--scrim); padding: 8px 12px; }
+
+    .ms-header { display: flex; align-items: baseline; gap: 24px; }
+    .ms-wordmark { font-size: 14px; font-weight: 500; letter-spacing: 0.04em; }
+    .ms-timer { font-size: 13px; font-weight: 400; font-variant-numeric: tabular-nums; }
+
+    .ms-control-zone { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+    .ms-btn {
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 500;
+      background: none;
+      border: none;
+      color: var(--ink);
+      cursor: pointer;
+      padding: 15px 10px;
+      margin: 0;
+    }
+    .ms-btn:disabled { opacity: 0.5; cursor: default; }
+    .ms-restart-gap { margin-left: 28px; }
+
+    .ms-activating-label { font-size: 13px; font-weight: 400; opacity: 0.75; }
+    .ms-status-line { font-size: 13px; font-weight: 400; }
+
+    .ms-idle-block { display: flex; flex-direction: column; gap: 12px; }
+
+    .ms-panel {
+      border: 1px solid rgba(36, 26, 23, 0.3);
+      background: var(--scrim);
+      padding: 16px;
+    }
+
+    .ms-explainer { width: 360px; max-width: 100%; }
+    .ms-explainer p { margin: 0 0 12px; font-size: 14px; font-weight: 400; line-height: 1.6; }
+    .ms-explainer p:last-child { margin-bottom: 0; }
+
+    .ms-palette-row { display: flex; flex-wrap: wrap; gap: 8px; }
+
+    .ms-pip {
+      position: fixed;
+      right: 16px;
+      bottom: 16px;
+      z-index: 10;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+    .ms-preview-video { display: block; width: 160px; height: auto; transform: scaleX(-1); background: #000; }
+
+    .ms-backup { position: fixed; left: 16px; bottom: 16px; z-index: 10; display: flex; flex-direction: column; gap: 6px; max-width: 260px; }
+
+    .ms-modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      background: rgba(36, 26, 23, 0.4);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .ms-modal { width: 440px; max-width: calc(100vw - 32px); }
+    .ms-modal p { margin: 0 0 12px; font-size: 14px; line-height: 1.6; }
+    .ms-modal-title { font-weight: 500; }
+    .ms-modal-actions { display: flex; gap: 24px; margin-top: 4px; }
+
+    #ms-readout { display: none; }
+
+    /* Several floating containers below set their own non-default
+       display (flex) via a class rule, which -- being an author-origin
+       rule -- otherwise beats the browser's UA-stylesheet default of
+       [hidden] { display: none; } regardless of source order (origin
+       precedence, not specificity, decides that tie). Without these
+       explicit, higher-specificity overrides, toggling the native
+       hidden DOM property on these particular elements would silently
+       do nothing. */
+    #ms-idle-block[hidden],
+    #ms-preview-pip[hidden],
+    #ms-restart-dialog[hidden] {
+      display: none;
+    }
+
+    /* Dev-only zone (Part C): a plain, neutral parent so dev-only elements'
+       own untouched inline dark styling still reads correctly -- restores
+       the same dark-on-dark ambient (body used to be dark globally) that
+       those elements' inline styles were originally written against. */
+    #ms-dev-zone {
+      background: #0f0f13;
+      color: #f2f2f2;
+      font-family: system-ui, sans-serif;
+      font-size: 13px;
+      padding: 16px;
+    }
+    #ms-dev-zone button {
+      font: inherit;
+      padding: 8px 14px;
+      border-radius: 6px;
+      border: 1px solid #444;
+      background: #1c1c22;
+      color: #f2f2f2;
+      cursor: pointer;
+    }
+    #ms-dev-zone button:hover { background: #26262e; }
+    #ms-dev-zone button:disabled { opacity: 0.5; cursor: default; }
   `;
   document.head.appendChild(style);
 
   const readoutContainerRef = app.querySelector<HTMLDivElement>('#ms-readout');
   const previewContainerRef = app.querySelector<HTMLDivElement>('#ms-preview');
   const errorElRef = app.querySelector<HTMLParagraphElement>('#ms-error');
-  const controlsElRef = app.querySelector<HTMLDivElement>('#ms-controls');
   const startCameraBtnRef = app.querySelector<HTMLButtonElement>('#ms-start-camera');
   const pauseBtnRef = app.querySelector<HTMLButtonElement>('#ms-pause');
   const previewToggleBtnRef = app.querySelector<HTMLButtonElement>('#ms-toggle-preview');
+  const previewPipElRef = app.querySelector<HTMLDivElement>('#ms-preview-pip');
   const finishBtnRef = app.querySelector<HTMLButtonElement>('#ms-finish');
-  const stopBtnRef = app.querySelector<HTMLButtonElement>('#ms-stop');
+  const restartBtnRef = app.querySelector<HTMLButtonElement>('#ms-restart');
   const activatingElRef = app.querySelector<HTMLSpanElement>('#ms-activating');
   const canvasElRef = app.querySelector<HTMLCanvasElement>('#ms-canvas');
   const canvasWrapElRef = app.querySelector<HTMLDivElement>('#ms-canvas-wrap');
   const paletteControlsElRef = app.querySelector<HTMLDivElement>('#ms-palette-controls');
-  const sessionEndElRef = app.querySelector<HTMLDivElement>('#ms-session-end');
-  const sessionEndStatusElRef = app.querySelector<HTMLParagraphElement>('#ms-session-end-status');
+  const idleBlockElRef = app.querySelector<HTMLDivElement>('#ms-idle-block');
+  const timerElRef = app.querySelector<HTMLSpanElement>('#ms-timer');
+  const finishStatusElRef = app.querySelector<HTMLParagraphElement>('#ms-finish-status');
   const savePieceBtnRef = app.querySelector<HTMLButtonElement>('#ms-save-piece');
+  const keepMovingBtnRef = app.querySelector<HTMLButtonElement>('#ms-keep-moving');
   const discardPieceBtnRef = app.querySelector<HTMLButtonElement>('#ms-discard-piece');
+  const restartDialogElRef = app.querySelector<HTMLDivElement>('#ms-restart-dialog');
+  const restartCancelBtnRef = app.querySelector<HTMLButtonElement>('#ms-restart-cancel');
+  const restartDoBtnRef = app.querySelector<HTMLButtonElement>('#ms-restart-do');
   const importRecipeBtnRef = app.querySelector<HTMLButtonElement>('#ms-import-recipe');
   const importRecipeFileRef = app.querySelector<HTMLInputElement>('#ms-import-recipe-file');
   const importStatusElRef = app.querySelector<HTMLParagraphElement>('#ms-import-status');
-  const poseTuningElRef = app.querySelector<HTMLDivElement>('#ms-pose-tuning');
+  const devZoneElRef = app.querySelector<HTMLDivElement>('#ms-dev-zone');
 
   if (
     readoutContainerRef &&
     previewContainerRef &&
     errorElRef &&
-    controlsElRef &&
     startCameraBtnRef &&
     pauseBtnRef &&
     previewToggleBtnRef &&
+    previewPipElRef &&
     finishBtnRef &&
-    stopBtnRef &&
+    restartBtnRef &&
     activatingElRef &&
     canvasElRef &&
     canvasWrapElRef &&
     paletteControlsElRef &&
-    sessionEndElRef &&
-    sessionEndStatusElRef &&
+    idleBlockElRef &&
+    timerElRef &&
+    finishStatusElRef &&
     savePieceBtnRef &&
+    keepMovingBtnRef &&
     discardPieceBtnRef &&
+    restartDialogElRef &&
+    restartCancelBtnRef &&
+    restartDoBtnRef &&
     importRecipeBtnRef &&
     importRecipeFileRef &&
     importStatusElRef &&
-    poseTuningElRef
+    devZoneElRef
   ) {
     // Re-bind to fresh consts so their (non-null) type is fixed at this
     // point — TypeScript would otherwise re-widen the outer refs to
@@ -243,24 +400,29 @@ if (app) {
     const readoutEl = readoutContainerRef;
     const previewEl = previewContainerRef;
     const errorEl = errorElRef;
-    const controlsEl = controlsElRef;
     const startCameraBtn = startCameraBtnRef;
     const pauseBtn = pauseBtnRef;
     const previewToggleBtn = previewToggleBtnRef;
+    const previewPipEl = previewPipElRef;
     const finishBtn = finishBtnRef;
-    const stopBtn = stopBtnRef;
+    const restartBtn = restartBtnRef;
     const activatingEl = activatingElRef;
     const canvasEl = canvasElRef;
     const canvasWrapEl = canvasWrapElRef;
     const paletteControlsEl = paletteControlsElRef;
-    const sessionEndEl = sessionEndElRef;
-    const sessionEndStatusEl = sessionEndStatusElRef;
+    const idleBlockEl = idleBlockElRef;
+    const timerEl = timerElRef;
+    const finishStatusEl = finishStatusElRef;
     const savePieceBtn = savePieceBtnRef;
+    const keepMovingBtn = keepMovingBtnRef;
     const discardPieceBtn = discardPieceBtnRef;
+    const restartDialogEl = restartDialogElRef;
+    const restartCancelBtn = restartCancelBtnRef;
+    const restartDoBtn = restartDoBtnRef;
     const importRecipeBtn = importRecipeBtnRef;
     const importRecipeFile = importRecipeFileRef;
     const importStatusEl = importStatusElRef;
-    const poseTuningEl = poseTuningElRef;
+    const devZoneEl = devZoneElRef;
     // getContext('2d') is effectively never null for a freshly-created
     // <canvas> in a real browser; guarded rather than asserted so a
     // hypothetical unsupported environment degrades to "no art rendering"
@@ -308,8 +470,9 @@ if (app) {
     // rendered, not recomputed from possibly-stale UI state.
     let currentOverrides: WorldOverrides = {};
     // The finished session's own recording + world + style, captured by
-    // finishSession() and consumed by saveSession()/discardSession() --
-    // null whenever no finished-but-undecided session is pending.
+    // finishSession() and consumed by saveSession()/discardSession()/
+    // keepMovingSession() -- null whenever no finished-but-undecided
+    // session is pending.
     // pendingStyle is saveSession()'s handle onto the frozen scene state
     // (style.scene()/sceneLayers() below) for the high-resolution export
     // render -- the same style instance the live loop was just painting
@@ -330,6 +493,11 @@ if (app) {
     // Assigned once the dev-only slider button exists, so it can be
     // disabled/enabled alongside "Start camera" during activation.
     let useSlidersBtn: HTMLButtonElement | null = null;
+    // Tracks whichever adapter kind was last activated (UX Stage 1's
+    // Restart flow) -- confirmed Restart starts a fresh session with the
+    // same kind of input source that was already running, camera or the
+    // dev-only slider adapter, rather than always defaulting back to camera.
+    let lastAdapterKind: 'camera' | 'sliders' = 'camera';
 
     // Handle onto the most recently created World (set at the bottom of
     // startLiveLoop), so the dev-only tuning panel (built lazily, see the
@@ -438,6 +606,40 @@ if (app) {
       canvasWrapEl.scrollLeft = 0;
     }
 
+    // UX Stage 1 header timer: polls liveLoop.getElapsedMs() every ~250ms
+    // while a session is live or finished. Pause-aware for free (frozen
+    // while getElapsedMs() is frozen, i.e. while paused or once stop() has
+    // been called) -- this poll just formats and displays whatever value
+    // getElapsedMs() currently reports.
+    let timerInterval: ReturnType<typeof setInterval> | null = null;
+
+    function formatElapsed(ms: number): string {
+      const totalSeconds = Math.floor(ms / 1000);
+      const minutes = Math.floor(totalSeconds / 60);
+      const seconds = totalSeconds % 60;
+      return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    }
+
+    function updateTimerDisplay(): void {
+      timerEl.textContent = formatElapsed(liveLoop?.getElapsedMs() ?? 0);
+    }
+
+    function startTimerPolling(): void {
+      timerEl.hidden = false;
+      updateTimerDisplay();
+      if (timerInterval !== null) return;
+      timerInterval = setInterval(updateTimerDisplay, 250);
+    }
+
+    function stopTimerPolling(): void {
+      if (timerInterval !== null) {
+        clearInterval(timerInterval);
+        timerInterval = null;
+      }
+      timerEl.hidden = true;
+      timerEl.textContent = '00:00';
+    }
+
     function showError(message: string): void {
       errorEl.textContent = message;
       errorEl.hidden = false;
@@ -456,7 +658,7 @@ if (app) {
         previewVideo.remove();
         previewVideo = null;
       }
-      previewToggleBtn.textContent = 'Show camera';
+      previewToggleBtn.textContent = '[ show camera ]';
     }
 
     function showPreview(): void {
@@ -474,24 +676,24 @@ if (app) {
         // Autoplay can be rejected by the browser; the preview is a pure UI
         // affordance, so a rejected play() here is not an app-level error.
       });
-      previewToggleBtn.textContent = 'Hide camera';
+      previewToggleBtn.textContent = '[ hide camera ]';
     }
 
-    /** Show/hide the preview toggle based on whether the active adapter has a live stream. */
+    /** Show/hide the whole camera PiP based on whether the active adapter has a live stream. */
     function refreshPreviewAvailability(): void {
       const stream = activeAdapter?.previewStream?.() ?? null;
-      previewToggleBtn.hidden = !stream;
+      previewPipEl.hidden = !stream;
       if (!stream) hidePreview();
     }
 
     function setPaused(paused: boolean): void {
       if (paused) {
         pauseGate.pause();
-        pauseBtn.textContent = 'Resume';
+        pauseBtn.textContent = '[ Resume ]';
         readoutEl.classList.add('ms-paused');
       } else {
         pauseGate.resume();
-        pauseBtn.textContent = 'Pause';
+        pauseBtn.textContent = '[ Pause ]';
         readoutEl.classList.remove('ms-paused');
       }
     }
@@ -502,12 +704,33 @@ if (app) {
       activatingEl.hidden = !disabled;
     }
 
+    type ControlRow = 'idle' | 'live' | 'finished';
+
+    /**
+     * Swaps the control zone's contents by state (UX Stage 1 -- one row,
+     * one DOM location, throughout the whole flow; only its *contents*
+     * change). "activating" is deliberately not a fourth row here: visually
+     * it's just the idle row with `[ Start ]` disabled plus the "Starting…"
+     * label, handled by setStartButtonsDisabled(true) layered on top of the
+     * idle row rather than a distinct row of its own.
+     */
+    function setControlRow(row: ControlRow): void {
+      startCameraBtn.hidden = row !== 'idle';
+      pauseBtn.hidden = row !== 'live';
+      finishBtn.hidden = row !== 'live';
+      restartBtn.hidden = row !== 'live';
+      savePieceBtn.hidden = row !== 'finished';
+      keepMovingBtn.hidden = row !== 'finished';
+      discardPieceBtn.hidden = row !== 'finished';
+      idleBlockEl.hidden = row !== 'idle';
+    }
+
     /**
      * Stops both the pending (mid-start) and active adapters and resets the
      * UI. Does NOT touch the activation token — callers that need to
      * invalidate an in-flight activate() do that explicitly, so this can be
-     * shared between stopActive() and the start of a new activate() without
-     * a new activation immediately invalidating itself.
+     * shared with the start of a new activate() without a new activation
+     * immediately invalidating itself.
      */
     function resetAdaptersAndUi(): void {
       if (pendingAdapter) {
@@ -520,55 +743,69 @@ if (app) {
         readout.reset();
       }
       stopLiveLoop();
+      stopTimerPolling();
       hidePreview();
+      previewPipEl.hidden = true;
       pauseGate.reset();
       setPaused(false);
-      // Stop is a full abort: any not-yet-decided finished session is
-      // discarded too, not left in limbo behind a hidden panel.
+      // A full abort: any not-yet-decided finished session is discarded
+      // too, not left in limbo behind a hidden panel.
       pendingRecording = null;
       pendingWorld = null;
       pendingStyle = null;
-      sessionEndEl.hidden = true;
-      stopBtn.hidden = true;
-      pauseBtn.hidden = true;
-      finishBtn.hidden = true;
-      previewToggleBtn.hidden = true;
+      finishStatusEl.hidden = true;
+      finishStatusEl.textContent = '';
+      finishStatusEl.classList.remove('ms-status-error');
+      setControlRow('idle');
       setStartButtonsDisabled(false);
     }
 
     /**
-     * Ends the current session without discarding it: freezes the render
-     * loop in place (no clear-and-reset -- the finished piece stays on
-     * screen for the Save/Discard decision), stops capturing movement, and
-     * shows the session-end panel. saveSession()/discardSession() are the
-     * only two ways out of the pending state this leaves behind.
+     * Ends capture without discarding the piece (UX Stage 1): freezes the
+     * render loop in place (no clear-and-reset -- the finished piece stays
+     * on screen for the Save/Keep-moving/Discard decision) and pauses the
+     * gate so no further samples reach liveLoop.feed(), but -- unlike the
+     * old Stop flow -- leaves the adapter/camera stream running untouched.
+     * The camera PiP therefore stays exactly as visible/hidden as it
+     * already was, matching the Finish mockup frame. saveSession(),
+     * discardSession(), and keepMovingSession() are the only three ways out
+     * of the pending state this leaves behind.
      */
     function finishSession(): void {
       if (!liveLoop || !currentWorld || !currentStyle) return;
       pendingRecording = liveLoop.getRecording();
       pendingWorld = currentWorld;
       pendingStyle = currentStyle;
-      activeAdapter?.stop();
-      activeAdapter = null;
-      readout.reset();
       liveLoop.stop(); // freezes the loop only -- does not touch canvas contents, unlike stopLiveLoop()
-      hidePreview();
-      pauseGate.reset();
-      setPaused(false);
-      stopBtn.hidden = true;
-      pauseBtn.hidden = true;
-      finishBtn.hidden = true;
-      previewToggleBtn.hidden = true;
+      pauseGate.pause(); // same mechanism the Pause button uses -- stops new samples without touching the adapter/camera
+      setControlRow('finished');
       // Disabled for the life of the pending decision so starting a new
       // session can't silently overwrite currentWorld/currentSessionIndex
       // out from under the still-undecided piece.
       setStartButtonsDisabled(true);
-      savePieceBtn.hidden = false;
-      discardPieceBtn.hidden = false;
-      sessionEndStatusEl.hidden = true;
-      sessionEndStatusEl.textContent = '';
-      sessionEndStatusEl.classList.remove('ms-status-error');
-      sessionEndEl.hidden = false;
+      finishStatusEl.hidden = false;
+      finishStatusEl.textContent = 'This piece is yours.';
+      finishStatusEl.classList.remove('ms-status-error');
+    }
+
+    /**
+     * "Keep moving" (UX Stage 1): the undo for Finish. Only valid from the
+     * genuinely finished/pending state. Resumes the pause gate (syncing the
+     * Pause button's own label regardless of whether the session happened
+     * to already be paused before Finish was clicked) and re-schedules the
+     * render loop exactly where stop() froze it -- the same style/world/
+     * recording/accumulator state, so the piece keeps growing as one
+     * continuous performance. The camera PiP needs no action: Finish never
+     * touched it.
+     */
+    function keepMovingSession(): void {
+      if (!liveLoop || !pendingWorld || !pendingStyle) return;
+      setPaused(false);
+      liveLoop.resume();
+      pendingRecording = null;
+      pendingWorld = null;
+      pendingStyle = null;
+      setControlRow('live');
     }
 
     /** Triggers a browser download of `json` as a file named `filename`. Same object-URL-plus-anchor technique as image-export.ts, inlined here since this is the only caller of a text (not canvas-pixel) download in the app. */
@@ -582,12 +819,24 @@ if (app) {
       URL.revokeObjectURL(url);
     }
 
+    /**
+     * A real ender (UX Stage 1): unlike finishSession(), this genuinely
+     * tears the adapter/camera down -- finishSession() no longer does that
+     * itself, so Discard has to pick up that responsibility.
+     */
     function discardSession(): void {
       pendingRecording = null;
       pendingWorld = null;
       pendingStyle = null;
-      sessionEndEl.hidden = true;
+      activeAdapter?.stop();
+      activeAdapter = null;
+      hidePreview();
+      previewPipEl.hidden = true;
       stopLiveLoop();
+      stopTimerPolling();
+      finishStatusEl.hidden = true;
+      finishStatusEl.textContent = '';
+      setControlRow('idle');
       setStartButtonsDisabled(false);
     }
 
@@ -602,10 +851,11 @@ if (app) {
     async function saveSession(): Promise<void> {
       if (!pendingRecording || !pendingWorld || !pendingStyle) return;
       savePieceBtn.disabled = true;
+      keepMovingBtn.disabled = true;
       discardPieceBtn.disabled = true;
-      sessionEndStatusEl.hidden = false;
-      sessionEndStatusEl.classList.remove('ms-status-error');
-      sessionEndStatusEl.textContent = 'Saving…';
+      finishStatusEl.hidden = false;
+      finishStatusEl.classList.remove('ms-status-error');
+      finishStatusEl.textContent = 'Saving…';
       try {
         const store = await recipeStorePromise;
         const recipe: PieceRecipe = {
@@ -639,17 +889,28 @@ if (app) {
         pendingRecording = null;
         pendingWorld = null;
         pendingStyle = null;
-        savePieceBtn.hidden = true;
-        discardPieceBtn.hidden = true;
-        sessionEndStatusEl.textContent = 'Saved — image and recipe backup downloaded, stored locally.';
+        // The piece is persisted now -- a real ender, so tear the
+        // adapter/camera down for real (finishSession() deliberately left
+        // them running; see its own doc comment).
+        activeAdapter?.stop();
+        activeAdapter = null;
+        hidePreview();
+        previewPipEl.hidden = true;
+        finishStatusEl.textContent = 'Saved — image and recipe backup downloaded, stored locally.';
         stopLiveLoop(); // safe to reset the canvas now that the piece is persisted
+        stopTimerPolling();
+        setControlRow('idle');
         setStartButtonsDisabled(false);
       } catch (err) {
+        // Deliberately does NOT tear down the adapter/camera on a failed
+        // save: the user can still hit "Keep moving" and retry later
+        // instead of being stuck with a lost piece and a dead camera.
         const message = err instanceof Error ? err.message : String(err);
-        sessionEndStatusEl.textContent = `Could not save: ${message}`;
-        sessionEndStatusEl.classList.add('ms-status-error');
+        finishStatusEl.textContent = `Could not save: ${message}`;
+        finishStatusEl.classList.add('ms-status-error');
       } finally {
         savePieceBtn.disabled = false;
+        keepMovingBtn.disabled = false;
         discardPieceBtn.disabled = false;
       }
     }
@@ -675,12 +936,8 @@ if (app) {
       startLiveLoop();
     }
 
-    function stopActive(): void {
-      activation.next(); // invalidate any in-flight activation so its late resolution is discarded
-      resetAdaptersAndUi();
-    }
-
-    async function activate(adapter: InputAdapter): Promise<void> {
+    async function activate(adapter: InputAdapter, opts: { autoShowPreview?: boolean } = {}): Promise<void> {
+      const autoShowPreview = opts.autoShowPreview ?? true;
       // Claim this activation and supersede any earlier one *before* the
       // await below, so a second click during a slow start() (webcam:
       // getUserMedia + model load can take seconds) is detected reliably —
@@ -699,24 +956,30 @@ if (app) {
         await adapter.start(pauseGate.listener);
         if (!activation.isCurrent(token)) {
           // Superseded while start() was in flight (another activate() or a
-          // stop happened) — discard this late resolution instead of wiring
-          // a stale adapter into the UI. Belt-and-suspenders alongside the
-          // synchronous stop in resetAdaptersAndUi().
+          // reset happened) — discard this late resolution instead of
+          // wiring a stale adapter into the UI. Belt-and-suspenders
+          // alongside the synchronous stop in resetAdaptersAndUi().
           adapter.stop();
           return;
         }
         pendingAdapter = null;
         activeAdapter = adapter;
-        stopBtn.hidden = false;
-        pauseBtn.hidden = false;
-        finishBtn.hidden = false;
-        refreshPreviewAvailability();
+        setControlRow('live');
         setStartButtonsDisabled(false);
+        refreshPreviewAvailability();
+        // UX Stage 1: the camera preview defaults to VISIBLE once a session
+        // goes live, rather than staying hidden until the user opts in --
+        // no-op if refreshPreviewAvailability() just found no stream.
+        // Restart's own flow opts out of this (autoShowPreview: false) so
+        // it can instead preserve whatever visible/hidden state the
+        // preview was already in before the restart.
+        if (autoShowPreview) showPreview();
         // Carries a live-tuned pose-sensor value across a restart (dev-only
         // slider, no-op via optional chaining on adapters that don't
         // implement it, e.g. the slider adapter).
         activeAdapter.setSpeedJitterFloor?.(currentSpeedJitterFloor);
         await beginSession();
+        startTimerPolling();
       } catch (err) {
         if (!activation.isCurrent(token)) return; // stale failure; a newer activation already owns the UI
         pendingAdapter = null;
@@ -726,11 +989,35 @@ if (app) {
       }
     }
 
+    /**
+     * Confirmed Restart (UX Stage 1): discards the current piece entirely
+     * and starts a brand-new one with the same adapter kind that was
+     * running, preserving the camera-preview visible/hidden state across
+     * the restart. resetAdaptersAndUi() does the "stop everything" half;
+     * this does the "start a fresh session of the same kind" half on top.
+     */
+    async function performRestart(): Promise<void> {
+      const previewWasVisible = previewVideo !== null;
+      resetAdaptersAndUi();
+      try {
+        const adapter =
+          lastAdapterKind === 'camera'
+            ? createWebcamAdapter()
+            : (await import('./adapters/sliders')).createSliderAdapter();
+        await activate(adapter, { autoShowPreview: false });
+        if (previewWasVisible) showPreview();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        showError(`Could not restart: ${message}`);
+      }
+    }
+
     startCameraBtn.addEventListener('click', () => {
       void (async () => {
         clearError();
         try {
           const adapter = createWebcamAdapter();
+          lastAdapterKind = 'camera';
           await activate(adapter);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
@@ -739,16 +1026,29 @@ if (app) {
       })();
     });
 
-    stopBtn.addEventListener('click', () => {
-      stopActive();
-    });
-
     finishBtn.addEventListener('click', () => {
       finishSession();
     });
 
+    restartBtn.addEventListener('click', () => {
+      restartDialogEl.hidden = false;
+    });
+
+    restartCancelBtn.addEventListener('click', () => {
+      restartDialogEl.hidden = true;
+    });
+
+    restartDoBtn.addEventListener('click', () => {
+      restartDialogEl.hidden = true;
+      void performRestart();
+    });
+
     savePieceBtn.addEventListener('click', () => {
       void saveSession();
+    });
+
+    keepMovingBtn.addEventListener('click', () => {
+      keepMovingSession();
     });
 
     discardPieceBtn.addEventListener('click', () => {
@@ -793,14 +1093,17 @@ if (app) {
       }
     });
 
-    // Palette presets (M4 palette system): switching while a session is
-    // running restarts the live loop with the new colors, keeping the same
-    // camera/adapter running uninterrupted. A full custom color-wheel picker
-    // is a later enhancement — see docs/HANDOFF.md.
+    // Palette presets (M4 palette system, narrowed in UX Stage 1 -- idle
+    // only, see the "Leave alone, but keep working" section of the stage
+    // spec: this control no longer appears mid-session, since the mockups
+    // never show it live and the clean toolbar takes priority for this
+    // stage). Founder-facing, not dev-only, so it's restyled to the
+    // bracket-button convention rather than routed to the dev zone.
     for (const preset of BOTANICAL_PALETTE_PRESETS) {
       const paletteBtn = document.createElement('button');
       paletteBtn.type = 'button';
-      paletteBtn.textContent = preset.displayName;
+      paletteBtn.className = 'ms-btn';
+      paletteBtn.textContent = `[ ${preset.displayName} ]`;
       paletteBtn.addEventListener('click', () => {
         selectedPaletteId = preset.id;
         // No-op in production (onPaletteSelected stays null); in dev, once
@@ -813,19 +1116,24 @@ if (app) {
       paletteControlsEl.appendChild(paletteBtn);
     }
 
+    // Initial state: idle, nothing running yet.
+    setControlRow('idle');
+
     // Dev-only: manual slider input. The button itself — and every string
     // that names it — is created only inside this block, and the adapter is
     // reached only through a dynamic import, so a production build (where
     // import.meta.env.DEV is statically false) tree-shakes this whole branch
     // away: no slider button, no slider strings, no slider module in the
     // bundle (M1 acceptance criterion: "a production build contains no
-    // slider UI").
+    // slider UI"). Mounted into #ms-dev-zone (UX Stage 1) rather than the
+    // real control zone, which is no longer a generic div dev code can
+    // freely append into.
     if (import.meta.env.DEV) {
       const devSlidersBtn = document.createElement('button');
       devSlidersBtn.type = 'button';
       devSlidersBtn.id = 'ms-use-sliders';
       devSlidersBtn.textContent = 'Use sliders';
-      controlsEl.appendChild(devSlidersBtn);
+      devZoneEl.appendChild(devSlidersBtn);
       useSlidersBtn = devSlidersBtn;
 
       devSlidersBtn.addEventListener('click', () => {
@@ -834,6 +1142,7 @@ if (app) {
           try {
             const { createSliderAdapter } = await import('./adapters/sliders');
             const adapter = createSliderAdapter();
+            lastAdapterKind = 'sliders';
             await activate(adapter);
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
@@ -850,7 +1159,7 @@ if (app) {
     // in, watching the Speed readout react live while sitting still vs.
     // moving. Every string/DOM node here lives only inside this
     // import.meta.env.DEV branch, tree-shaken from production the same way
-    // as the two blocks above/below it.
+    // as the two blocks above/below it. Mounted into #ms-dev-zone (UX Stage 1).
     if (import.meta.env.DEV) {
       const row = document.createElement('div');
       row.style.cssText = 'display:flex; align-items:center; gap:8px; margin:8px 0; font-size:12px;';
@@ -880,7 +1189,7 @@ if (app) {
       row.appendChild(label);
       row.appendChild(input);
       row.appendChild(valueEl);
-      poseTuningEl.appendChild(row);
+      devZoneEl.appendChild(row);
     }
 
     // Dev-only: the "backend knobs" tuning panel (M4x). Every DOM node,
@@ -889,6 +1198,7 @@ if (app) {
     // a production build tree-shakes the whole thing away exactly like the
     // "Use sliders" block above (verified the same way: grep the built
     // dist/ bundle for a panel-only string and confirm zero matches).
+    // Mounted into #ms-dev-zone (UX Stage 1).
     //
     // One clear rule for how this interacts with the palette-preset
     // mechanism (see also the comment in startLiveLoop): before the founder
@@ -905,7 +1215,7 @@ if (app) {
       tuningToggleBtn.type = 'button';
       tuningToggleBtn.id = 'ms-tuning-toggle';
       tuningToggleBtn.textContent = 'Show tuning panel';
-      controlsEl.appendChild(tuningToggleBtn);
+      devZoneEl.appendChild(tuningToggleBtn);
 
       let panelEl: HTMLDivElement | null = null;
       let restartDebounceHandle: ReturnType<typeof setTimeout> | null = null;
@@ -1013,12 +1323,10 @@ if (app) {
         const panel = document.createElement('div');
         panel.id = 'ms-tuning-panel';
         panel.hidden = true;
-        // Explicit color (rather than relying on inheritance): this panel is
-        // appended directly to #app, a sibling of <main class="ms-shell">
-        // rather than a descendant of it, so it does NOT inherit .ms-shell's
-        // `color: #f2f2f2` -- without this it renders in the browser's
-        // default black text on the app's near-black background, effectively
-        // invisible.
+        // Explicit color: #ms-dev-zone sets its own dark background/light
+        // text (see the stylesheet above), matching what this panel's
+        // inline styles were always written against -- unrelated to (and
+        // untouched by) the real UI's ink-on-paper restyle.
         panel.style.cssText =
           'margin: 12px 0; padding: 12px; border: 1px solid #444; border-radius: 8px; ' +
           'max-height: 420px; overflow-y: auto; font-size: 12px; color: #f2f2f2;';
@@ -1118,7 +1426,7 @@ if (app) {
       tuningToggleBtn.addEventListener('click', () => {
         if (!panelEl) {
           panelEl = buildPanel();
-          app.appendChild(panelEl);
+          devZoneEl.appendChild(panelEl);
         }
         const willShow = panelEl.hidden;
         panelEl.hidden = !willShow;
