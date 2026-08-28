@@ -109,6 +109,28 @@ export interface BotanicalTuningConfig {
 
   /** Cross-root bake-order safety margin (world units, same scale as targetLengthBase): the minimum lead a farther root's own growth frontier must have over a nearer branch's tipX (or a nearer blossom's own x) before that nearer content is allowed to bake permanently into the live compositor's persistent buffer (isSafeToBake in botanical.ts). Guards against the bug where two roots sharing one growth system start bunched close together near the left edge -- root index alone always makes a higher-index root farther (paler) -- so if the nearer root's branch matures and bakes first while the farther root is still catching up nearby, the farther root's later, paler bake would permanently overwrite the nearer, richer one once it arrives at the same screen position (the live compositor's own within-frame z-sort can't reconcile bakes that happen on different frames). A still-catching-up farther root can never again paint over content that already required it to be this far ahead. */
   crossRootBakeSafetyMargin: number;
+
+  /**
+   * Forced-bake ceiling (roadmap B, docs/HANDOFF.md): the maximum SIMULATED
+   * time (milliseconds, accumulated from each step()'s own `dt` -- never
+   * wall-clock, never render frames, so live and replay stay bit-identical)
+   * a `mature` branch, or an already-revealed blossom, may sit unresolved
+   * and blocked by isSafeToBake before resolveBucketBakeThreats force-marks
+   * it `bakeResolved = true` ANYWAY, regardless of what the bake-safety
+   * threat model says. Botanical's front-driven resprouting spawns a fresh
+   * growing branch at each generation-0 root's fixed near-origin rootX
+   * forever, so there is always a low-x blocker near the origin and mature
+   * branches behind it would otherwise never resolve -- staying in the live
+   * per-frame redraw pass permanently, the unbounded-growth bug that
+   * collapses FPS over a long session (phase 1 profiling). The founder has
+   * explicitly accepted the resulting rare, small depth-ordering artifact as
+   * permanent (same class as the already-accepted cross-bucket z-overlap
+   * deviation). Set well above a normal quick resolve (which happens within
+   * a tick or a few) so the common case is completely unaffected -- this
+   * only ever fires for content that is genuinely, persistently blocked.
+   * Live-tunable via the dev panel like every other field here.
+   */
+  forcedBakeCeilingMs: number;
 }
 
 export const DEFAULT_BOTANICAL_TUNING_CONFIG: BotanicalTuningConfig = {
@@ -158,4 +180,10 @@ export const DEFAULT_BOTANICAL_TUNING_CONFIG: BotanicalTuningConfig = {
   blossomRevealIntervalMs: 300,
   blossomRevealSpeedFloor: 0,
   crossRootBakeSafetyMargin: 0.15,
+  // ~4 simulated seconds (240 ticks at the 60 Hz fixed timestep). Long
+  // enough that a normal resolve -- which lands within a tick or a few --
+  // never comes close; short enough that the mature-but-blocked set
+  // plateaus and drains over a long session instead of growing without
+  // bound (roadmap B long-run plateau test).
+  forcedBakeCeilingMs: 4000,
 };

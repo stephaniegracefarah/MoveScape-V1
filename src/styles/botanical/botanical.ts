@@ -589,7 +589,13 @@ interface BakeSafetyByBucket {
  * blossom or blossom-vs-branch than for branch-vs-branch -- but it is not
  * proven impossible here, just out of this session's scope.
  */
-function resolveBucketBakeThreats(systems: GrowthSystemState[], margin: number, forkZBound: ForkZBound): BakeSafety {
+function resolveBucketBakeThreats(
+  systems: GrowthSystemState[],
+  margin: number,
+  forkZBound: ForkZBound,
+  dt: number,
+  forcedBakeCeilingMs: number,
+): BakeSafety {
   const bakeSystems: BakeSafetySystem[] = systems.map((system) => ({
     branches: system.branches
       .filter((branch) => branch.lifecycle === 'growing' || !branch.bakeResolved)
@@ -606,7 +612,38 @@ function resolveBucketBakeThreats(systems: GrowthSystemState[], margin: number, 
   const stillBlockedIds = new Set(threats.map((t) => t.id));
   for (const system of systems) {
     for (const branch of system.branches) {
-      if (branch.lifecycle === 'mature' && !branch.bakeResolved && !stillBlockedIds.has(branch.id)) {
+      if (branch.lifecycle !== 'mature' || branch.bakeResolved) continue;
+      if (!stillBlockedIds.has(branch.id)) {
+        // Resolved the normal, safe way -- nothing farther and unrelated can
+        // still paint over it.
+        branch.bakeResolved = true;
+        continue;
+      }
+      // FORCED-BAKE CEILING (roadmap B, docs/HANDOFF.md). This branch is
+      // mature but still blocked by isSafeToBake. Botanical's front-driven
+      // resprouting spawns a fresh GROWING branch at each generation-0
+      // root's fixed near-origin rootX forever, so there is effectively
+      // always a low-x blocker and a mature branch behind it can otherwise
+      // stay blocked -- and therefore stuck in the live compositor's
+      // per-frame redraw pass -- for the entire rest of the session, the
+      // unbounded-growth bug that collapses FPS over a long run. Accumulate
+      // the wait in SIMULATED time (`dt` from the fixed-timestep step(),
+      // never wall-clock, never render frames, so live and replay stay
+      // bit-identical) and force `bakeResolved` once it crosses the
+      // ceiling, regardless of what the threat model says. Only `mature`
+      // branches ever reach here (guarded above) -- a still-`growing`
+      // stroke is never force-resolved, since freezing its taper before its
+      // final point count is visible. The founder has explicitly accepted
+      // the resulting rare, small depth-ordering artifact as permanent
+      // (same class as the accepted cross-bucket z-overlap deviation). This
+      // forced resolution rides the exact same per-branch loop -- and feeds
+      // the same same-frame z-sort the live compositor already applies to
+      // every element that becomes bakeable together -- as the normal safe
+      // path directly above; a batch that force-resolves on one tick bakes
+      // in z-order the same way a batch that resolves safe on one tick
+      // does. There is no separate, out-of-order force path.
+      branch.matureBlockedMs += dt;
+      if (branch.matureBlockedMs >= forcedBakeCeilingMs) {
         branch.bakeResolved = true;
       }
     }
@@ -620,6 +657,18 @@ function resolveBucketBakeThreats(systems: GrowthSystemState[], margin: number, 
     // fix's own test suite timing out -- see docs/HANDOFF.md session 021).
     for (const blossom of system.unresolvedBlossoms) {
       if (isSafeToBake({ id: blossom.branchId, z: blossom.z, tipX: blossom.x, threats, margin })) {
+        blossom.bakeResolved = true;
+        continue;
+      }
+      // Same forced-bake ceiling as branches above -- a revealed blossom
+      // can be stuck behind the same forever-near-origin growing branches.
+      // Same simulated-time (`dt`) accumulation, same "force once past the
+      // ceiling," same founder-accepted artifact. A blossom is a fixed
+      // point (it never grows), so there is no growing-vs-mature guard to
+      // make here -- every entry of `unresolvedBlossoms` is already
+      // revealed and eligible.
+      blossom.blockedMs += dt;
+      if (blossom.blockedMs >= forcedBakeCeilingMs) {
         blossom.bakeResolved = true;
       }
     }
@@ -643,21 +692,34 @@ function resolveBucketBakeThreats(systems: GrowthSystemState[], margin: number, 
  * resolveBucketBakeThreats, unchanged from the original single-bucket
  * algorithm -- only the grouping/call-site is new.
  */
-function resolveBakeThreats(state: BotanicalState): BakeSafetyByBucket {
+function resolveBakeThreats(state: BotanicalState, dt: number): BakeSafetyByBucket {
   const margin = state.tuning.crossRootBakeSafetyMargin;
   const childZJitterMax = state.tuning.childZJitter;
-  const foreground = resolveBucketBakeThreats(state.foregroundSystems, margin, {
-    maxGeneration: state.tuning.maxGeneration,
-    childZJitterMax,
-  });
-  const echoes = state.echoes.map((echoSystem, i) =>
-    resolveBucketBakeThreats([echoSystem], margin, {
-      // Same cap stepGrowthSystem's own ECHO_CONFIGS.forEach call site already
-      // uses for this echo's real forking gate -- see ForkZBound's own doc
-      // comment for why this has to match exactly.
-      maxGeneration: Math.min(state.tuning.maxGeneration, ECHO_CONFIGS[i]!.maxGenerationCap),
+  const forcedBakeCeilingMs = state.tuning.forcedBakeCeilingMs;
+  const foreground = resolveBucketBakeThreats(
+    state.foregroundSystems,
+    margin,
+    {
+      maxGeneration: state.tuning.maxGeneration,
       childZJitterMax,
-    }),
+    },
+    dt,
+    forcedBakeCeilingMs,
+  );
+  const echoes = state.echoes.map((echoSystem, i) =>
+    resolveBucketBakeThreats(
+      [echoSystem],
+      margin,
+      {
+        // Same cap stepGrowthSystem's own ECHO_CONFIGS.forEach call site already
+        // uses for this echo's real forking gate -- see ForkZBound's own doc
+        // comment for why this has to match exactly.
+        maxGeneration: Math.min(state.tuning.maxGeneration, ECHO_CONFIGS[i]!.maxGenerationCap),
+        childZJitterMax,
+      },
+      dt,
+      forcedBakeCeilingMs,
+    ),
   );
   return { foreground, echoes };
 }
@@ -1198,7 +1260,13 @@ function stepState(state: BotanicalState, params: MovementParams, sessionParams:
   // fully superseded by this call anyway). Cheap: resolveBakeThreats only
   // ever examines currently-unresolved branches/blossoms (see its own doc
   // comment).
-  resolveBakeThreats(state);
+  //
+  // Roadmap B: `dt` is threaded through so resolveBucketBakeThreats can
+  // accumulate each mature-but-blocked branch's / revealed-but-blocked
+  // blossom's wait in SIMULATED time and force-resolve it past
+  // `tuning.forcedBakeCeilingMs`. `dt` is the fixed-timestep step()'s own
+  // delta (identical live and replay), so this stays fully deterministic.
+  resolveBakeThreats(state, dt);
 }
 
 /** Emits one growth system's branches/blossoms as scene elements, applying its z-offset (depth-echo placement) and opacity multiplier (depth-echo paleness) on top of each element's own values. zOffset=0/opacityMultiplier=1 for the foreground system is a no-op. */

@@ -62,6 +62,21 @@ export interface Branch {
    */
   bakeResolved: boolean;
 
+  /**
+   * Simulated milliseconds this branch has spent `mature` but still blocked
+   * from resolving safe (accumulated from each step()'s `dt` by
+   * resolveBucketBakeThreats -- simulated time, never wall-clock or render
+   * frames, so live and replay stay bit-identical). Once it reaches
+   * `tuning.forcedBakeCeilingMs` the branch is force-marked `bakeResolved`
+   * anyway (roadmap B, docs/HANDOFF.md): Botanical's forever-resprouting
+   * near-origin growing branches mean a mature branch behind them can
+   * otherwise stay blocked -- and in the live per-frame redraw pass --
+   * indefinitely. Stays 0 for a `growing` branch (never force-resolved --
+   * freezing a still-growing stroke mid-taper is visible) and for any
+   * branch that resolves the normal, safe way within a tick or few.
+   */
+  matureBlockedMs: number;
+
   forkFractions: number[];
   forkedFractions: boolean[];
 }
@@ -189,6 +204,7 @@ export function spawnBranch(args: SpawnBranchArgs): Branch {
     lifecycleTimer: 0,
     matureDurationMs: 0,
     bakeResolved: false,
+    matureBlockedMs: 0,
     forkFractions: args.forkFractions,
     forkedFractions: args.forkFractions.map(() => false),
   };

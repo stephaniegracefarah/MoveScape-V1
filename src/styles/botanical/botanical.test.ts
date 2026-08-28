@@ -100,6 +100,7 @@ function makeBigBlossoms(count = 1000): Blossom[] {
     radius: 0.01,
     baseOpacity: 0.5,
     bakeResolved: false,
+    blockedMs: 0,
   }));
 }
 
@@ -112,6 +113,19 @@ const FAST_CYCLE_OVERRIDES: WorldOverrides = {
   baseGrowthRate: 0.99, // -> ~1.985, near the top of [0.5, 2.0)
   matureDurationMs: 0, // -> 3000ms, the minimum
 };
+
+// Roadmap B: the pure-threat-model sweeps below (the "zero bake-order
+// violation" tests) exist to verify isSafeToBake / computeBakeThreats --
+// the threat model this session deliberately did NOT touch. The new
+// forced-bake ceiling (resolveBucketBakeThreats: a mature branch or
+// revealed blossom blocked longer than tuning.forcedBakeCeilingMs of
+// SIMULATED time is force-baked anyway) intentionally produces a rare,
+// small, founder-accepted depth-ordering artifact -- exactly the kind of
+// "violation" those sweeps count. Setting the ceiling far beyond any of
+// these tests' simulated-time budgets keeps them testing the pure threat
+// model unchanged; the ceiling's own behavior has dedicated tests in the
+// "forced-bake ceiling (roadmap B)" describe block near the end of this file.
+const CEILING_EFFECTIVELY_DISABLED = { forcedBakeCeilingMs: 1e9 };
 
 describe('createBotanicalStyle — worldKnobs', () => {
   it('declares exactly the 9 documented knob names', () => {
@@ -1326,7 +1340,7 @@ describe('createBotanicalStyle — bake-order safety: forced two-root integratio
     const TICKS = 1200;
 
     for (let seedNum = 0; seedNum < 5; seedNum++) {
-      const { renderer, state } = createBotanicalInternal();
+      const { renderer, state } = createBotanicalInternal(CEILING_EFFECTIVELY_DISABLED);
       renderer.init(createWorld(`bake-safety-seed-${seedNum}`, 0, TWO_ROOT_OVERRIDES));
       expect(state.foregroundSystems[0]!.roots.length).toBe(2); // sanity: the scenario actually engages the fix
 
@@ -1429,7 +1443,7 @@ describe('createBotanicalStyle — bake-order safety: single-root foreground, ge
     const SINGLE_ROOT_OVERRIDES: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0 }; // -> 1 root
 
     for (let seedNum = 0; seedNum < SEED_COUNT; seedNum++) {
-      const { renderer, state } = createBotanicalInternal();
+      const { renderer, state } = createBotanicalInternal(CEILING_EFFECTIVELY_DISABLED);
       renderer.init(createWorld(`single-root-fg-generous-sweep-seed-${seedNum}`, 0, SINGLE_ROOT_OVERRIDES));
       expect(state.foregroundSystems[0]!.roots.length).toBe(1); // sanity: genuinely single-root
 
@@ -1554,7 +1568,7 @@ describe('createBotanicalStyle — bake-order safety: echo systems (session 019)
     const ECHO_LAYER_IDS = ['echo0', 'echo1'] as const;
 
     for (let seedNum = 0; seedNum < 5; seedNum++) {
-      const { renderer, state } = createBotanicalInternal();
+      const { renderer, state } = createBotanicalInternal(CEILING_EFFECTIVELY_DISABLED);
       renderer.init(createWorld(`echo-bake-safety-seed-${seedNum}`, 0, FAST_CYCLE_OVERRIDES));
 
       const firstFinalTickByLayer: Record<(typeof ECHO_LAYER_IDS)[number], Map<number, number>> = {
@@ -1653,6 +1667,177 @@ describe('createBotanicalStyle — bake-order safety: echo systems (session 019)
     const paramsAt = () => makeParams({ speed: 0.7, expansion: 0.6, symmetry: 0.4 });
     runTicks(a.renderer, 900, 16.67, paramsAt);
     runTicks(b.renderer, 900, 16.67, paramsAt);
+
+    expect(a.renderer.scene()).toEqual(b.renderer.scene());
+  });
+});
+
+// --- Roadmap B: forced-bake ceiling ------------------------------------
+// A `mature` branch (or an already-revealed blossom) that has been blocked
+// from resolving safe for longer than tuning.forcedBakeCeilingMs of
+// SIMULATED time is force-marked bakeResolved anyway, regardless of what
+// isSafeToBake says (resolveBucketBakeThreats in botanical.ts). Botanical's
+// front-driven resprouting spawns a fresh growing branch at each
+// generation-0 root's fixed near-origin rootX forever, so there is always a
+// low-x blocker near the origin -- without this ceiling, mature branches
+// (and blossoms) behind it never resolve, stay in the live compositor's
+// per-frame redraw pass permanently, and the un-baked "live" set grows
+// without bound (phase-1 profiling: FPS ~50 -> 8-17 within 3.5 min, live
+// circle count 500 -> 14,000+ and climbing). The founder approved this
+// blunt ceiling and explicitly accepted the resulting rare, small
+// depth-ordering artifact as permanent.
+describe('createBotanicalStyle — forced-bake ceiling (roadmap B)', () => {
+  const TWO_ROOT_FAST: WorldOverrides = { baseGrowthRate: 0.99, matureDurationMs: 0, rootCount: 0.5 }; // -> 2 roots
+
+  function matureUnresolvedCount(state: ReturnType<typeof createBotanicalInternal>['state']): number {
+    let n = 0;
+    for (const system of state.foregroundSystems) {
+      for (const branch of system.branches) {
+        if (branch.lifecycle === 'mature' && !branch.bakeResolved) n++;
+      }
+    }
+    return n;
+  }
+  function unresolvedBlossomCount(state: ReturnType<typeof createBotanicalInternal>['state']): number {
+    let n = 0;
+    for (const system of state.foregroundSystems) n += system.unresolvedBlossoms.length;
+    return n;
+  }
+  const average = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
+
+  it(
+    'the mature-but-unresolved branch set (and the unresolved-blossom set) plateaus and drains over 60+ simulated seconds instead of growing without bound',
+    () => {
+      // The required evidence that the unbounded-growth bug is gone. Same
+      // seed / movement / tuning run twice: once with the default ceiling,
+      // once with it effectively disabled. Without the ceiling this
+      // FAST_CYCLE + 2-root scenario reproduces the runaway (the
+      // unresolved-blossom set climbs into the thousands); with it, both
+      // sets stay bounded and show no upward drift across the run.
+      const dt = 16.67;
+      const TICKS = 3600; // 60 simulated seconds
+      const SAMPLE_EVERY = 300; // once per 5 simulated seconds
+
+      function sweep(ceilingOverride?: { forcedBakeCeilingMs: number }) {
+        const { renderer, state } = createBotanicalInternal(ceilingOverride);
+        renderer.init(createWorld('forced-ceiling-plateau-seed', 0, TWO_ROOT_FAST));
+        const mature: number[] = [];
+        const blossoms: number[] = [];
+        let time = 0;
+        for (let t = 0; t < TICKS; t++) {
+          renderer.step({ v: 1, expansion: 0.6, speed: 0.6, symmetry: 0.6 }, INITIAL_SESSION_PARAMS, time, dt);
+          time += dt;
+          if ((t + 1) % SAMPLE_EVERY === 0) {
+            mature.push(matureUnresolvedCount(state));
+            blossoms.push(unresolvedBlossomCount(state));
+          }
+        }
+        return { mature, blossoms };
+      }
+
+      const withCeiling = sweep(); // DEFAULT_BOTANICAL_TUNING_CONFIG.forcedBakeCeilingMs (4000ms)
+      const noCeiling = sweep(CEILING_EFFECTIVELY_DISABLED);
+
+      // --- With the ceiling: both sets plateau (bounded, no upward drift) ---
+      // Hard bounds -- far above what a healthy plateau reaches for this
+      // scenario (measured maxima ~50 mature, ~800 blossoms), far below the
+      // unbounded case.
+      expect(Math.max(...withCeiling.mature)).toBeLessThan(150);
+      expect(Math.max(...withCeiling.blossoms)).toBeLessThan(2000);
+      // No upward drift: the last-third average is not materially larger
+      // than the average of the first few post-warmup samples (drains
+      // rather than accumulates).
+      const postWarmup = (xs: number[]) => xs.slice(2, 6);
+      const lateThird = (xs: number[]) => xs.slice(-4);
+      expect(average(lateThird(withCeiling.blossoms))).toBeLessThanOrEqual(average(postWarmup(withCeiling.blossoms)) * 1.6);
+      expect(average(lateThird(withCeiling.mature))).toBeLessThanOrEqual(average(postWarmup(withCeiling.mature)) * 2 + 15);
+
+      // --- Regression guard: the scenario genuinely triggers the runaway
+      // without the ceiling, and the ceiling is what tames it ---
+      expect(Math.max(...noCeiling.blossoms)).toBeGreaterThan(3000);
+      expect(Math.max(...noCeiling.blossoms)).toBeGreaterThan(Math.max(...withCeiling.blossoms) * 4);
+      expect(Math.max(...noCeiling.mature)).toBeGreaterThan(Math.max(...withCeiling.mature) * 1.5);
+    },
+    60000,
+  );
+
+  it('does NOT fire in the common fast-resolve case: a branch that resolves safe within a tick or few never advances its counter or gets force-resolved', () => {
+    // Single-root, no forking -- every branch shares its root's own fixed z
+    // (spawnRootBranch never jitters resprout z), so isSafeToBake, which
+    // only ever gates against a strictly FARTHER-z threat, can never block
+    // anything here. Every mature branch resolves safe the normal way,
+    // immediately. The forced-ceiling counter path must be a complete
+    // no-op: matureBlockedMs stays 0 for every branch, for the whole run.
+    const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0 }; // -> 1 root
+    // forkCountMin/Span are TUNING fields (not world knobs) -- 0/0 forces
+    // drawForkFractions to a fork count of 0, i.e. genuinely no forking ever.
+    // DEFAULT ceiling (not disabled) -- it simply must never engage here.
+    const { renderer, state } = createBotanicalInternal({ forkCountMin: 0, forkCountSpan: 0 });
+    renderer.init(createWorld('forced-ceiling-fast-resolve-seed', 0, overrides));
+
+    let sawForcedCounterAdvance = false;
+    let time = 0;
+    for (let t = 0; t < 900; t++) {
+      renderer.step(makeParams({ speed: 0.8, expansion: 0.6, symmetry: 0.4 }), INITIAL_SESSION_PARAMS, time, 16.67);
+      time += 16.67;
+      for (const system of state.foregroundSystems) {
+        for (const branch of system.branches) {
+          if (branch.matureBlockedMs !== 0) sawForcedCounterAdvance = true;
+        }
+      }
+    }
+
+    const allBranches = state.foregroundSystems.flatMap((s) => s.branches);
+    expect(allBranches.every((b) => b.generation === 0)).toBe(true); // sanity: forking really was off
+    expect(allBranches.some((b) => b.lifecycle === 'mature' && b.bakeResolved)).toBe(true); // sanity: branches did mature and resolve...
+    expect(sawForcedCounterAdvance).toBe(false); // ...the normal safe way -- the ceiling counter never advanced for any branch
+    expect(allBranches.every((b) => b.matureBlockedMs === 0)).toBe(true);
+  });
+
+  it('never force-resolves a still-growing branch, no matter how long it has been growing while blocked', () => {
+    // Constraint 2: freezing a still-growing stroke mid-taper (its taper
+    // depends on its final point count) would visibly stop its growth, so
+    // the ceiling must only ever touch `mature` branches. Ceiling forced to
+    // 1ms (fires on the very next tick a mature element is blocked) and a
+    // 2-root FAST_CYCLE scenario that always has both growing branches and
+    // blocked mature branches present -- the growing set must stay
+    // untouched every single tick regardless.
+    const { renderer, state } = createBotanicalInternal({ forcedBakeCeilingMs: 1, crossRootBakeSafetyMargin: 0.4 });
+    renderer.init(createWorld('forced-ceiling-growing-immune-seed', 0, TWO_ROOT_FAST));
+
+    let sawGrowingBranch = false;
+    let sawForcedMatureBake = false;
+    let growingEverResolvedOrCounted = false;
+    let time = 0;
+    for (let t = 0; t < 1500; t++) {
+      renderer.step(makeParams({ speed: 0.6, expansion: 0.6, symmetry: 0.6 }), INITIAL_SESSION_PARAMS, time, 16.67);
+      time += 16.67;
+      for (const system of state.foregroundSystems) {
+        for (const branch of system.branches) {
+          if (branch.lifecycle === 'growing') {
+            sawGrowingBranch = true;
+            if (branch.bakeResolved || branch.matureBlockedMs !== 0) growingEverResolvedOrCounted = true;
+          } else if (branch.matureBlockedMs >= 1 && branch.bakeResolved) {
+            sawForcedMatureBake = true;
+          }
+        }
+      }
+    }
+
+    expect(sawGrowingBranch).toBe(true); // sanity: there really were growing branches throughout
+    expect(sawForcedMatureBake).toBe(true); // sanity: the 1ms ceiling really was force-baking blocked MATURE branches
+    expect(growingEverResolvedOrCounted).toBe(false); // the point: no growing branch was ever force-resolved or even counted
+  });
+
+  it('is deterministic: same seed + tuning produces identical scenes across two runs with the ceiling engaged', () => {
+    const a = createBotanicalInternal({ forcedBakeCeilingMs: 2000, crossRootBakeSafetyMargin: 0.4 });
+    const b = createBotanicalInternal({ forcedBakeCeilingMs: 2000, crossRootBakeSafetyMargin: 0.4 });
+    a.renderer.init(createWorld('forced-ceiling-determinism-seed', 0, TWO_ROOT_FAST));
+    b.renderer.init(createWorld('forced-ceiling-determinism-seed', 0, TWO_ROOT_FAST));
+
+    const paramsAt = (i: number) => makeParams({ speed: 0.5 + 0.3 * Math.sin(i * 0.1), expansion: 0.5, symmetry: 0.4 });
+    runTicks(a.renderer, 1400, 16.67, paramsAt);
+    runTicks(b.renderer, 1400, 16.67, paramsAt);
 
     expect(a.renderer.scene()).toEqual(b.renderer.scene());
   });
