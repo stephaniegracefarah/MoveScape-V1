@@ -4,7 +4,7 @@ import { INITIAL_SESSION_PARAMS, type SessionParams } from '../../engine/session
 import { createLabeledStream } from '../../world/labeled-stream';
 import { createWorld, type WorldOverrides } from '../../world/world';
 import type { SceneElement } from '../style-renderer';
-import { angleDifference, growthStepFor } from './branch';
+import { angleDifference, growthStepFor, wanderDeltaFor } from './branch';
 import type { Blossom } from './blossom';
 import {
   computeBakeThreats,
@@ -1655,5 +1655,123 @@ describe('createBotanicalStyle — bake-order safety: echo systems (session 019)
     runTicks(b.renderer, 900, 16.67, paramsAt);
 
     expect(a.renderer.scene()).toEqual(b.renderer.scene());
+  });
+});
+
+describe('createBotanicalStyle — latestMechanismSample ("Show the magic" plumbing, UX Stage 2)', () => {
+  it('is null immediately after init(), before any step()', () => {
+    const renderer = createBotanicalStyle();
+    renderer.init(createWorld('magic-seed', 0));
+    expect(renderer.latestMechanismSample?.()).toBeNull();
+  });
+
+  it('after stepping, returns two entries with the specified labels, function names, module id, and arg keys', () => {
+    const renderer = createBotanicalStyle();
+    renderer.init(createWorld('magic-seed', 0));
+    runTicks(renderer, 5, 16.67, () => makeParams({ speed: 0.4, expansion: 0.7, symmetry: 0.2 }));
+
+    const sample = renderer.latestMechanismSample?.();
+    expect(sample).not.toBeNull();
+    expect(sample!.functions).toHaveLength(2);
+
+    const [growth, wander] = sample!.functions;
+    expect(growth).toMatchObject({
+      tabLabel: 'speed → growth',
+      sourceFunctionName: 'growthStepFor',
+      sourceModule: 'branch.ts',
+    });
+    expect(Object.keys(growth!.args).sort()).toEqual(['baseGrowthPerTick', 'dt', 'speed']);
+
+    expect(wander).toMatchObject({
+      tabLabel: 'expansion + symmetry → wander',
+      sourceFunctionName: 'wanderDeltaFor',
+      sourceModule: 'branch.ts',
+    });
+    expect(Object.keys(wander!.args).sort()).toEqual(
+      [
+        'currentDirection',
+        'dt',
+        'expansion',
+        'noise01',
+        'sweepTarget',
+        'symmetry',
+        'wanderAmplitudeBase',
+        'windAngle',
+      ].sort(),
+    );
+  });
+
+  it('each entry’s result equals its pure branch.ts function re-invoked independently with the reported args', () => {
+    const { renderer, state } = createBotanicalInternal();
+    renderer.init(createWorld('magic-seed-2', 0));
+    runTicks(renderer, 8, 16.67, () => makeParams({ speed: 0.55, expansion: 0.33, symmetry: 0.66 }));
+
+    const sample = renderer.latestMechanismSample?.();
+    expect(sample).not.toBeNull();
+    const growth = sample!.functions[0]!;
+    const wander = sample!.functions[1]!;
+    const g = growth.args;
+    const w = wander.args;
+
+    expect(growth.result).toBe(
+      growthStepFor({
+        dt: g.dt!,
+        speed: g.speed!,
+        baseGrowthPerTick: g.baseGrowthPerTick!,
+        tuning: state.tuning,
+      }),
+    );
+    expect(wander.result).toBe(
+      wanderDeltaFor({
+        noise01: w.noise01!,
+        wanderAmplitudeBase: w.wanderAmplitudeBase!,
+        symmetry: w.symmetry!,
+        expansion: w.expansion!,
+        dt: w.dt!,
+        windAngle: w.windAngle!,
+        currentDirection: w.currentDirection!,
+        sweepTarget: w.sweepTarget!,
+        tuning: state.tuning,
+      }),
+    );
+  });
+
+  it('captures from the newest growing generation-0 branch of the newest foreground system', () => {
+    const { renderer, state } = createBotanicalInternal();
+    renderer.init(createWorld('magic-seed-3', 0));
+    runTicks(renderer, 3, 16.67, () => makeParams({ speed: 0.5, expansion: 0.5, symmetry: 0.5 }));
+
+    const frontSystem = state.foregroundSystems[state.foregroundSystems.length - 1]!;
+    const growingGen0 = frontSystem.branches.filter((b) => b.lifecycle === 'growing' && b.generation === 0);
+    const representative = growingGen0[growingGen0.length - 1]!;
+
+    const sample = renderer.latestMechanismSample?.();
+    expect(sample).not.toBeNull();
+    // sweepTarget is fixed at spawn and never mutated by tickGrowing, so it
+    // uniquely fingerprints which branch the sample was taken from.
+    expect(sample!.functions[1]!.args.sweepTarget).toBe(representative.sweepTarget);
+  });
+
+  it('retains the previous sample rather than nulling it once a sample has been captured', () => {
+    const { renderer } = createBotanicalInternal();
+    renderer.init(createWorld('magic-seed-4', 0));
+    runTicks(renderer, 4, 16.67, () => makeParams({ speed: 0.5, expansion: 0.5, symmetry: 0.5 }));
+    const first = renderer.latestMechanismSample!();
+    expect(first).not.toBeNull();
+
+    // Many more ticks: whatever the growth front looks like later, the getter
+    // must still return a non-null sample.
+    runTicks(renderer, 200, 16.67, () => makeParams({ speed: 0.6, expansion: 0.4, symmetry: 0.5 }));
+    expect(renderer.latestMechanismSample!()).not.toBeNull();
+  });
+
+  it('a fresh init() resets the sample back to null', () => {
+    const renderer = createBotanicalStyle();
+    renderer.init(createWorld('magic-seed-5', 0));
+    runTicks(renderer, 5, 16.67, () => makeParams());
+    expect(renderer.latestMechanismSample?.()).not.toBeNull();
+
+    renderer.init(createWorld('magic-seed-5', 0));
+    expect(renderer.latestMechanismSample?.()).toBeNull();
   });
 });

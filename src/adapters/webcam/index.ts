@@ -5,8 +5,9 @@
  * the camera's native rate. See params-from-landmarks.ts for the landmark
  * → params math itself.
  */
-import type { InputAdapter, ParamsListener } from '../input-adapter';
+import type { InputAdapter, ParamsListener, PosePoint } from '../input-adapter';
 import { startFrameCapture, type FrameCaptureHandle } from './capture';
+import type { PoseLandmarkPoint } from './params-from-landmarks';
 import type { MainToWorkerMessage, WorkerToMainMessage } from './worker-protocol';
 
 function describeGetUserMediaError(err: unknown): string {
@@ -33,6 +34,9 @@ export function createWebcamAdapter(): InputAdapter {
   let worker: Worker | null = null;
   let workerBusy = false;
   let running = false;
+  // Latest frame's raw pose landmarks, for the "Show the magic" skeleton
+  // overlay (UX Stage 2) via latestPose(). null until the first detection.
+  let latestPoseLandmarks: PoseLandmarkPoint[] | null = null;
 
   function teardown(): void {
     capture?.stop();
@@ -43,6 +47,7 @@ export function createWebcamAdapter(): InputAdapter {
     worker = null;
     workerBusy = false;
     running = false;
+    latestPoseLandmarks = null;
   }
 
   async function start(onParams: ParamsListener): Promise<void> {
@@ -143,10 +148,13 @@ export function createWebcamAdapter(): InputAdapter {
       const message = event.data;
       if (message.type === 'result') {
         workerBusy = false;
+        latestPoseLandmarks = message.landmarks;
         onParams(message.params, message.timestampMs);
       } else if (message.type === 'noPose') {
         // No confidently detected pose this frame — no params to emit, but
         // the busy flag must still clear or frame delivery stalls forever.
+        // latestPoseLandmarks is deliberately left as-is: a brief occlusion
+        // shouldn't make the skeleton overlay vanish and snap back.
         workerBusy = false;
       } else if (message.type === 'error') {
         workerBusy = false;
@@ -198,5 +206,15 @@ export function createWebcamAdapter(): InputAdapter {
     worker.postMessage(message);
   }
 
-  return { id: 'webcam', start, stop, previewStream, setSpeedJitterFloor };
+  /**
+   * Latest frame's 33 tracked body points for the "Show the magic" skeleton
+   * overlay (UX Stage 2). null before the first detection and after stop().
+   * A `noPose` frame does NOT clear it — a brief occlusion keeps the last
+   * pose so the overlay doesn't flicker.
+   */
+  function latestPose(): readonly PosePoint[] | null {
+    return running ? latestPoseLandmarks : null;
+  }
+
+  return { id: 'webcam', start, stop, previewStream, setSpeedJitterFloor, latestPose };
 }
