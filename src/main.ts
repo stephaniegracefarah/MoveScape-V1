@@ -296,14 +296,10 @@ if (app) {
       width: 340px;
       min-width: 260px;
       max-width: calc(100vw - 32px);
-      max-height: calc(100vh - 240px);
-      overflow: auto;
-      /* User-resizable width (drag the bottom-right corner); the chosen
-         width is persisted by createMagicPanel. */
-      resize: horizontal;
+      /* Width is user-resizable by dragging the right-edge handle
+         (createMagicPanel builds it); the chosen width is persisted. */
       z-index: 10;
     }
-    .ms-magic-dock::-webkit-resizer { background: transparent; }
     .ms-magic-toggle { position: fixed; left: 16px; bottom: 16px; z-index: 11; }
     #ms-magic-toggle[hidden] { display: none; }
 

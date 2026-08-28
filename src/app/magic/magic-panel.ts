@@ -165,6 +165,8 @@ const PANEL_CSS = `
   .ms-magic {
     box-sizing: border-box;
     width: 100%;
+    max-height: calc(100vh - 240px);
+    overflow-y: auto;
     background: var(--scrim);
     border: 1px solid rgba(36, 26, 23, 0.3);
     padding: 16px;
@@ -172,6 +174,32 @@ const PANEL_CSS = `
     color: var(--ink);
   }
   .ms-magic[hidden] { display: none; }
+  .ms-magic[hidden] + .ms-magic-resizer { display: none; }
+  .ms-magic-resizer {
+    position: absolute;
+    top: 0;
+    right: -4px;
+    width: 10px;
+    height: 100%;
+    cursor: ew-resize;
+    touch-action: none;
+    z-index: 3;
+  }
+  .ms-magic-resizer::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: 4px;
+    width: 1px;
+    background: rgba(36, 26, 23, 0.25);
+  }
+  .ms-magic-resizer:hover::after,
+  .ms-magic-resizer.is-dragging::after {
+    right: 3px;
+    width: 2px;
+    background: var(--ink);
+  }
   .ms-magic-eyebrow { font-size: 10px; font-weight: 500; letter-spacing: 0.14em; text-transform: uppercase; }
   .ms-magic-sub { font-size: 11px; opacity: 0.7; margin-top: 2px; }
   .ms-magic-tabs { display: flex; margin-top: 12px; }
@@ -212,37 +240,72 @@ function injectStyles(): void {
  * internal (a tab click re-renders from the last `update`'s data).
  */
 const WIDTH_STORAGE_KEY = 'ms-magic-panel-width';
+const MIN_PANEL_WIDTH = 260;
+
+function readSavedWidth(): number | null {
+  try {
+    const saved = Number.parseInt(localStorage.getItem(WIDTH_STORAGE_KEY) ?? '', 10);
+    return Number.isFinite(saved) && saved >= MIN_PANEL_WIDTH ? saved : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveWidth(px: number): void {
+  try {
+    localStorage.setItem(WIDTH_STORAGE_KEY, String(Math.round(px)));
+  } catch {
+    /* storage unavailable -- width just won't persist across reloads */
+  }
+}
 
 /**
- * Restores the user's last dragged panel width (CSS `resize: horizontal` on
- * `.ms-magic-dock`, see main.ts) and persists new drags. Wrapped in
- * try/catch since localStorage can throw (private mode, disabled storage).
+ * Restores the last saved panel width and adds a full-height drag handle on
+ * the panel's right edge (dragging anywhere along it resizes the width, not
+ * just a corner). The handle is a sibling of `.ms-magic` inside the fixed
+ * `.ms-magic-dock`, so it hides with the panel and tracks its right edge.
  */
-function wirePersistentWidth(container: HTMLElement): void {
-  try {
-    const saved = localStorage.getItem(WIDTH_STORAGE_KEY);
-    if (saved && /^\d+(\.\d+)?px$/.test(saved)) container.style.width = saved;
-  } catch {
-    /* storage unavailable -- panel just opens at its default width */
-  }
-  if (typeof ResizeObserver === 'undefined') return;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const observer = new ResizeObserver(() => {
-    clearTimeout(timer);
-    timer = setTimeout(() => {
-      try {
-        localStorage.setItem(WIDTH_STORAGE_KEY, `${Math.round(container.getBoundingClientRect().width)}px`);
-      } catch {
-        /* ignore */
-      }
-    }, 250);
+function wireResize(container: HTMLElement): HTMLElement {
+  if (getComputedStyle(container).position === 'static') container.style.position = 'fixed';
+
+  const saved = readSavedWidth();
+  if (saved !== null) container.style.width = `${saved}px`;
+
+  const handle = document.createElement('div');
+  handle.className = 'ms-magic-resizer';
+  handle.setAttribute('aria-hidden', 'true');
+  container.appendChild(handle);
+
+  const maxWidth = (): number => window.innerWidth - 32; // matches the CSS max-width: calc(100vw - 32px)
+
+  handle.addEventListener('pointerdown', (e: PointerEvent) => {
+    e.preventDefault();
+    handle.setPointerCapture(e.pointerId);
+    handle.classList.add('is-dragging');
+    document.body.style.userSelect = 'none';
+    const left = container.getBoundingClientRect().left;
+
+    const onMove = (ev: PointerEvent): void => {
+      const next = Math.max(MIN_PANEL_WIDTH, Math.min(ev.clientX - left, maxWidth()));
+      container.style.width = `${next}px`;
+    };
+    const onUp = (ev: PointerEvent): void => {
+      handle.releasePointerCapture(ev.pointerId);
+      handle.classList.remove('is-dragging');
+      document.body.style.userSelect = '';
+      handle.removeEventListener('pointermove', onMove);
+      handle.removeEventListener('pointerup', onUp);
+      saveWidth(container.getBoundingClientRect().width);
+    };
+    handle.addEventListener('pointermove', onMove);
+    handle.addEventListener('pointerup', onUp);
   });
-  observer.observe(container);
+
+  return handle;
 }
 
 export function createMagicPanel(container: HTMLElement): MagicPanel {
   injectStyles();
-  wirePersistentWidth(container);
 
   const root = document.createElement('div');
   root.className = 'ms-magic';
@@ -305,6 +368,7 @@ export function createMagicPanel(container: HTMLElement): MagicPanel {
   root.appendChild(readoutEl);
   root.appendChild(footEl);
   container.appendChild(root);
+  const resizeHandle = wireResize(container);
 
   let activeTabIndex = 0;
   let lastSample: MechanismSample | null = null;
@@ -315,7 +379,7 @@ export function createMagicPanel(container: HTMLElement): MagicPanel {
     const view = buildMagicView(lastSample, lastParams, activeTabIndex);
 
     const labels = view.tabs.map((t) => t.label);
-    if (labels.join(' ') !== tabLabels.join(' ')) {
+    if (JSON.stringify(labels) !== JSON.stringify(tabLabels)) {
       tabLabels = labels;
       tabsEl.replaceChildren();
       view.tabs.forEach((tab, i) => {
@@ -364,6 +428,7 @@ export function createMagicPanel(container: HTMLElement): MagicPanel {
     },
     destroy(): void {
       root.remove();
+      resizeHandle.remove();
     },
   };
 }
