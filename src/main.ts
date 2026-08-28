@@ -38,7 +38,12 @@ import type { MovementRecording } from './engine/recording';
 // has this fixed height and grows rightward as the piece grows -- see
 // live-render-loop.ts's resizeCanvas callback below, which sets the real
 // canvas element's width every frame to fit the current scene.
-const CANVAS_HEIGHT_PX = 480;
+// Canvas backing-store height in px = the world-to-pixel scale (render-scene.ts's
+// worldUnitPx). Every size in the art is a fraction of this, so raising it
+// renders the same composition at higher resolution -- the fix for the
+// full-bleed CSS upscale looking soft. Watch long-session frame rate if
+// raised further (UX Stage 3 founder ask).
+const CANVAS_HEIGHT_PX = 640;
 
 /**
  * The real OffscreenBufferFactory (the fix for the frame-rate collapse,
@@ -145,7 +150,7 @@ if (app) {
         <span id="ms-activating" class="ms-activating-label" hidden>Starting…</span>
         <button id="ms-pause" type="button" class="ms-btn" hidden>[ Pause ]</button>
         <button id="ms-finish" type="button" class="ms-btn" hidden>[ Finish ]</button>
-        <button id="ms-restart" type="button" class="ms-btn ms-restart-gap" hidden>[ Restart ]</button>
+        <button id="ms-restart" type="button" class="ms-btn" hidden>[ Restart ]</button>
         <button id="ms-save-piece" type="button" class="ms-btn" hidden>[ Save this piece ]</button>
         <button id="ms-keep-moving" type="button" class="ms-btn" hidden>[ Keep moving ]</button>
         <button id="ms-discard-piece" type="button" class="ms-btn" hidden>[ Discard ]</button>
@@ -257,7 +262,6 @@ if (app) {
     /* Press feedback: shows only while held, reverts on release. No colour
        (governing style-guide principle) -- a faint ink wash + 1px nudge. */
     .ms-btn:active:not(:disabled) { transform: translateY(1px); background: rgba(36, 26, 23, 0.08); }
-    .ms-restart-gap { margin-left: 28px; }
 
     .ms-activating-label { font-size: 13px; font-weight: 400; opacity: 0.75; }
     .ms-status-line { font-size: 13px; font-weight: 400; }
