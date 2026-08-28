@@ -131,7 +131,89 @@ function createDomExportRenderCanvasFactory(): ExportRenderCanvasFactory {
   };
 }
 
-const app = document.querySelector<HTMLDivElement>('#app');
+/**
+ * Roadmap item A ("Finish preview"): fitted "show the whole piece" display
+ * geometry, entered at Finish. Pure and side-effect-free so it is
+ * unit-testable without a DOM. Given the canvas backing-store size and the
+ * viewport, it returns the CSS display size for the `<canvas>` element,
+ * whether the wrap needs a horizontal scrollbar (long skinny pieces do not
+ * fit even at the floor height), and -- when scrollable -- that the view
+ * should start at the left edge rather than tracking the growth front.
+ */
+export interface FitDimensions {
+  /** px, for the canvas element's inline CSS width. */
+  displayWidth: number;
+  /** px, for the canvas element's inline CSS height. */
+  displayHeight: number;
+  /** content wider than the viewport -> horizontal scroll needed. */
+  scrollable: boolean;
+  /** true when scrollable -- start the view at the beginning, not the right. */
+  startAtLeft: boolean;
+}
+
+export function computeFitDimensions(
+  canvasWidth: number,
+  canvasHeight: number,
+  viewportWidth: number,
+  viewportHeight: number,
+  minHeightFraction: number,
+): FitDimensions {
+  // Defensive guard only: internal callers always pass real positive
+  // numbers. A zero / non-finite input would otherwise divide through to
+  // NaN dimensions -- fall back to a viewport-sized square.
+  if (
+    !Number.isFinite(canvasWidth) ||
+    !Number.isFinite(canvasHeight) ||
+    !Number.isFinite(viewportWidth) ||
+    !Number.isFinite(viewportHeight) ||
+    canvasWidth <= 0 ||
+    canvasHeight <= 0 ||
+    viewportWidth <= 0 ||
+    viewportHeight <= 0
+  ) {
+    const side = Number.isFinite(viewportHeight) && viewportHeight > 0 ? viewportHeight : 0;
+    return { displayWidth: side, displayHeight: side, scrollable: false, startAtLeft: false };
+  }
+
+  const aspect = canvasWidth / canvasHeight;
+  // Fit to width first: the whole width shown, height follows the aspect.
+  const fitToWidthHeight = viewportWidth / aspect;
+  const floorHeight = minHeightFraction * viewportHeight;
+
+  if (fitToWidthHeight > viewportHeight) {
+    // Piece taller than the viewport (near-square / very short session):
+    // fit to height instead. displayWidth ends up <= viewportWidth.
+    return {
+      displayWidth: viewportHeight * aspect,
+      displayHeight: viewportHeight,
+      scrollable: false,
+      startAtLeft: false,
+    };
+  }
+
+  if (fitToWidthHeight < floorHeight) {
+    // Long skinny piece (a 5-min session is ~19:1): fitting to width would
+    // crush it to an unreadable sliver, so clamp to the floor height and
+    // let the wrap scroll horizontally from the left.
+    return {
+      displayWidth: floorHeight * aspect,
+      displayHeight: floorHeight,
+      scrollable: true,
+      startAtLeft: true,
+    };
+  }
+
+  // The whole piece fits comfortably between the floor and the viewport
+  // height (>= floor is inclusive): fit to width, no scroll.
+  return {
+    displayWidth: viewportWidth,
+    displayHeight: fitToWidthHeight,
+    scrollable: false,
+    startAtLeft: false,
+  };
+}
+
+const app = typeof document === 'undefined' ? null : document.querySelector<HTMLDivElement>('#app');
 
 if (app) {
   app.innerHTML = `
@@ -221,6 +303,20 @@ if (app) {
       z-index: 0;
     }
     .ms-canvas { height: 100%; width: auto; display: block; }
+
+    /* Roadmap item A ("Finish preview"): at Finish the canvas switches to a
+       fitted "show the whole piece" display. The wrap becomes a flex box
+       that letterboxes the canvas in --paper; setCanvasDisplayMode('fit')
+       sets the canvas element's own width/height inline, overriding the
+       height:100%/width:auto rule above. overflow-x:auto is inherited from
+       the base .ms-canvas-wrap rule so long pieces stay scrollable.
+       Flexbox scroll gotcha: with justify-content:center a canvas wider
+       than the wrap overflows unreachably on the left, so the scrollable
+       variant packs to flex-start instead (setCanvasDisplayMode then parks
+       scrollLeft at 0). align-items:center keeps the vertical letterbox in
+       both cases. */
+    .ms-canvas-wrap.ms-fit { display: flex; align-items: center; justify-content: center; }
+    .ms-canvas-wrap.ms-fit-scroll { justify-content: flex-start; }
 
     .ms-left-stack {
       position: fixed;
@@ -680,6 +776,48 @@ if (app) {
       canvasEl.width = CANVAS_HEIGHT_PX;
       canvasEl.height = CANVAS_HEIGHT_PX;
       canvasWrapEl.scrollLeft = 0;
+      setCanvasDisplayMode('tracking');
+    }
+
+    /**
+     * Roadmap item A ("Finish preview"): swap the full-bleed canvas between
+     * the live "tracking" display (stylesheet-driven height:100%/width:auto,
+     * right-edge pinned every frame by resizeCanvas) and a one-shot "fit"
+     * display that shows the whole finished piece letterboxed in the wrap.
+     * Pure display change -- the canvas backing store is never touched.
+     *
+     * Fit dimensions are computed once here from the current viewport and
+     * are deliberately NOT recomputed on a later window resize: the
+     * finished state is transient (Save / Keep moving / Discard all leave
+     * it within seconds), so a stale fit after a resize is acceptable for
+     * v1, and no window resize handler exists to hook.
+     */
+    function setCanvasDisplayMode(mode: 'tracking' | 'fit'): void {
+      if (mode === 'tracking') {
+        canvasWrapEl.classList.remove('ms-fit', 'ms-fit-scroll');
+        // Clear the inline sizes so .ms-canvas { height:100%; width:auto }
+        // takes over again and resizeCanvas's right-edge tracking resumes.
+        canvasEl.style.width = '';
+        canvasEl.style.height = '';
+        return;
+      }
+      const fit = computeFitDimensions(
+        canvasEl.width,
+        canvasEl.height,
+        window.innerWidth,
+        window.innerHeight,
+        0.4,
+      );
+      canvasEl.style.width = `${fit.displayWidth}px`;
+      canvasEl.style.height = `${fit.displayHeight}px`;
+      canvasWrapEl.classList.add('ms-fit');
+      // Flexbox scroll gotcha: justify-content:center makes the left
+      // overflow of an over-wide canvas unreachable, so only center when it
+      // fits; when scrollable, pack to flex-start and park at the left.
+      canvasWrapEl.classList.toggle('ms-fit-scroll', fit.scrollable);
+      if (fit.scrollable || fit.startAtLeft) {
+        canvasWrapEl.scrollLeft = 0;
+      }
     }
 
     // UX Stage 1 header timer: polls liveLoop.getElapsedMs() every ~250ms
@@ -906,6 +1044,11 @@ if (app) {
       finishStatusEl.hidden = false;
       finishStatusEl.textContent = 'This piece is yours.';
       finishStatusEl.classList.remove('ms-status-error');
+      // Roadmap item A: the canvas backing store already holds the whole
+      // piece (liveLoop.stop() above froze it). Switch from right-edge
+      // tracking to the fitted "show the whole piece" display so the user
+      // sees the entire artwork, not just its end. No entry animation.
+      setCanvasDisplayMode('fit');
     }
 
     /**
@@ -920,6 +1063,9 @@ if (app) {
      */
     function keepMovingSession(): void {
       if (!liveLoop || !pendingWorld || !pendingStyle) return;
+      // Roadmap item A: undo the fitted "show the whole piece" display so
+      // resizeCanvas's right-edge tracking resumes as the piece keeps growing.
+      setCanvasDisplayMode('tracking');
       setPaused(false);
       liveLoop.resume();
       pendingRecording = null;
