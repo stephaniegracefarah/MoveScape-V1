@@ -30,7 +30,7 @@ import type { StyleRenderer } from './styles/style-renderer';
 import { openRecipeStore, type RecipeStore } from './storage/recipe-store';
 import { nextSessionIndexFor } from './storage/next-session-index';
 import { exportCanvasAsPng } from './storage/image-export';
-import { serializeRecipe, deserializeRecipe } from './storage/recipe-export';
+import { serializeRecipe } from './storage/recipe-export';
 import { PIECE_RECIPE_VERSION, type PieceRecipe } from './storage/recipe';
 import type { MovementRecording } from './engine/recording';
 
@@ -184,15 +184,7 @@ if (app) {
       </div>
     </div>
 
-    <div class="ms-float ms-backup" id="ms-backup">
-      <button id="ms-import-recipe" type="button" class="ms-btn">[ Import recipe backup… ]</button>
-      <input id="ms-import-recipe-file" type="file" accept="application/json" hidden />
-      <p id="ms-import-status" class="ms-status-line" hidden></p>
-    </div>
-
     <div id="ms-readout"></div>
-
-    <div id="ms-dev-zone"></div>
   `;
 
   const style = document.createElement('style');
@@ -242,7 +234,11 @@ if (app) {
     .ms-wordmark { font-size: 14px; font-weight: 500; letter-spacing: 0.04em; }
     .ms-timer { font-size: 13px; font-weight: 400; font-variant-numeric: tabular-nums; }
 
-    .ms-control-zone { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    /* nowrap + max-content so the finished-state row
+       ([ Save this piece ] [ Keep moving ] [ Discard ]) stays on one line;
+       it may extend past the 380px left-stack width, which is fine (its own
+       scrim background grows with it and nothing clips). */
+    .ms-control-zone { display: flex; align-items: center; gap: 10px; flex-wrap: nowrap; width: max-content; max-width: calc(100vw - 32px); }
 
     .ms-btn {
       font-family: inherit;
@@ -254,8 +250,13 @@ if (app) {
       cursor: pointer;
       padding: 15px 10px;
       margin: 0;
+      white-space: nowrap;
+      transition: transform 40ms ease, background-color 40ms ease;
     }
     .ms-btn:disabled { opacity: 0.5; cursor: default; }
+    /* Press feedback: shows only while held, reverts on release. No colour
+       (governing style-guide principle) -- a faint ink wash + 1px nudge. */
+    .ms-btn:active:not(:disabled) { transform: translateY(1px); background: rgba(36, 26, 23, 0.08); }
     .ms-restart-gap { margin-left: 28px; }
 
     .ms-activating-label { font-size: 13px; font-weight: 400; opacity: 0.75; }
@@ -287,12 +288,10 @@ if (app) {
     }
     .ms-preview-video { display: block; width: 160px; height: auto; transform: scaleX(-1); background: #000; }
 
-    .ms-backup { position: fixed; left: 16px; bottom: 64px; z-index: 10; display: flex; flex-direction: column; gap: 6px; max-width: 260px; }
-
     .ms-magic-dock {
       position: fixed;
       left: 16px;
-      bottom: 108px;
+      bottom: 64px;
       width: 340px;
       min-width: 260px;
       max-width: calc(100vw - 32px);
@@ -333,28 +332,62 @@ if (app) {
       display: none;
     }
 
-    /* Dev-only zone (Part C): a plain, neutral parent so dev-only elements'
-       own untouched inline dark styling still reads correctly -- restores
-       the same dark-on-dark ambient (body used to be dark globally) that
-       those elements' inline styles were originally written against. */
-    #ms-dev-zone {
-      background: #0f0f13;
-      color: #f2f2f2;
-      font-family: system-ui, sans-serif;
-      font-size: 13px;
-      padding: 16px;
+    /* Dev-only tools zone (UX Stage 3): one collapsed corner control instead
+       of three scattered affordances. Deliberately inverted ink/paper --
+       "system / debug surface", visibly NOT the product's Typewriter Utility
+       chrome -- and fixed top-right, clear of every real control. The whole
+       thing is created only inside import.meta.env.DEV blocks, so a
+       production build has no dev DOM at all. */
+    .ms-dev-zone {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      z-index: 30;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 8px;
+      font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+      font-size: 12px;
     }
-    #ms-dev-zone button {
+    .ms-dev-toggle {
       font: inherit;
-      padding: 8px 14px;
-      border-radius: 6px;
-      border: 1px solid #444;
-      background: #1c1c22;
-      color: #f2f2f2;
       cursor: pointer;
+      background: #241a17;
+      color: #f7f0e3;
+      border: none;
+      padding: 6px 10px;
+      letter-spacing: 0.06em;
+      transition: transform 40ms ease;
     }
-    #ms-dev-zone button:hover { background: #26262e; }
-    #ms-dev-zone button:disabled { opacity: 0.5; cursor: default; }
+    .ms-dev-toggle:active { transform: translateY(1px); }
+    .ms-dev-panel {
+      background: #17110e;
+      color: #efe7d9;
+      border: 1px solid #4a3f38;
+      padding: 12px;
+      width: 320px;
+      max-width: calc(100vw - 32px);
+      max-height: 70vh;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .ms-dev-panel[hidden] { display: none; }
+    .ms-dev-panel-head { font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; opacity: 0.6; }
+    .ms-dev-panel button {
+      font: inherit;
+      padding: 6px 10px;
+      border: 1px solid #4a3f38;
+      background: #241a17;
+      color: #efe7d9;
+      cursor: pointer;
+      transition: transform 40ms ease, background-color 40ms ease;
+    }
+    .ms-dev-panel button:hover { background: #2e221c; }
+    .ms-dev-panel button:active { transform: translateY(1px); background: #362a22; }
+    .ms-dev-panel button:disabled { opacity: 0.5; cursor: default; }
   `;
   document.head.appendChild(style);
 
@@ -380,10 +413,6 @@ if (app) {
   const restartDialogElRef = app.querySelector<HTMLDivElement>('#ms-restart-dialog');
   const restartCancelBtnRef = app.querySelector<HTMLButtonElement>('#ms-restart-cancel');
   const restartDoBtnRef = app.querySelector<HTMLButtonElement>('#ms-restart-do');
-  const importRecipeBtnRef = app.querySelector<HTMLButtonElement>('#ms-import-recipe');
-  const importRecipeFileRef = app.querySelector<HTMLInputElement>('#ms-import-recipe-file');
-  const importStatusElRef = app.querySelector<HTMLParagraphElement>('#ms-import-status');
-  const devZoneElRef = app.querySelector<HTMLDivElement>('#ms-dev-zone');
   const magicDockElRef = app.querySelector<HTMLDivElement>('#ms-magic-dock');
   const magicToggleBtnRef = app.querySelector<HTMLButtonElement>('#ms-magic-toggle');
 
@@ -410,10 +439,6 @@ if (app) {
     restartDialogElRef &&
     restartCancelBtnRef &&
     restartDoBtnRef &&
-    importRecipeBtnRef &&
-    importRecipeFileRef &&
-    importStatusElRef &&
-    devZoneElRef &&
     magicDockElRef &&
     magicToggleBtnRef
   ) {
@@ -443,10 +468,10 @@ if (app) {
     const restartDialogEl = restartDialogElRef;
     const restartCancelBtn = restartCancelBtnRef;
     const restartDoBtn = restartDoBtnRef;
-    const importRecipeBtn = importRecipeBtnRef;
-    const importRecipeFile = importRecipeFileRef;
-    const importStatusEl = importStatusElRef;
-    const devZoneEl = devZoneElRef;
+    // Dev-only tools zone (UX Stage 3): the collapsible panel the three
+    // import.meta.env.DEV blocks below mount into. Created lazily in the
+    // first of those blocks; stays undefined (and unreferenced) in production.
+    let devZoneEl: HTMLElement | undefined;
     const magicDockEl = magicDockElRef;
     const magicToggleBtn = magicToggleBtnRef;
     // getContext('2d') is effectively never null for a freshly-created
@@ -1149,32 +1174,6 @@ if (app) {
       discardSession();
     });
 
-    importRecipeBtn.addEventListener('click', () => {
-      importRecipeFile.click();
-    });
-
-    importRecipeFile.addEventListener('change', () => {
-      void (async () => {
-        const file = importRecipeFile.files?.[0];
-        importRecipeFile.value = ''; // clear so re-importing the same filename later still fires 'change'
-        if (!file) return;
-        importStatusEl.hidden = false;
-        importStatusEl.classList.remove('ms-status-error');
-        importStatusEl.textContent = 'Importing…';
-        try {
-          const text = await file.text();
-          const recipe = deserializeRecipe(text);
-          const store = await recipeStorePromise;
-          await store.save(recipe);
-          importStatusEl.textContent = `Imported recipe (world ${recipe.worldSeed}, session ${recipe.sessionIndex}).`;
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          importStatusEl.textContent = `Could not import: ${message}`;
-          importStatusEl.classList.add('ms-status-error');
-        }
-      })();
-    });
-
     pauseBtn.addEventListener('click', () => {
       setPaused(!pauseGate.isPaused());
     });
@@ -1217,21 +1216,61 @@ if (app) {
     // Initial state: idle, nothing running yet.
     setControlRow('idle');
 
+    // Dev-only tools zone (UX Stage 3): one collapsed [ dev tools ] control
+    // pinned top-right, expanding to a single panel that the three
+    // import.meta.env.DEV blocks below populate (manual sliders, speed-jitter
+    // slider, tuning panel). Created entirely inside this branch, so a
+    // production build has no dev DOM, no dev strings, and `devZoneEl` stays
+    // undefined -- the three blocks below each also check `devZoneEl`, so
+    // they no-op in production exactly as before.
+    if (import.meta.env.DEV) {
+      const wrap = document.createElement('div');
+      wrap.className = 'ms-dev-zone';
+
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'ms-dev-toggle';
+
+      const panel = document.createElement('div');
+      panel.className = 'ms-dev-panel';
+      panel.hidden = true;
+
+      const head = document.createElement('div');
+      head.className = 'ms-dev-panel-head';
+      head.textContent = 'DEV TOOLS · not in production';
+      panel.appendChild(head);
+
+      let devOpen = false;
+      const setDevOpen = (open: boolean): void => {
+        devOpen = open;
+        panel.hidden = !open;
+        toggle.textContent = open ? '[ dev tools ▾ ]' : '[ dev tools ▸ ]';
+      };
+      setDevOpen(false);
+      toggle.addEventListener('click', () => setDevOpen(!devOpen));
+
+      wrap.appendChild(toggle);
+      wrap.appendChild(panel);
+      app.appendChild(wrap);
+      devZoneEl = panel;
+    }
+
     // Dev-only: manual slider input. The button itself — and every string
     // that names it — is created only inside this block, and the adapter is
     // reached only through a dynamic import, so a production build (where
     // import.meta.env.DEV is statically false) tree-shakes this whole branch
     // away: no slider button, no slider strings, no slider module in the
     // bundle (M1 acceptance criterion: "a production build contains no
-    // slider UI"). Mounted into #ms-dev-zone (UX Stage 1) rather than the
-    // real control zone, which is no longer a generic div dev code can
+    // slider UI"). Mounted into the dev-tools panel (UX Stage 3) rather than
+    // the real control zone, which is no longer a generic div dev code can
     // freely append into.
-    if (import.meta.env.DEV) {
+    if (import.meta.env.DEV && devZoneEl) {
+      const devZone = devZoneEl;
       const devSlidersBtn = document.createElement('button');
       devSlidersBtn.type = 'button';
       devSlidersBtn.id = 'ms-use-sliders';
       devSlidersBtn.textContent = 'Use sliders';
-      devZoneEl.appendChild(devSlidersBtn);
+      devZone.appendChild(devSlidersBtn);
       useSlidersBtn = devSlidersBtn;
 
       devSlidersBtn.addEventListener('click', () => {
@@ -1257,8 +1296,9 @@ if (app) {
     // in, watching the Speed readout react live while sitting still vs.
     // moving. Every string/DOM node here lives only inside this
     // import.meta.env.DEV branch, tree-shaken from production the same way
-    // as the two blocks above/below it. Mounted into #ms-dev-zone (UX Stage 1).
-    if (import.meta.env.DEV) {
+    // as the two blocks above/below it. Mounted into the dev-tools panel (UX Stage 3).
+    if (import.meta.env.DEV && devZoneEl) {
+      const devZone = devZoneEl;
       const row = document.createElement('div');
       row.style.cssText = 'display:flex; align-items:center; gap:8px; margin:8px 0; font-size:12px;';
 
@@ -1287,7 +1327,7 @@ if (app) {
       row.appendChild(label);
       row.appendChild(input);
       row.appendChild(valueEl);
-      devZoneEl.appendChild(row);
+      devZone.appendChild(row);
     }
 
     // Dev-only: the "backend knobs" tuning panel (M4x). Every DOM node,
@@ -1296,7 +1336,7 @@ if (app) {
     // a production build tree-shakes the whole thing away exactly like the
     // "Use sliders" block above (verified the same way: grep the built
     // dist/ bundle for a panel-only string and confirm zero matches).
-    // Mounted into #ms-dev-zone (UX Stage 1).
+    // Mounted into the dev-tools panel (UX Stage 3).
     //
     // One clear rule for how this interacts with the palette-preset
     // mechanism (see also the comment in startLiveLoop): before the founder
@@ -1308,12 +1348,13 @@ if (app) {
     // that pre-fills this panel's hueBase/hueSpread sliders to the preset's
     // values (via the onPaletteSelected hook), never a second simultaneous
     // override source.
-    if (import.meta.env.DEV) {
+    if (import.meta.env.DEV && devZoneEl) {
+      const devZone = devZoneEl;
       const tuningToggleBtn = document.createElement('button');
       tuningToggleBtn.type = 'button';
       tuningToggleBtn.id = 'ms-tuning-toggle';
       tuningToggleBtn.textContent = 'Show tuning panel';
-      devZoneEl.appendChild(tuningToggleBtn);
+      devZone.appendChild(tuningToggleBtn);
 
       let panelEl: HTMLDivElement | null = null;
       let restartDebounceHandle: ReturnType<typeof setTimeout> | null = null;
@@ -1524,7 +1565,7 @@ if (app) {
       tuningToggleBtn.addEventListener('click', () => {
         if (!panelEl) {
           panelEl = buildPanel();
-          devZoneEl.appendChild(panelEl);
+          devZone.appendChild(panelEl);
         }
         const willShow = panelEl.hidden;
         panelEl.hidden = !willShow;
