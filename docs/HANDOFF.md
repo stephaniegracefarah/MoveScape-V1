@@ -65,7 +65,7 @@ Rules for the coordinator writing entries: newest session on top; be specific en
 
 ## Roadmap — founder-directed next sessions (2026-08-27, priority order)
 
-*(The founder set these four directions at the end of session 023 and explicitly asked that they be recorded as future-session plans, not started. Do them in order unless the founder re-prioritises. Each is written to be startable cold. **Founder directive: all four — plus the Founder-backlog "more instantaneous inputs" item, which D absorbs — must be settled before M6 (a new style) begins.** "I want to nail all these things down before working on a new style.")*
+*(The founder set directions A–D at the end of session 023 and added E in session 024; all are recorded as future-session plans, not started. Do them in order unless the founder re-prioritises. Each is written to be startable cold. **Founder directive: all of these — plus the Founder-backlog "more instantaneous inputs" item, which D absorbs — must be settled before M6 (a new style) begins.** "I want to nail all these things down before working on a new style." A is DONE (session 024). Sequencing of B/C/D/E among themselves: the founder will confirm — see the session 024 log entry.)*
 
 ### A. Finish preview — "see the whole piece before deciding" — DONE, session 024, PR #21 merged (`74ba345`). Implemented as scoped below; founder live-tested "works perfect". Details in the session 024 log entry and the Current state summary bullet.
 
@@ -106,6 +106,27 @@ Rules for the coordinator writing entries: newest session on top; be specific en
 
 **Also in scope for this session: the 4th+ instantaneous input** (Founder-backlog item above) — deciding to add verticality / hand-height / lean / jerkiness is part of "what signals drive the art and how," so settle it here rather than as a standalone task.
 
+### E. Production deployment — ship v1 to a public URL on Vercel (added session 024)
+
+**Goal.** Get v1 live at a shareable HTTPS URL so strangers can use it, per Spec Part 3 "Deployment": static site on Vercel from the private repo, no backend, only the minified bundle public.
+
+**Founder context (2026-08-27):** the founder already uses Vercel for other apps and wants to keep using it. She believes there are no DB needs; if any surface she uses Supabase elsewhere. v1's storage is IndexedDB (browser-local) + file export — genuinely no server — so a DB is not expected.
+
+**What this session must work through:**
+1. **Vercel project setup.** Connect the private GitHub repo via Vercel's git integration, framework preset Vite, build `npm run build`, output `dist/`. Re-verify the production bundle is dev-tool-free against the *deployed* output (already gated behind `import.meta.env.DEV`, verified sessions 022–023).
+2. **Cross-origin isolation headers — the real unknown.** The pose pipeline runs MediaPipe Tasks in a Web Worker with `OffscreenCanvas`; threaded/SIMD WASM + `SharedArrayBuffer` need the page to be `crossOriginIsolated`, i.e. `Cross-Origin-Opener-Policy: same-origin` + `Cross-Origin-Embedder-Policy: require-corp` response headers (set via `vercel.json`). Determine whether the current worker setup actually needs them (test both ways) and whether COEP breaks loading the pose model. Most likely thing to pass in `npm run dev` and fail in prod.
+3. **The pose model asset.** Confirm where the `.task` model loads from — bundled into `dist/` (correct MIME, within Vercel limits) or fetched from Google's CDN (the one allowed external fetch, Spec invariant 5). Verify it loads over HTTPS on the deployed site with whatever headers step 2 lands on.
+4. **HTTPS / camera.** `getUserMedia` needs a secure context; Vercel gives HTTPS automatically — verify on the real URL.
+5. **Caching / routing.** Single page, so likely no `vercel.json` routing needed; sensible cache headers for hashed assets; make sure the model asset isn't refetched every load.
+6. **Domain.** Vercel subdomain to start; a custom domain is a founder decision (she must own/point DNS — ask, don't assume).
+7. **End-to-end test on the deployed URL:** camera permission → pose lock-on → full move session → Finish preview → Save (IndexedDB write + PNG download) → reload, confirm the piece persists. Desktop only; mobile is M7.
+
+**DB decision to record in writing:** v1 ships with zero backend/DB (IndexedDB + file export only). If step 2/3 forces proxying the model asset, that's a static rewrite, still not a DB.
+
+**Coordinator risky-action notes:** the actual deploy trigger and any DNS/custom-domain change are shared-state actions — get explicit founder confirmation before each. If the Vercel *CLI* is used (rather than dashboard git integration), that's a software install — ask first per the standing rule. Prefer the dashboard git integration, which needs no local install.
+
+**Scope.** Likely a small `vercel.json` (headers) plus possibly a minor build-config tweak; the Vercel dashboard setup is the founder's to do or explicitly authorise. One PR for any repo changes, branch `prod-deploy` off `main`. No engine / style / determinism impact.
+
 ## Known issues / debt
 
 *(Bugs, shortcuts taken knowingly, and anything a QA pass flagged but deferred. Each entry says what would make it done.)*
@@ -139,6 +160,8 @@ Rules for the coordinator writing entries: newest session on top; be specific en
 **Coordinator QA:** reviewed the full diff (scoped to `src/main.ts` + the new test; no `world`/`styles`/engine/compositor/network changes — determinism untouched by construction). Ran the suite: **369 passed / 4 skipped**, lint / typecheck / build all clean.
 
 **Founder:** live-tested and merged PR #21 (`ux-finish-preview` → `main`, merge `74ba345`) — "works perfect".
+
+**New roadmap item E added this session (founder request):** production deployment to Vercel (she uses Vercel for other apps; no DB expected, Supabase available if one surfaces). Full plan in the Roadmap section's E entry. It must also land before M6. **Founder to confirm where E sits in the B/C/D order** — this entry will be updated once she does; until then treat B as the next build session unless she says otherwise.
 
 **Next session should:** start Roadmap item B (long-session performance) — an investigation-and-fix session, not a scoped build. Get a real 20–40 min frame-rate profile (Playwright + slider adapter for reproducibility), identify the dominant cost as the session ages, fix it, and decide keep-640 / lower / revert-to-480 as part of the fix. Determinism (geometry hash) invariant still holds — any change is to rendering/compositing, not simulation. Read the Roadmap section's B entry and the Known-issues "live-circle perf caveat" first. **Stop and get founder approval on the plan before building**, per the standing milestone-boundary rule.
 
