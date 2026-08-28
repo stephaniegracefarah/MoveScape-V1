@@ -38,6 +38,20 @@ export interface Blossom {
    * "never revisited" performance shape Branch.bakeResolved documents.
    */
   bakeResolved: boolean;
+
+  /**
+   * Simulated milliseconds this REVEALED blossom has spent unresolved and
+   * blocked by isSafeToBake -- the blossom-side mirror of
+   * Branch.matureBlockedMs (roadmap B, docs/HANDOFF.md). Accumulated from
+   * each step()'s `dt` by resolveBucketBakeThreats (simulated time, never
+   * wall-clock/render frames), and once it reaches `tuning.forcedBakeCeilingMs`
+   * the blossom is force-marked `bakeResolved` anyway, so a blossom stuck
+   * behind Botanical's forever-resprouting near-origin growing branches
+   * can't sit in the live per-frame redraw pass forever. Stays 0 for any
+   * blossom that resolves the normal, safe way (the common case, within a
+   * tick or few of being revealed).
+   */
+  blockedMs: number;
 }
 
 // Internal tuning constants formerly hardcoded here (BLOSSOM_RADIUS_MIN/SPAN,
@@ -152,6 +166,7 @@ export function spawnBlossomCluster(args: SpawnBlossomClusterArgs): Blossom[] {
       radius,
       baseOpacity,
       bakeResolved: false,
+      blockedMs: 0,
     };
 
     if (hasRing) {

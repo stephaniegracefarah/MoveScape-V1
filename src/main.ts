@@ -1617,6 +1617,7 @@ if (app) {
         blossomRevealIntervalMs: { min: 0, max: 300, step: 1 }, // 0 = instant (old behavior); higher = slower "watercolor" build
         blossomRevealSpeedFloor: { min: 0, max: 1, step: 0.01 }, // blended fraction of speed [0,1], mirrors speedFloor
         crossRootBakeSafetyMargin: { min: 0, max: 0.5, step: 0.005 }, // world units, same scale as targetLengthBase
+        forcedBakeCeilingMs: { min: 500, max: 20000, step: 250 }, // simulated ms a mature/revealed element may stay blocked before a forced bake (roadmap B)
       };
 
       function buildPanel(): HTMLDivElement {
