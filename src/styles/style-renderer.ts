@@ -104,6 +104,53 @@ export interface SceneLayer {
   elements: SceneElement[];
 }
 
+/**
+ * One tab's worth of "Show the magic" data (UX Stage 2, docs/UX/develop.md
+ * Live-session decision C): a real function that computes movement→art
+ * behavior, plus the exact scalar arguments and return value from ONE real
+ * call to it on the most recent tick. The panel loads that function's
+ * verbatim source (Vite `?raw`) and annotates it with `args`/`result` — so
+ * what the viewer reads is the running code and the numbers it actually
+ * ran with, never a paraphrase.
+ */
+export interface MechanismFunctionSample {
+  /** Human tab label, e.g. 'speed → growth'. */
+  tabLabel: string;
+  /** Exact exported function name whose verbatim source this tab shows, e.g. 'growthStepFor'. */
+  sourceFunctionName: string;
+  /**
+   * Stable id of the module the function lives in, e.g. 'branch.ts'. Shown
+   * to the viewer ("branch.ts : growthStepFor()") and used by the panel as
+   * the lookup key into its own static table of `?raw`-imported sources
+   * (dynamic `?raw` import of an arbitrary path isn't statically
+   * analyzable, so the panel imports the known sources up front and maps
+   * this id to one of them).
+   */
+  sourceModule: string;
+  /**
+   * Live scalar argument values from this tick's real call, keyed by the
+   * function's own parameter names (`dt`, `speed`, ...). Non-scalar args
+   * (e.g. a `tuning` config object) are omitted — only what annotates
+   * cleanly inline.
+   */
+  args: Record<string, number>;
+  /** What that real call returned this tick. */
+  result: number;
+}
+
+/**
+ * The style's current "Show the magic" snapshot: one entry per tab, in tab
+ * order. Grouped by real function boundary, NOT by readout label — as of
+ * this writing Botanical returns two (speed→growth = `growthStepFor`,
+ * expansion+symmetry→wander = `wanderDeltaFor`), captured from the newest
+ * still-growing generation-0 branch of the newest foreground growth system
+ * (the growth front). A style with no such mechanism omits
+ * `latestMechanismSample` entirely and the panel isn't offered.
+ */
+export interface MechanismSample {
+  functions: MechanismFunctionSample[];
+}
+
 export interface StyleRenderer {
   id: string;
   name: string;
@@ -144,4 +191,15 @@ export interface StyleRenderer {
    * flattened array's raw indices are not.
    */
   sceneLayers?(): SceneLayer[];
+  /**
+   * Optional: the most recent tick's real movement→art function calls, for
+   * the "Show the magic" panel (UX Stage 2). Returns null before the first
+   * qualifying call (e.g. nothing growing yet). Captured during `step()`
+   * from the exact arguments fed to the representative branch's real calls
+   * that tick, with return values from invoking those same pure functions
+   * on those same arguments (branch.ts's growth/wander math is a pure
+   * function of its explicit arguments, so this is the true value, not an
+   * estimate). Read-only; never mutated by the caller.
+   */
+  latestMechanismSample?(): MechanismSample | null;
 }
