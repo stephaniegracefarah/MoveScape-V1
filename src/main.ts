@@ -1270,7 +1270,7 @@ if (app) {
       const devSlidersBtn = document.createElement('button');
       devSlidersBtn.type = 'button';
       devSlidersBtn.id = 'ms-use-sliders';
-      devSlidersBtn.textContent = 'Use sliders';
+      devSlidersBtn.textContent = 'Use sliders instead of camera';
       devZone.appendChild(devSlidersBtn);
       useSlidersBtn = devSlidersBtn;
 
