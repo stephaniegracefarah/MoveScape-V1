@@ -366,14 +366,15 @@ if (app) {
       color: #efe7d9;
       border: 1px solid #4a3f38;
       padding: 12px;
-      width: 320px;
+      width: 360px;
       max-width: calc(100vw - 32px);
-      max-height: 70vh;
+      max-height: 80vh;
       overflow-y: auto;
       display: flex;
       flex-direction: column;
       gap: 10px;
     }
+    .ms-dev-panel input[type='range'] { accent-color: #c98f7a; }
     .ms-dev-panel[hidden] { display: none; }
     .ms-dev-panel-head { font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; opacity: 0.6; }
     .ms-dev-panel button {
@@ -1300,11 +1301,17 @@ if (app) {
     if (import.meta.env.DEV && devZoneEl) {
       const devZone = devZoneEl;
       const row = document.createElement('div');
-      row.style.cssText = 'display:flex; align-items:center; gap:8px; margin:8px 0; font-size:12px;';
+      row.style.cssText = 'display:flex; flex-direction:column; gap:3px; margin:4px 0; font-size:12px;';
+
+      const header = document.createElement('div');
+      header.style.cssText = 'display:flex; justify-content:space-between; align-items:baseline; gap:8px;';
 
       const label = document.createElement('label');
       label.textContent = 'Speed jitter floor (dev)';
-      label.style.cssText = 'width:190px; flex-shrink:0;';
+
+      const valueEl = document.createElement('span');
+      valueEl.textContent = currentSpeedJitterFloor.toFixed(2);
+      valueEl.style.cssText = 'flex-shrink:0; font-variant-numeric:tabular-nums; opacity:0.85;';
 
       const input = document.createElement('input');
       input.type = 'range';
@@ -1312,11 +1319,7 @@ if (app) {
       input.max = '2';
       input.step = '0.01';
       input.value = String(currentSpeedJitterFloor);
-      input.style.cssText = 'flex: 1 1 auto; min-width: 0; max-width: 260px;';
-
-      const valueEl = document.createElement('span');
-      valueEl.textContent = currentSpeedJitterFloor.toFixed(2);
-      valueEl.style.cssText = 'width:48px; text-align:right;';
+      input.style.cssText = 'width:100%; margin:0;';
 
       input.addEventListener('input', () => {
         currentSpeedJitterFloor = Number(input.value);
@@ -1324,9 +1327,10 @@ if (app) {
         activeAdapter?.setSpeedJitterFloor?.(currentSpeedJitterFloor);
       });
 
-      row.appendChild(label);
+      header.appendChild(label);
+      header.appendChild(valueEl);
+      row.appendChild(header);
       row.appendChild(input);
-      row.appendChild(valueEl);
       devZone.appendChild(row);
     }
 
@@ -1378,12 +1382,22 @@ if (app) {
         initialValue: number,
         onChange: (value: number) => void,
       ): HTMLDivElement {
+        // Stacked layout (UX Stage 3): label + value on one line, the slider
+        // full-width beneath. The old side-by-side layout left the range
+        // input ~0px wide once these moved into the narrow dev-tools panel.
         const row = document.createElement('div');
-        row.style.cssText = 'display:flex; align-items:center; gap:8px; margin:3px 0;';
+        row.style.cssText = 'display:flex; flex-direction:column; gap:3px; margin:8px 0;';
+
+        const header = document.createElement('div');
+        header.style.cssText = 'display:flex; justify-content:space-between; align-items:baseline; gap:8px; font-size:11px;';
 
         const label = document.createElement('label');
         label.textContent = labelText;
-        label.style.cssText = 'width:190px; font-size:11px; flex-shrink:0;';
+        label.style.cssText = 'overflow-wrap:anywhere;';
+
+        const valueEl = document.createElement('span');
+        valueEl.textContent = initialValue.toFixed(4);
+        valueEl.style.cssText = 'flex-shrink:0; font-variant-numeric:tabular-nums; opacity:0.85;';
 
         const input = document.createElement('input');
         input.type = 'range';
@@ -1391,11 +1405,7 @@ if (app) {
         input.max = String(max);
         input.step = String(step);
         input.value = String(initialValue);
-        input.style.cssText = 'flex: 1 1 auto; min-width: 0;';
-
-        const valueEl = document.createElement('span');
-        valueEl.textContent = initialValue.toFixed(4);
-        valueEl.style.cssText = 'font-size:11px; width:64px; flex-shrink:0; text-align:right;';
+        input.style.cssText = 'width:100%; margin:0;';
 
         input.addEventListener('input', () => {
           const value = Number(input.value);
@@ -1404,9 +1414,10 @@ if (app) {
           scheduleRestart();
         });
 
-        row.appendChild(label);
+        header.appendChild(label);
+        header.appendChild(valueEl);
+        row.appendChild(header);
         row.appendChild(input);
-        row.appendChild(valueEl);
         return row;
       }
 
@@ -1462,13 +1473,11 @@ if (app) {
         const panel = document.createElement('div');
         panel.id = 'ms-tuning-panel';
         panel.hidden = true;
-        // Explicit color: #ms-dev-zone sets its own dark background/light
-        // text (see the stylesheet above), matching what this panel's
-        // inline styles were always written against -- unrelated to (and
-        // untouched by) the real UI's ink-on-paper restyle.
-        panel.style.cssText =
-          'margin: 12px 0; padding: 12px; border: 1px solid #444; border-radius: 8px; ' +
-          'max-height: 420px; overflow-y: auto; font-size: 12px; color: #f2f2f2;';
+        // The .ms-dev-panel wrapper (UX Stage 3) owns the dark palette and
+        // the outer scroll now; this sub-panel just needs a divider rule and
+        // its own font size. No inner max-height/scroll -- a nested
+        // scrollbar inside the already-scrolling dev panel was unusable.
+        panel.style.cssText = 'margin: 8px 0 0; padding-top: 10px; border-top: 1px solid #4a3f38; font-size: 12px;';
 
         // Seed the panel's world-knob sliders from the world's own current
         // seed-derived values (not 0): whatever world is already live, or
