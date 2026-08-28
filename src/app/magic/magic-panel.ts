@@ -211,8 +211,38 @@ function injectStyles(): void {
  * `update` is expected once per animation frame while shown; tab state is
  * internal (a tab click re-renders from the last `update`'s data).
  */
+const WIDTH_STORAGE_KEY = 'ms-magic-panel-width';
+
+/**
+ * Restores the user's last dragged panel width (CSS `resize: horizontal` on
+ * `.ms-magic-dock`, see main.ts) and persists new drags. Wrapped in
+ * try/catch since localStorage can throw (private mode, disabled storage).
+ */
+function wirePersistentWidth(container: HTMLElement): void {
+  try {
+    const saved = localStorage.getItem(WIDTH_STORAGE_KEY);
+    if (saved && /^\d+(\.\d+)?px$/.test(saved)) container.style.width = saved;
+  } catch {
+    /* storage unavailable -- panel just opens at its default width */
+  }
+  if (typeof ResizeObserver === 'undefined') return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const observer = new ResizeObserver(() => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      try {
+        localStorage.setItem(WIDTH_STORAGE_KEY, `${Math.round(container.getBoundingClientRect().width)}px`);
+      } catch {
+        /* ignore */
+      }
+    }, 250);
+  });
+  observer.observe(container);
+}
+
 export function createMagicPanel(container: HTMLElement): MagicPanel {
   injectStyles();
+  wirePersistentWidth(container);
 
   const root = document.createElement('div');
   root.className = 'ms-magic';

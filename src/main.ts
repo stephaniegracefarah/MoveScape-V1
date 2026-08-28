@@ -294,11 +294,16 @@ if (app) {
       left: 16px;
       bottom: 108px;
       width: 340px;
+      min-width: 260px;
       max-width: calc(100vw - 32px);
       max-height: calc(100vh - 240px);
-      overflow-y: auto;
+      overflow: auto;
+      /* User-resizable width (drag the bottom-right corner); the chosen
+         width is persisted by createMagicPanel. */
+      resize: horizontal;
       z-index: 10;
     }
+    .ms-magic-dock::-webkit-resizer { background: transparent; }
     .ms-magic-toggle { position: fixed; left: 16px; bottom: 16px; z-index: 11; }
     #ms-magic-toggle[hidden] { display: none; }
 
