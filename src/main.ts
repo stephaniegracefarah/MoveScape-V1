@@ -10,6 +10,9 @@ import '@fontsource/ibm-plex-mono/500.css';
 import { createWebcamAdapter } from './adapters/webcam';
 import type { InputAdapter } from './adapters/input-adapter';
 import { createParamsReadout } from './app/readout';
+import { createMagicPanel } from './app/magic/magic-panel';
+import { createSkeletonOverlay } from './app/magic/skeleton-overlay';
+import { MOVEMENT_PARAMS_VERSION, type MovementParams } from './adapters/movement-params';
 import { createPauseGate } from './app/pause-gate';
 import { createActivationTokenSource } from './app/activation-token';
 import { getOrCreateUserId } from './app/user-identity';
@@ -167,6 +170,9 @@ if (app) {
       <button id="ms-toggle-preview" type="button" class="ms-btn">[ hide camera ]</button>
     </div>
 
+    <div class="ms-magic-dock" id="ms-magic-dock"></div>
+    <button id="ms-magic-toggle" type="button" class="ms-btn ms-float ms-magic-toggle" hidden>[ Show the magic ]</button>
+
     <div class="ms-modal-backdrop" id="ms-restart-dialog" hidden>
       <div class="ms-panel ms-modal">
         <p class="ms-modal-title">Restart?</p>
@@ -281,7 +287,21 @@ if (app) {
     }
     .ms-preview-video { display: block; width: 160px; height: auto; transform: scaleX(-1); background: #000; }
 
-    .ms-backup { position: fixed; left: 16px; bottom: 16px; z-index: 10; display: flex; flex-direction: column; gap: 6px; max-width: 260px; }
+    .ms-backup { position: fixed; left: 16px; bottom: 64px; z-index: 10; display: flex; flex-direction: column; gap: 6px; max-width: 260px; }
+
+    .ms-magic-dock {
+      position: fixed;
+      left: 16px;
+      bottom: 108px;
+      width: 340px;
+      min-width: 260px;
+      max-width: calc(100vw - 32px);
+      /* Width is user-resizable by dragging the right-edge handle
+         (createMagicPanel builds it); the chosen width is persisted. */
+      z-index: 10;
+    }
+    .ms-magic-toggle { position: fixed; left: 16px; bottom: 16px; z-index: 11; }
+    #ms-magic-toggle[hidden] { display: none; }
 
     .ms-modal-backdrop {
       position: fixed;
@@ -364,6 +384,8 @@ if (app) {
   const importRecipeFileRef = app.querySelector<HTMLInputElement>('#ms-import-recipe-file');
   const importStatusElRef = app.querySelector<HTMLParagraphElement>('#ms-import-status');
   const devZoneElRef = app.querySelector<HTMLDivElement>('#ms-dev-zone');
+  const magicDockElRef = app.querySelector<HTMLDivElement>('#ms-magic-dock');
+  const magicToggleBtnRef = app.querySelector<HTMLButtonElement>('#ms-magic-toggle');
 
   if (
     readoutContainerRef &&
@@ -391,7 +413,9 @@ if (app) {
     importRecipeBtnRef &&
     importRecipeFileRef &&
     importStatusElRef &&
-    devZoneElRef
+    devZoneElRef &&
+    magicDockElRef &&
+    magicToggleBtnRef
   ) {
     // Re-bind to fresh consts so their (non-null) type is fixed at this
     // point — TypeScript would otherwise re-widen the outer refs to
@@ -423,6 +447,8 @@ if (app) {
     const importRecipeFile = importRecipeFileRef;
     const importStatusEl = importStatusElRef;
     const devZoneEl = devZoneElRef;
+    const magicDockEl = magicDockElRef;
+    const magicToggleBtn = magicToggleBtnRef;
     // getContext('2d') is effectively never null for a freshly-created
     // <canvas> in a real browser; guarded rather than asserted so a
     // hypothetical unsupported environment degrades to "no art rendering"
@@ -430,6 +456,25 @@ if (app) {
     const canvasCtx = canvasEl.getContext('2d');
 
     const readout = createParamsReadout(readoutEl);
+
+    // "Show the magic" (UX Stage 2): a user-facing panel + skeleton overlay,
+    // both created once and reused. The panel is driven by its own
+    // animation-frame loop (startMagicRaf) only while shown; the skeleton
+    // overlay is layered over the camera-preview <video> and only draws
+    // while the panel is shown AND the preview is visible.
+    const magicPanel = createMagicPanel(magicDockEl);
+    const skeletonOverlay = createSkeletonOverlay(previewEl);
+    let magicShown = false;
+    let magicRaf: number | null = null;
+    // Latest MovementParams seen by the params listener -- the magic panel's
+    // readout + code annotation poll this each frame (the live loop only
+    // exposes the mechanism sample, not the raw params).
+    let latestParams: MovementParams = {
+      v: MOVEMENT_PARAMS_VERSION,
+      expansion: 0,
+      speed: 0,
+      symmetry: 0,
+    };
     // Created once, reused across every session/restart -- see the factory's
     // own doc comment above for why this is safe (each create() call hands
     // back an independent offscreen canvas; the factory itself holds no
@@ -482,6 +527,7 @@ if (app) {
     let pendingWorld: World | null = null;
     let pendingStyle: StyleRenderer | null = null;
     const pauseGate = createPauseGate((params, timestampMs) => {
+      latestParams = params;
       readout.update(params, timestampMs);
       liveLoop?.feed(params);
     });
@@ -723,6 +769,49 @@ if (app) {
       keepMovingBtn.hidden = row !== 'finished';
       discardPieceBtn.hidden = row !== 'finished';
       idleBlockEl.hidden = row !== 'idle';
+      // "Show the magic" is a live/paused-session affordance only (mockup
+      // frame 4 shows it during Live) -- never idle, never in the
+      // finished/decision state. Leaving 'live' also force-hides the panel
+      // itself, not just its toggle.
+      magicToggleBtn.hidden = row !== 'live';
+      if (row !== 'live' && magicShown) setMagicShown(false);
+    }
+
+    /**
+     * The magic panel's own animation-frame loop: while shown, polls the
+     * live loop's mechanism sample + the latest params into the panel, and
+     * drives the pose-skeleton overlay. The overlay only draws while the
+     * camera preview <video> is actually mounted (camera hidden -> code +
+     * readout keep updating, skeleton stops) -- it never gates tracking.
+     */
+    function magicFrame(): void {
+      if (!magicShown) return;
+      magicPanel.update(liveLoop?.getMechanismSample() ?? null, latestParams);
+      const previewVisible = previewVideo !== null;
+      skeletonOverlay.setActive(previewVisible);
+      skeletonOverlay.draw(previewVisible ? (activeAdapter?.latestPose?.() ?? null) : null);
+      magicRaf = requestAnimationFrame(magicFrame);
+    }
+
+    function startMagicRaf(): void {
+      if (magicRaf === null) magicRaf = requestAnimationFrame(magicFrame);
+    }
+
+    function stopMagicRaf(): void {
+      if (magicRaf !== null) {
+        cancelAnimationFrame(magicRaf);
+        magicRaf = null;
+      }
+      skeletonOverlay.setActive(false);
+      skeletonOverlay.draw(null);
+    }
+
+    function setMagicShown(shown: boolean): void {
+      magicShown = shown;
+      magicPanel.setShown(shown);
+      magicToggleBtn.textContent = shown ? '[ Hide the magic ]' : '[ Show the magic ]';
+      if (shown) startMagicRaf();
+      else stopMagicRaf();
     }
 
     /**
@@ -748,6 +837,7 @@ if (app) {
       previewPipEl.hidden = true;
       pauseGate.reset();
       setPaused(false);
+      latestParams = { v: MOVEMENT_PARAMS_VERSION, expansion: 0, speed: 0, symmetry: 0 };
       // A full abort: any not-yet-decided finished session is discarded
       // too, not left in limbo behind a hidden panel.
       pendingRecording = null;
@@ -998,6 +1088,9 @@ if (app) {
      */
     async function performRestart(): Promise<void> {
       const previewWasVisible = previewVideo !== null;
+      // Restart carries forward the camera + magic display settings (UX
+      // Stage 1 Restart flow / develop.md) rather than resetting them.
+      const magicWasShown = magicShown;
       resetAdaptersAndUi();
       try {
         const adapter =
@@ -1006,6 +1099,7 @@ if (app) {
             : (await import('./adapters/sliders')).createSliderAdapter();
         await activate(adapter, { autoShowPreview: false });
         if (previewWasVisible) showPreview();
+        if (magicWasShown) setMagicShown(true);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         showError(`Could not restart: ${message}`);
@@ -1091,6 +1185,10 @@ if (app) {
       } else {
         showPreview();
       }
+    });
+
+    magicToggleBtn.addEventListener('click', () => {
+      setMagicShown(!magicShown);
     });
 
     // Palette presets (M4 palette system, narrowed in UX Stage 1 -- idle

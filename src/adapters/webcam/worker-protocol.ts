@@ -4,6 +4,7 @@
  * import the same shapes instead of duplicating them.
  */
 import type { MovementParams } from '../movement-params';
+import type { PoseLandmarkPoint } from './params-from-landmarks';
 
 /**
  * Main thread → worker: a captured frame to run pose detection on. The
@@ -42,6 +43,15 @@ export interface WorkerResultMessage {
   type: 'result';
   params: MovementParams;
   timestampMs: number;
+  /**
+   * The raw 33 pose landmarks this frame's params were computed from,
+   * passed straight through (MediaPipe coordinates, unmirrored). Consumed
+   * only by the "Show the magic" skeleton overlay (UX Stage 2) via the
+   * webcam adapter's `latestPose()`; the params above remain the sole
+   * input to everything downstream (invariant 1). Structured-cloned with
+   * the message — a 33-element array of {x,y,z} is negligible per frame.
+   */
+  landmarks: PoseLandmarkPoint[];
 }
 
 /**

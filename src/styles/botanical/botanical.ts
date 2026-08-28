@@ -21,15 +21,17 @@ import { clamp01 } from '../../shared/math';
 import { createLabeledNoise } from '../../world/labeled-noise';
 import { createLabeledStream } from '../../world/labeled-stream';
 import type { World } from '../../world/world';
-import type { Scene, SceneElement, SceneLayer, StyleRenderer } from '../style-renderer';
+import type { MechanismSample, Scene, SceneElement, SceneLayer, StyleRenderer } from '../style-renderer';
 import {
   checkCrossedForks,
   computeChildBaseWidth,
   computeForkFractions,
   computeMatureDurationMs,
   computeTargetLength,
+  growthStepFor,
   spawnBranch,
   tickGrowing,
+  wanderDeltaFor,
   type Branch,
 } from './branch';
 import { spawnBlossomCluster, type Blossom } from './blossom';
@@ -744,6 +746,8 @@ export interface BotanicalState {
   echoes: GrowthSystemState[];
   latestParams: MovementParams | undefined;
   latestSessionParams: SessionParams;
+  /** "Show the magic" snapshot (UX Stage 2), captured during step() from the representative branch's real growthStepFor/wanderDeltaFor calls -- see stepGrowthSystem and StyleRenderer.latestMechanismSample. null until the first tick with a growing branch in the newest foreground system; once set, only ever replaced by a newer capture, never cleared back to null mid-session (reset to null only by initState). */
+  mechanismSample: MechanismSample | null;
 
   /** Resolved once at renderer creation -- DEFAULT_BOTANICAL_TUNING_CONFIG merged with any caller-supplied partial override, constant for the renderer's whole lifetime. */
   tuning: BotanicalTuningConfig;
@@ -768,6 +772,7 @@ function createEmptyState(tuning: BotanicalTuningConfig): BotanicalState {
     echoes: ECHO_CONFIGS.map((cfg) => createEmptyGrowthSystem(cfg.systemId)),
     latestParams: undefined,
     latestSessionParams: INITIAL_SESSION_PARAMS,
+    mechanismSample: null,
     tuning,
     palette: BOTANICAL_PALETTE_PRESETS[0]!,
     maxConcurrentBranches: 0,
@@ -964,12 +969,68 @@ function stepGrowthSystem(
   const effectiveWanderAmplitudeBase =
     state.wanderAmplitudeBase * (1 + state.latestSessionParams.movementVariance * SESSION_VARIANCE_WANDER_SCALE);
 
+  // "Show the magic" (UX Stage 2): only the newest foreground growth system
+  // is the growth front the panel reads from. Pick its representative branch
+  // now, before the loop mutates any branch state -- newest (last in append
+  // order) still-growing generation-0 branch, else newest still-growing
+  // branch at any generation, else none (and the previous sample is kept).
+  const isGrowthFrontSystem = system === state.foregroundSystems[state.foregroundSystems.length - 1];
+  let representativeBranch: Branch | null = null;
+  if (isGrowthFrontSystem) {
+    for (const branch of system.branches) {
+      if (branch.lifecycle === 'growing' && branch.generation === 0) representativeBranch = branch;
+    }
+    if (!representativeBranch) {
+      for (const branch of system.branches) {
+        if (branch.lifecycle === 'growing') representativeBranch = branch;
+      }
+    }
+  }
+
   for (const branch of system.branches) {
     if (branch.lifecycle === 'growing') {
       const previousGrownLength = branch.grownLength;
       const noise01 = createLabeledNoise(state.sessionSeed, `${branch.id}:wander`)(
         branch.grownLength * state.tuning.curvatureNoiseScale,
       );
+
+      if (branch === representativeBranch) {
+        // Rebuild the exact scalar arg objects this branch's real
+        // growthStepFor / wanderDeltaFor calls get inside tickGrowing below,
+        // captured BEFORE tickGrowing mutates branch.direction/grownLength.
+        // branch.ts's growth/wander math is pure in its explicit args, so
+        // re-invoking here with the same inputs yields the true value.
+        const growthArgs = { dt, speed: params.speed, baseGrowthPerTick: state.baseGrowthPerTick };
+        const wanderArgs = {
+          noise01,
+          wanderAmplitudeBase: effectiveWanderAmplitudeBase,
+          symmetry: params.symmetry,
+          expansion: params.expansion,
+          dt,
+          windAngle: state.windAngle,
+          currentDirection: branch.direction,
+          sweepTarget: branch.sweepTarget,
+        };
+        state.mechanismSample = {
+          functions: [
+            {
+              tabLabel: 'speed → growth',
+              sourceFunctionName: 'growthStepFor',
+              sourceModule: 'branch.ts',
+              args: growthArgs,
+              result: growthStepFor({ ...growthArgs, tuning: state.tuning }),
+            },
+            {
+              tabLabel: 'expansion + symmetry → wander',
+              sourceFunctionName: 'wanderDeltaFor',
+              sourceModule: 'branch.ts',
+              args: wanderArgs,
+              result: wanderDeltaFor({ ...wanderArgs, tuning: state.tuning }),
+            },
+          ],
+        };
+      }
+
       const becameMature = tickGrowing(branch, {
         dt,
         speed: params.speed,
@@ -1058,6 +1119,7 @@ function initState(state: BotanicalState, world: World): void {
   state.blossomsPerCluster = BLOSSOMS_PER_CLUSTER_MIN + Math.floor(blossomsPerClusterRaw * BLOSSOMS_PER_CLUSTER_SPAN);
 
   state.latestParams = undefined;
+  state.mechanismSample = null;
   state.foregroundSystems = [createEmptyGrowthSystem(foregroundSystemId(0))];
   state.echoes = ECHO_CONFIGS.map((cfg) => createEmptyGrowthSystem(cfg.systemId));
 
@@ -1338,6 +1400,10 @@ export function createBotanicalInternal(tuning?: Partial<BotanicalTuningConfig>)
 
     sceneLayers(): SceneLayer[] {
       return buildSceneLayers(state);
+    },
+
+    latestMechanismSample(): MechanismSample | null {
+      return state.mechanismSample;
     },
   };
 

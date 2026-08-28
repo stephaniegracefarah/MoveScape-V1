@@ -8,6 +8,20 @@ import type { MovementParams } from './movement-params';
 /** Receives each new sample as the adapter produces it. */
 export type ParamsListener = (params: MovementParams, timestampMs: number) => void;
 
+/**
+ * One tracked body point, normalized 0-1 in the source image's own frame
+ * (MediaPipe's convention — nothing flipped or mirrored; mirroring stays a
+ * CSS display concern, spec Part 3). Deliberately a minimal generic shape
+ * so the adapter contract doesn't couple to any one tracker's landmark type
+ * (invariant 1); the webcam adapter's own `PoseLandmarkPoint` is
+ * structurally compatible.
+ */
+export interface PosePoint {
+  x: number;
+  y: number;
+  z: number;
+}
+
 export interface InputAdapter {
   id: string;
   /** Begin producing samples; resolves once the adapter is live. */
@@ -30,4 +44,16 @@ export interface InputAdapter {
    * instead of requiring a redeploy per guess. A no-op while not running.
    */
   setSpeedJitterFloor?(value: number): void;
+  /**
+   * Optional: the most recent frame's tracked body points (33 for the
+   * webcam adapter's MediaPipe pose), or null before the first detection /
+   * while not running / when the adapter has no pose concept (the sliders
+   * adapter). Purely a UI affordance for the "Show the magic" skeleton
+   * overlay (UX Stage 2) — like `previewStream()`, tracking never depends
+   * on anyone reading this, and it stays outside the MovementParams
+   * contract (invariant 1: this is an adapter→UI affordance, never seen by
+   * the world layer or styles). Pull-based on purpose: the overlay redraws
+   * on its own animation frame and just reads the latest value each time.
+   */
+  latestPose?(): readonly PosePoint[] | null;
 }

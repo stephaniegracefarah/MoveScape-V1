@@ -130,7 +130,16 @@ function handleFrame(frame: VideoFrame, captureTimeMs: number): void {
       consecutiveNoPoseFrames = 0;
       const { params, state } = computeMovementParams(landmarks, captureTimeMs, frameState, speedJitterFloor);
       frameState = state;
-      scope.postMessage({ type: 'result', params, timestampMs: captureTimeMs });
+      scope.postMessage({
+        type: 'result',
+        params,
+        timestampMs: captureTimeMs,
+        // Passed straight through for the "Show the magic" skeleton overlay
+        // (UX Stage 2). MediaPipe's own NormalizedLandmark objects carry an
+        // extra `visibility` field; map to the plain {x,y,z} the protocol
+        // declares so the structured clone stays minimal and predictable.
+        landmarks: landmarks.map((p) => ({ x: p.x, y: p.y, z: p.z })),
+      });
     } else {
       // No pose confidently detected this frame (e.g. nobody in view yet,
       // or the user stepped out of frame) — emit nothing rather than

@@ -50,7 +50,8 @@ interface RowElements {
 export function createParamsReadout(container: HTMLElement): ParamsReadout {
   const root = document.createElement('div');
   root.className = 'ms-readout';
-  root.style.cssText = 'display:flex;flex-direction:column;gap:10px;min-width:220px;';
+  root.style.cssText =
+    "display:flex;flex-direction:column;gap:10px;min-width:220px;font-family:'IBM Plex Mono',ui-monospace,'SF Mono',Menlo,monospace;color:var(--ink);";
 
   const rows = new Map<ParamKey, RowElements>();
 
@@ -59,25 +60,27 @@ export function createParamsReadout(container: HTMLElement): ParamsReadout {
     row.style.cssText = 'display:flex;flex-direction:column;gap:4px;';
 
     const header = document.createElement('div');
-    header.style.cssText =
-      'display:flex;justify-content:space-between;font:12px system-ui,sans-serif;color:#ddd;';
+    header.style.cssText = 'display:flex;justify-content:space-between;align-items:baseline;';
 
     const labelEl = document.createElement('span');
     labelEl.textContent = label;
+    // Micro / section label per the style guide's typography table.
+    labelEl.style.cssText = 'font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:0.12em;';
 
     const valueLabel = document.createElement('span');
     valueLabel.textContent = '0.00';
+    valueLabel.style.cssText = 'font-size:13px;font-variant-numeric:tabular-nums;';
 
     header.appendChild(labelEl);
     header.appendChild(valueLabel);
 
     const track = document.createElement('div');
     track.style.cssText =
-      'position:relative;height:8px;border-radius:4px;background:rgba(255,255,255,0.12);overflow:hidden;';
+      'position:relative;height:6px;background:rgba(36,26,23,0.15);overflow:hidden;';
 
     const fill = document.createElement('div');
     fill.style.cssText =
-      'position:absolute;left:0;top:0;bottom:0;width:0%;background:#7cc4ff;transition:width 60ms linear;';
+      'position:absolute;left:0;top:0;bottom:0;width:0%;background:var(--ink);transition:width 60ms linear;';
 
     track.appendChild(fill);
     row.appendChild(header);

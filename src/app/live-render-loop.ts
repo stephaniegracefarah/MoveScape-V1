@@ -38,7 +38,7 @@ import { computeCanvasSize, renderScene, type CanvasLike, type CanvasSize } from
 import { recordSample, type MovementRecording } from '../engine/recording';
 import { advanceTicks, SIMULATION_TICK_MS } from '../engine/replay';
 import { createSessionParamsAccumulator } from '../engine/session-params';
-import type { StyleRenderer } from '../styles/style-renderer';
+import type { MechanismSample, StyleRenderer } from '../styles/style-renderer';
 import type { World } from '../world/world';
 
 export interface LiveRenderLoop {
@@ -61,6 +61,13 @@ export interface LiveRenderLoop {
   getRecording(): MovementRecording;
   /** Total simulated session time elapsed so far, in ms -- pause-aware (frozen while `isPaused()` is true) and frozen at its last value once `stop()` has been called. Drives the header session timer (UX Stage 1). */
   getElapsedMs(): number;
+  /**
+   * The style's latest "Show the magic" snapshot (UX Stage 2), or null if
+   * the style doesn't expose one or nothing has been computed yet. A thin
+   * pass-through to `style.latestMechanismSample?.()` -- the panel polls
+   * this on its own animation frame.
+   */
+  getMechanismSample(): MechanismSample | null;
 }
 
 export function createLiveRenderLoop(
@@ -150,6 +157,9 @@ export function createLiveRenderLoop(
     },
     getElapsedMs(): number {
       return sessionElapsedMs;
+    },
+    getMechanismSample(): MechanismSample | null {
+      return style.latestMechanismSample?.() ?? null;
     },
   };
 }
