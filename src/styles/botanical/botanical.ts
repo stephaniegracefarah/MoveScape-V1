@@ -595,7 +595,37 @@ function resolveBucketBakeThreats(
   forkZBound: ForkZBound,
   dt: number,
   forcedBakeCeilingMs: number,
+  /**
+   * Roadmap C3.5 (docs/HANDOFF.md Roadmap C / Session 026) -- the bake-
+   * pipeline split. When true (foreground bucket only), a mature branch of
+   * generation >= 1 -- a forked twig: short, thin, shallow z-spread, low
+   * paint-order risk -- resolves `bakeResolved` IMMEDIATELY on the tick it
+   * matures, skipping the isSafeToBake threat check and the forced-bake
+   * ceiling (`matureBlockedMs`) entirely, and a revealed blossom whose owning
+   * branch is generation >= 1 does the same. This is what drains the bulk of
+   * the live (per-frame-redrawn) set fast enough that raising fork/blossom
+   * density (Commit 2's `density` knob) cannot make it grow without bound.
+   * Generation-0 mature branches and their blossoms -- the few long main
+   * branches, where depth ordering actually matters -- are untouched: full
+   * isSafeToBake + crossRootBakeSafetyMargin + forced-bake-ceiling path,
+   * exactly as before. Echo buckets pass `false` and keep their session-019
+   * behaviour byte-for-byte (C4 revisits echoes).
+   */
+  matureForkFastResolve: boolean,
 ): BakeSafety {
+  // Fast-resolve mature gen>=1 twigs BEFORE computeBakeThreats, so a
+  // just-matured twig also stops being a threat to everything else on the
+  // same tick (the `!branch.bakeResolved` filter below then drops it).
+  if (matureForkFastResolve) {
+    for (const system of systems) {
+      for (const branch of system.branches) {
+        if (branch.lifecycle === 'mature' && !branch.bakeResolved && branch.generation >= 1) {
+          branch.bakeResolved = true;
+        }
+      }
+    }
+  }
+
   const bakeSystems: BakeSafetySystem[] = systems.map((system) => ({
     branches: system.branches
       .filter((branch) => branch.lifecycle === 'growing' || !branch.bakeResolved)
@@ -613,6 +643,9 @@ function resolveBucketBakeThreats(
   for (const system of systems) {
     for (const branch of system.branches) {
       if (branch.lifecycle !== 'mature' || branch.bakeResolved) continue;
+      // With `matureForkFastResolve` set, every gen>=1 twig was already
+      // resolved above -- only generation-0 main branches can still reach
+      // here, and they keep the full careful path unchanged.
       if (!stillBlockedIds.has(branch.id)) {
         // Resolved the normal, safe way -- nothing farther and unrelated can
         // still paint over it.
@@ -656,6 +689,18 @@ function resolveBucketBakeThreats(
     // session 013's frame-rate-collapse cost shape (found via this exact
     // fix's own test suite timing out -- see docs/HANDOFF.md session 021).
     for (const blossom of system.unresolvedBlossoms) {
+      // Roadmap C3.5: a revealed blossom whose owning branch is generation
+      // >= 1 resolves immediately too -- most blossoms sit on fine twigs, so
+      // this is what drains the blossom live set fast. Owning-branch
+      // generation is read from the blossom's own branchId: a forked child's
+      // id always contains '/' (spawnChildBranch's `${parent.id}/child${n}`),
+      // a generation-0 id never does -- the same id-scheme reliance
+      // isAncestorOrDescendant already uses. Gen-0 blossoms keep the careful
+      // isSafeToBake + ceiling path.
+      if (matureForkFastResolve && blossom.branchId.includes('/')) {
+        blossom.bakeResolved = true;
+        continue;
+      }
       if (isSafeToBake({ id: blossom.branchId, z: blossom.z, tipX: blossom.x, threats, margin })) {
         blossom.bakeResolved = true;
         continue;
@@ -705,6 +750,9 @@ function resolveBakeThreats(state: BotanicalState, dt: number): BakeSafetyByBuck
     },
     dt,
     forcedBakeCeilingMs,
+    // Roadmap C3.5: the foreground bucket gets the bake-pipeline split
+    // (mature gen>=1 twigs + their blossoms resolve immediately).
+    true,
   );
   const echoes = state.echoes.map((echoSystem, i) =>
     resolveBucketBakeThreats(
@@ -719,6 +767,8 @@ function resolveBakeThreats(state: BotanicalState, dt: number): BakeSafetyByBuck
       },
       dt,
       forcedBakeCeilingMs,
+      // Echoes unchanged from session 019 -- C4 revisits the echo model.
+      false,
     ),
   );
   return { foreground, echoes };
@@ -1069,6 +1119,34 @@ function stepGrowthSystem(
   const newBranches: Branch[] = [];
   const liveCount = () => system.branches.length + newBranches.length;
 
+  // Roadmap C3.5 (docs/HANDOFF.md Roadmap C / Session 026): in the FOREGROUND
+  // population system, forking is gated on the count of currently-GROWING
+  // branches, NOT on `system.branches` total. `system.branches` is
+  // permanent-ink append-only and grows without bound over a session
+  // (docs/styles/botanical.md section 7) -- gating forking on its length meant
+  // that once it passed `maxConcurrentBranches` (15-60) ALL forking stopped
+  // for the rest of the session (a previous "raise the fork counts" attempt
+  // exposed this: the live/unbaked set grew to 354 unresolved mature branches
+  // with no drain). Gating on the growing count instead makes
+  // `maxConcurrentBranches` a STRUCTURAL, density-knob-independent ceiling on
+  // concurrent live (per-frame-redrawn) work: a new fork is only created
+  // while the growing count is under it, and as branches mature the count
+  // falls and forking resumes. Combined with the bake-pipeline split
+  // (resolveBucketBakeThreats: mature gen>=1 twigs resolve immediately), this
+  // holds the per-frame redraw set flat regardless of how dense the `density`
+  // knob (Commit 2) is set. Seeded once here from the current branch list,
+  // then kept incrementally (+1 per new growing branch this tick, -1 per
+  // maturation this tick) so it stays O(n) per tick. Echo systems
+  // (`resproutRoots === true`) keep the old `liveCount()` fork gate AND the
+  // legacy resprout gate byte-for-byte -- echoes are entirely C4's concern.
+  const gateForkOnGrowingCount = !resproutRoots;
+  let growingCount = 0;
+  for (const branch of system.branches) {
+    if (branch.lifecycle === 'growing') growingCount++;
+  }
+  const forkGateOpen = (): boolean =>
+    gateForkOnGrowingCount ? growingCount < state.maxConcurrentBranches : liveCount() < state.maxConcurrentBranches;
+
   const effectiveWanderAmplitudeBase =
     state.wanderAmplitudeBase * (1 + state.latestSessionParams.movementVariance * SESSION_VARIANCE_WANDER_SCALE);
 
@@ -1149,14 +1227,16 @@ function stepGrowthSystem(
       if (branch.generation < maxGenerationForSystem) {
         const crossedForkIndices = checkCrossedForks(branch, previousGrownLength);
         for (const forkIndex of crossedForkIndices) {
-          if (liveCount() < state.maxConcurrentBranches) {
+          if (forkGateOpen()) {
             newBranches.push(spawnChildBranch(state, branch, forkIndex));
+            growingCount++;
           }
         }
       }
 
       if (becameMature) {
         branch.lifecycle = 'mature';
+        growingCount--;
         branch.lifecycleTimer = 0;
         const jitterDraw = createLabeledStream(state.sessionSeed, `${branch.id}:matureDuration`)();
         branch.matureDurationMs = computeMatureDurationMs(state.baseMatureDurationMs, jitterDraw);
