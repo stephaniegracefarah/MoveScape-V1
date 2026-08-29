@@ -892,7 +892,31 @@ export interface BotanicalState {
   rootCount: number;
   branchSpreadBase: number;
   wanderAmplitudeBase: number;
+  /**
+   * Blossoms per freshly-matured cluster (visual spec section 3), mapped from
+   * the `blossomsPerCluster` world knob -- then, roadmap C3.5 Commit 2,
+   * multiplied by `densityFactor` here at initState (a plain number, not read
+   * from tuning again downstream, so the multiply lands once and for all).
+   */
   blossomsPerCluster: number;
+
+  /**
+   * Roadmap C3.5 Commit 2 (docs/HANDOFF.md Roadmap C / Session 026): the
+   * `density` tuning knob resolved to a coordinated scalar
+   * `f = 2 ** ((density - 0.5) * 2)` and pre-applied, once at initState, to
+   * the population/fork/blossom volume dials below (and to
+   * `blossomsPerCluster` above). At density 0.5 (f = 1) every effective value
+   * equals its base -- a true no-op, scene byte-identical to Commit 1.
+   */
+  densityFactor: number;
+  /** `Math.max(1, round(tuning.mainBranchTarget * densityFactor))` -- used everywhere the growth logic needs the concurrent-main target (initGrowthSystem population size, maybeSpawnMainBranches, spawnMainBranch z-stratification). */
+  effectiveMainBranchTarget: number;
+  /** `tuning.mainBranchSpawnSpacing / densityFactor` -- denser => tighter births. */
+  effectiveMainBranchSpawnSpacing: number;
+  /** `round(tuning.forkCountMin * densityFactor)`, clamped to >= 1 only when the base is itself >= 1 (an explicit base of 0 stays 0 -- no forking). */
+  effectiveForkCountMin: number;
+  /** `round(tuning.forkCountSpan * densityFactor)`. */
+  effectiveForkCountSpan: number;
 
   /**
    * Roadmap C1: the largest `tipX` any generation-0 branch in the foreground
@@ -925,6 +949,11 @@ function createEmptyState(tuning: BotanicalTuningConfig): BotanicalState {
     branchSpreadBase: 0,
     wanderAmplitudeBase: 0,
     blossomsPerCluster: 0,
+    densityFactor: 1,
+    effectiveMainBranchTarget: 0,
+    effectiveMainBranchSpawnSpacing: 0,
+    effectiveForkCountMin: 0,
+    effectiveForkCountSpan: 0,
     frontMaxX: 0,
     lastMainBirthX: 0,
   };
@@ -934,10 +963,10 @@ function currentExpansion(state: BotanicalState): number {
   return state.latestParams?.expansion ?? DEFAULT_EXPANSION_BEFORE_FIRST_STEP;
 }
 
-/** Draws forkFractions for a freshly-spawned branch: count from tuning's fork-count range, jittered spacing via computeForkFractions. */
+/** Draws forkFractions for a freshly-spawned branch: count from the density-scaled fork-count range (state.effectiveForkCount*, roadmap C3.5 Commit 2 -- equal to tuning.forkCount* at density 0.5), jittered spacing via computeForkFractions. */
 function drawForkFractions(state: BotanicalState, id: string): number[] {
   const countDraw = createLabeledStream(state.sessionSeed, `${id}:forkCount`)();
-  const count = Math.floor(state.tuning.forkCountMin + countDraw * state.tuning.forkCountSpan);
+  const count = Math.floor(state.effectiveForkCountMin + countDraw * state.effectiveForkCountSpan);
   const jitterStream = createLabeledStream(state.sessionSeed, `${id}:forkJitter`);
   const jitterDraws = Array.from({ length: count }, () => jitterStream());
   return computeForkFractions(count, jitterDraws, state.tuning);
@@ -1309,16 +1338,35 @@ function initState(state: BotanicalState, world: World): void {
   state.wanderAmplitudeBase = WANDER_AMPLITUDE_MIN + wanderAmplitudeBaseRaw * WANDER_AMPLITUDE_SPAN;
   state.blossomsPerCluster = BLOSSOMS_PER_CLUSTER_MIN + Math.floor(blossomsPerClusterRaw * BLOSSOMS_PER_CLUSTER_SPAN);
 
+  // Roadmap C3.5 Commit 2 (docs/HANDOFF.md Roadmap C / Session 026): the
+  // `density` knob -> one coordinated scalar `f`, applied ONCE here on top of
+  // the individual base dials. density 0.5 -> f = 1 -> every effective value
+  // below equals its base (a true no-op: same draws, same scene). Pure
+  // deterministic config math, no random draws. maxGeneration is deliberately
+  // left untouched (its own separate dial).
+  const densityFactor = 2 ** ((state.tuning.density - 0.5) * 2);
+  state.densityFactor = densityFactor;
+  state.effectiveMainBranchTarget = Math.max(1, Math.round(state.tuning.mainBranchTarget * densityFactor));
+  state.effectiveMainBranchSpawnSpacing = state.tuning.mainBranchSpawnSpacing / densityFactor;
+  // A base fork count of exactly 0 (an explicit "never fork" override) stays
+  // 0; any base >= 1 stays >= 1 after scaling down.
+  state.effectiveForkCountMin =
+    state.tuning.forkCountMin >= 1
+      ? Math.max(1, Math.round(state.tuning.forkCountMin * densityFactor))
+      : Math.round(state.tuning.forkCountMin * densityFactor);
+  state.effectiveForkCountSpan = Math.round(state.tuning.forkCountSpan * densityFactor);
+  state.blossomsPerCluster = Math.round(state.blossomsPerCluster * densityFactor);
+
   state.latestParams = undefined;
   state.mechanismSample = null;
   state.foregroundSystems = [createEmptyGrowthSystem(foregroundSystemId(0))];
   state.echoes = ECHO_CONFIGS.map((cfg) => createEmptyGrowthSystem(cfg.systemId));
 
-  // Roadmap C1: the initial foreground population is `mainBranchTarget`
-  // roots, NOT the `rootCount` knob -- same seeded draw sequence
-  // (`${systemId}:roots` stream), just a different loop bound. Echoes keep
-  // their own fixed per-config rootCount (C4 changes them later).
-  initGrowthSystem(state, state.foregroundSystems[0]!, foregroundSystemId(0), state.tuning.mainBranchTarget);
+  // Roadmap C1: the initial foreground population is the (density-scaled,
+  // roadmap C3.5) main-branch target, NOT the `rootCount` knob -- same seeded
+  // draw sequence (`${systemId}:roots` stream), just a different loop bound.
+  // Echoes keep their own fixed per-config rootCount (C4 changes them later).
+  initGrowthSystem(state, state.foregroundSystems[0]!, foregroundSystemId(0), state.effectiveMainBranchTarget);
   ECHO_CONFIGS.forEach((echoConfig, i) => {
     initGrowthSystem(state, state.echoes[i]!, echoConfig.systemId, echoConfig.rootCount);
   });
@@ -1387,7 +1435,7 @@ function spawnMainBranch(state: BotanicalState, system: GrowthSystemState): void
       createLabeledStream(state.sessionSeed, `${systemId}:root${newIndex}:rootY`)() * state.tuning.rootYSpan;
 
   const zDraw = createLabeledStream(state.sessionSeed, `${systemId}:root${newIndex}:rootZ`)();
-  const target = Math.max(1, state.tuning.mainBranchTarget);
+  const target = state.effectiveMainBranchTarget; // roadmap C3.5: density-scaled (>= 1 by construction); == tuning.mainBranchTarget at density 0.5
   const zRolling = (newIndex + zDraw) / target;
   const z = clamp01(zRolling - Math.floor(zRolling));
 
@@ -1444,8 +1492,10 @@ function spawnMainBranch(state: BotanicalState, system: GrowthSystemState): void
  * whole population matured out).
  */
 function maybeSpawnMainBranches(state: BotanicalState, system: GrowthSystemState): void {
-  const target = state.tuning.mainBranchTarget;
-  const spacing = state.tuning.mainBranchSpawnSpacing;
+  // Roadmap C3.5 Commit 2: the density-scaled effective values (== the raw
+  // tuning fields at density 0.5).
+  const target = state.effectiveMainBranchTarget;
+  const spacing = state.effectiveMainBranchSpawnSpacing;
 
   if (growingMainBranchCount(system) === 0) {
     spawnMainBranch(state, system);

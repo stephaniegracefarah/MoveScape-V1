@@ -184,6 +184,29 @@ export interface BotanicalTuningConfig {
   mainBranchSpawnYOverscan: number;
 
   /**
+   * Roadmap C3.5 Commit 2 (docs/HANDOFF.md Roadmap C / Session 026): the ONE
+   * coordinated "how dense is the whole scroll" dial. Default 0.5 is a true
+   * no-op -- the scene is byte-identical to leaving it out. It maps to a
+   * single coordinated scalar `f = 2 ** ((density - 0.5) * 2)` (so density 0
+   * -> f = 0.5, density 0.5 -> f = 1.0, density 1.0 -> f = 2.0), applied once
+   * at init() on top of the individual base dials:
+   *   - mainBranchTarget        -> Math.max(1, round(base * f))
+   *   - forkCountMin / forkCountSpan -> round(base * f)  (a base >= 1 stays >= 1)
+   *   - mainBranchSpawnSpacing  -> base / f   (denser => tighter births)
+   *   - blossomsPerCluster (the already-world-knob-mapped internal value)
+   *                             -> round(base * f)
+   * maxGeneration is deliberately left alone (its own separate dial). The
+   * individual fields still work as the base values `f` multiplies, so they
+   * stay usable for fine-tuning; `density` is the coordinated control on top.
+   * Pure deterministic config math evaluated once at init -- no new random
+   * draws. (When f changes mainBranchTarget, the initial-population seeded
+   * draw sequence length changes with it, exactly as changing
+   * mainBranchTarget directly does today -- still fully deterministic.)
+   * Dev-panel range 0..1 step 0.02.
+   */
+  density: number;
+
+  /**
    * Forced-bake ceiling (roadmap B, docs/HANDOFF.md): the maximum SIMULATED
    * time (milliseconds, accumulated from each step()'s own `dt` -- never
    * wall-clock, never render frames, so live and replay stay bit-identical)
@@ -270,6 +293,10 @@ export const DEFAULT_BOTANICAL_TUNING_CONFIG: BotanicalTuningConfig = {
   // canvas so those branches grow off the top/bottom edge and are clipped.
   mainBranchSpawnYSpread: 0,
   mainBranchSpawnYOverscan: 0,
+  // Roadmap C3.5 Commit 2: 0.5 is the true no-op midpoint (f = 1.0). Lower =
+  // sparser scroll, higher = denser -- one coordinated dial over
+  // mainBranchTarget / forkCount* / mainBranchSpawnSpacing / blossomsPerCluster.
+  density: 0.5,
   crossRootBakeSafetyMargin: 0.15,
   // ~4 simulated seconds (240 ticks at the 60 Hz fixed timestep). Long
   // enough that a normal resolve -- which lands within a tick or a few --

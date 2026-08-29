@@ -1616,6 +1616,7 @@ if (app) {
         blossomCrossDrawProbability: { min: 0, max: 1, step: 0.01 },
         blossomRevealIntervalMs: { min: 0, max: 300, step: 1 }, // 0 = instant (old behavior); higher = slower "watercolor" build
         blossomRevealSpeedFloor: { min: 0, max: 1, step: 0.01 }, // blended fraction of speed [0,1], mirrors speedFloor
+        density: { min: 0, max: 1, step: 0.02 }, // roadmap C3.5: one coordinated dial over mainBranchTarget / forkCount* / mainBranchSpawnSpacing / blossomsPerCluster; 0.5 = no-op
         mainBranchTarget: { min: 1, max: 8, step: 1 }, // concurrent growing gen-0 "main" branches (roadmap C1 population model)
         mainBranchSpawnSpacing: { min: 0, max: 2, step: 0.05 }, // min front-advance (world units) between successive main-branch births
         mainBranchSpawnXSpread: { min: 0, max: 1.5, step: 0.05 }, // half-width (world units) of the random x offset on each main-branch birth (roadmap C2); 0 = born exactly at the front

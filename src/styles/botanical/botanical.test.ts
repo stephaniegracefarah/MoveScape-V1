@@ -2357,6 +2357,118 @@ describe('createBotanicalStyle — bake-pipeline split + growing-count fork gate
   });
 });
 
+// --- Roadmap C3.5, Commit 2: the `density` tuning knob ---
+// docs/HANDOFF.md Roadmap C / Session 026. `density` (default 0.5) maps to
+// f = 2 ** ((density - 0.5) * 2) and is applied once at init() to
+// mainBranchTarget (Math.max(1, round(base*f))), forkCountMin/forkCountSpan
+// (round(base*f)), mainBranchSpawnSpacing (base/f), and the already-mapped
+// blossomsPerCluster (round(base*f)). maxGeneration is left alone. density 0.5
+// -> f = 1 -> every effective value equals its base -> true no-op.
+describe('createBotanicalStyle — density tuning knob (roadmap C3.5, Commit 2)', () => {
+  const foregroundVolume = (state: ReturnType<typeof createBotanicalInternal>['state']) => {
+    const fg = state.foregroundSystems[0]!;
+    return {
+      branches: fg.branches.length,
+      forks: fg.branches.filter((b) => b.generation >= 1).length,
+      blossoms: fg.blossoms.length,
+      roots: fg.roots.length,
+    };
+  };
+
+  it('density = 0.5 is a true no-op: scene byte-identical to the Commit-1 default over a long run', () => {
+    const explicit = createBotanicalInternal({ density: 0.5 });
+    const def = createBotanicalInternal(); // DEFAULT_BOTANICAL_TUNING_CONFIG.density === 0.5
+    explicit.renderer.init(createWorld('c3.5-density-noop-seed', 0, FAST_CYCLE_OVERRIDES));
+    def.renderer.init(createWorld('c3.5-density-noop-seed', 0, FAST_CYCLE_OVERRIDES));
+
+    const paramsAt = (i: number) => makeParams({ speed: 0.5 + 0.35 * Math.sin(i * 0.03), expansion: 0.6, symmetry: 0.35 });
+    runTicks(explicit.renderer, 2600, 100, paramsAt);
+    runTicks(def.renderer, 2600, 100, paramsAt);
+
+    expect(explicit.state.foregroundSystems[0]!.roots.length).toBeGreaterThan(6); // sanity: a real run with births
+    expect(explicit.renderer.scene()).toEqual(def.renderer.scene());
+    expect(explicit.renderer.sceneLayers?.()).toEqual(def.renderer.sceneLayers?.());
+  });
+
+  it('density = 1.0 yields measurably more branches / forks / blossoms than 0.5, and density = 0.0 measurably fewer, over the same run', () => {
+    const paramsAt = (i: number) => makeParams({ speed: 0.7 + 0.2 * Math.sin(i * 0.03), expansion: 0.6, symmetry: 0.3 });
+    const runAt = (density: number) => {
+      const { renderer, state } = createBotanicalInternal({ density });
+      renderer.init(createWorld('c3.5-density-scale-seed', 0, FAST_CYCLE_OVERRIDES));
+      runTicks(renderer, 2600, 100, paramsAt);
+      return foregroundVolume(state);
+    };
+
+    const lo = runAt(0.0);
+    const mid = runAt(0.5);
+    const hi = runAt(1.0);
+
+    expect(hi.branches).toBeGreaterThan(mid.branches);
+    expect(hi.forks).toBeGreaterThan(mid.forks);
+    expect(hi.blossoms).toBeGreaterThan(mid.blossoms);
+    expect(hi.roots).toBeGreaterThan(mid.roots); // tighter birth spacing + higher target
+
+    expect(lo.branches).toBeLessThan(mid.branches);
+    expect(lo.forks).toBeLessThan(mid.forks);
+    expect(lo.blossoms).toBeLessThan(mid.blossoms);
+  });
+
+  it(
+    'the foreground live set stays bounded with no upward drift over 60+ simulated seconds at density = 1.0 (Commit 1 split holds under max volume)',
+    () => {
+      const dt = 16.67;
+      const TICKS = 3600; // 60 simulated seconds
+      const SAMPLE_EVERY = 300;
+      const { renderer, state } = createBotanicalInternal({ density: 1.0 });
+      renderer.init(createWorld('c3.5-density-bound-seed', 0, FAST_CYCLE_OVERRIDES));
+
+      const matureUnresolved = () => {
+        let n = 0;
+        for (const b of state.foregroundSystems[0]!.branches) if (b.lifecycle === 'mature' && !b.bakeResolved) n++;
+        return n;
+      };
+      const unresolvedBlossoms = () => state.foregroundSystems[0]!.unresolvedBlossoms.length;
+
+      const mature: number[] = [];
+      const blossoms: number[] = [];
+      let time = 0;
+      for (let t = 0; t < TICKS; t++) {
+        renderer.step({ v: 1, expansion: 0.6, speed: 0.7, symmetry: 0.4 }, INITIAL_SESSION_PARAMS, time, dt);
+        time += dt;
+        if ((t + 1) % SAMPLE_EVERY === 0) {
+          mature.push(matureUnresolved());
+          blossoms.push(unresolvedBlossoms());
+        }
+      }
+
+      // The whole point of Commit 1: even with volume cranked to max, the
+      // live set is still bounded and drains (does not accumulate).
+      expect(Math.max(...mature)).toBeLessThan(200);
+      expect(Math.max(...blossoms)).toBeLessThan(2000);
+      const avg = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
+      const postWarmup = (xs: number[]) => xs.slice(2, 6);
+      const lateThird = (xs: number[]) => xs.slice(-4);
+      expect(avg(lateThird(mature))).toBeLessThanOrEqual(avg(postWarmup(mature)) * 2 + 15);
+      expect(avg(lateThird(blossoms))).toBeLessThanOrEqual(avg(postWarmup(blossoms)) * 1.8 + 40);
+    },
+    60000,
+  );
+
+  it('is deterministic with density set to a non-default value: same seed + tuning, run twice, identical scene', () => {
+    const a = createBotanicalInternal({ density: 0.82 });
+    const b = createBotanicalInternal({ density: 0.82 });
+    a.renderer.init(createWorld('c3.5-density-determinism-seed', 0, FAST_CYCLE_OVERRIDES));
+    b.renderer.init(createWorld('c3.5-density-determinism-seed', 0, FAST_CYCLE_OVERRIDES));
+
+    const paramsAt = (i: number) => makeParams({ speed: 0.5 + 0.35 * Math.sin(i * 0.05), expansion: 0.6, symmetry: 0.3 });
+    runTicks(a.renderer, 2400, 100, paramsAt);
+    runTicks(b.renderer, 2400, 100, paramsAt);
+
+    expect(a.state.foregroundSystems[0]!.roots.length).toBeGreaterThan(6);
+    expect(a.renderer.scene()).toEqual(b.renderer.scene());
+  });
+});
+
 describe('createBotanicalStyle — latestMechanismSample ("Show the magic" plumbing, UX Stage 2)', () => {
   it('is null immediately after init(), before any step()', () => {
     const renderer = createBotanicalStyle();
