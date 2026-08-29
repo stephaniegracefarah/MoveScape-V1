@@ -1619,6 +1619,8 @@ if (app) {
         mainBranchTarget: { min: 1, max: 8, step: 1 }, // concurrent growing gen-0 "main" branches (roadmap C1 population model)
         mainBranchSpawnSpacing: { min: 0, max: 2, step: 0.05 }, // min front-advance (world units) between successive main-branch births
         mainBranchSpawnXSpread: { min: 0, max: 1.5, step: 0.05 }, // half-width (world units) of the random x offset on each main-branch birth (roadmap C2); 0 = born exactly at the front
+        mainBranchSpawnYSpread: { min: 0, max: 0.6, step: 0.02 }, // half-height (normalized) of the main-branch birth y spread around the fixed root-band center (roadmap C3); 0 = C1 (y = frontier tipY)
+        mainBranchSpawnYOverscan: { min: 0, max: 0.4, step: 0.02 }, // extra half-height (normalized) letting births land above/below the canvas so branches clip at the top/bottom edge (roadmap C3); inert unless YSpread > 0
         crossRootBakeSafetyMargin: { min: 0, max: 0.5, step: 0.005 }, // world units, same scale as targetLengthBase
         forcedBakeCeilingMs: { min: 500, max: 20000, step: 250 }, // simulated ms a mature/revealed element may stay blocked before a forced bake (roadmap B)
       };

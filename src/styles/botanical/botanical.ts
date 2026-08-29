@@ -1301,7 +1301,7 @@ function spawnMainBranch(state: BotanicalState, system: GrowthSystemState): void
     if (!frontier || branch.tipX > frontier.tipX) frontier = branch;
   }
 
-  const y = frontier
+  let y = frontier
     ? frontier.tipY
     : state.tuning.rootYMin +
       createLabeledStream(state.sessionSeed, `${systemId}:root${newIndex}:rootY`)() * state.tuning.rootYSpan;
@@ -1324,6 +1324,21 @@ function spawnMainBranch(state: BotanicalState, system: GrowthSystemState): void
   // `state.frontMaxX` forward on the next tick's update (still monotonic).
   const xDraw = createLabeledStream(state.sessionSeed, `${systemId}:root${newIndex}:spawnX`)();
   const x = state.frontMaxX + (xDraw * 2 - 1) * state.tuning.mainBranchSpawnXSpread;
+
+  // Roadmap C3: y-spread around a FIXED vertical center (the middle of the
+  // existing root band -- not the wandering frontier tip). Appended after
+  // every existing draw; only engages when mainBranchSpawnYSpread > 0, so at
+  // the default the `:spawnY` draw is never taken and `y` stays exactly the
+  // C1 `frontier.tipY` (with the seeded mid-band fallback) computed above.
+  // The `Overscan` term lets `y` land outside [0, 1] -- the branch then
+  // grows partly off the top/bottom edge and is simply clipped by the
+  // compositor (canvas height is fixed; only width grows -- see
+  // render-scene.ts computeCanvasSize).
+  if (state.tuning.mainBranchSpawnYSpread > 0) {
+    const yDraw = createLabeledStream(state.sessionSeed, `${systemId}:root${newIndex}:spawnY`)();
+    const half = state.tuning.mainBranchSpawnYSpread + state.tuning.mainBranchSpawnYOverscan;
+    y = state.tuning.rootYMin + state.tuning.rootYSpan / 2 + (yDraw * 2 - 1) * half;
+  }
 
   system.roots.push({ x, y, z, baseDirectionCenter });
   system.resproutCounters.set(newIndex, 0);

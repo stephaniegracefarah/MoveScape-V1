@@ -157,6 +157,33 @@ export interface BotanicalTuningConfig {
   mainBranchSpawnXSpread: number;
 
   /**
+   * Roadmap C3 (spawn-y variety, docs/HANDOFF.md Roadmap C entry): the
+   * half-height (normalized canvas-y units) of the random y offset applied
+   * to each newly-born main branch's origin, measured around a FIXED
+   * vertical center (`rootYMin + rootYSpan/2` -- the middle of the existing
+   * root band, NOT the wandering frontier tip). At the default 0 this whole
+   * path is inert: `y` stays `frontier.tipY` with the seeded mid-band
+   * fallback, exactly C1. Raised above 0, `y = center + (yDraw*2-1) *
+   * (mainBranchSpawnYSpread + mainBranchSpawnYOverscan)` where `yDraw` is a
+   * per-birth labeled stream, so births spread across a tall vertical band.
+   * Dev-panel range 0..0.6 step 0.02.
+   */
+  mainBranchSpawnYSpread: number;
+
+  /**
+   * Roadmap C3: extra half-height (normalized) added to
+   * `mainBranchSpawnYSpread` when computing a birth's y offset, whose only
+   * purpose is to let `y` land OUTSIDE [0, 1] -- above the top edge or below
+   * the bottom -- so those main branches grow partly off-canvas and are
+   * hard-clipped at the edge (organic edge-clipping, not an imposed
+   * diagonal). Inert unless `mainBranchSpawnYSpread > 0` (it only widens the
+   * draw that path takes). Geometry off the top/bottom is simply clipped by
+   * the compositor; it never resizes the canvas (canvas height is fixed at
+   * CANVAS_HEIGHT_PX, only width grows). Dev-panel range 0..0.4 step 0.02.
+   */
+  mainBranchSpawnYOverscan: number;
+
+  /**
    * Forced-bake ceiling (roadmap B, docs/HANDOFF.md): the maximum SIMULATED
    * time (milliseconds, accumulated from each step()'s own `dt` -- never
    * wall-clock, never render frames, so live and replay stay bit-identical)
@@ -236,6 +263,13 @@ export const DEFAULT_BOTANICAL_TUNING_CONFIG: BotanicalTuningConfig = {
   // front (C1 behavior). Raise to let births scatter behind / ahead of the
   // front so structure enters the frame already in progress.
   mainBranchSpawnXSpread: 0,
+  // Roadmap C3: both default 0 -- birth y stays frontier.tipY with the
+  // seeded mid-band fallback (C1). Raise mainBranchSpawnYSpread to spread
+  // births across a tall vertical band around the fixed root-band center;
+  // add mainBranchSpawnYOverscan to let some births land above/below the
+  // canvas so those branches grow off the top/bottom edge and are clipped.
+  mainBranchSpawnYSpread: 0,
+  mainBranchSpawnYOverscan: 0,
   crossRootBakeSafetyMargin: 0.15,
   // ~4 simulated seconds (240 ticks at the 60 Hz fixed timestep). Long
   // enough that a normal resolve -- which lands within a tick or a few --

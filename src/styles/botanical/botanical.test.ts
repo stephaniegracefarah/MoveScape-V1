@@ -4,6 +4,7 @@ import { INITIAL_SESSION_PARAMS, type SessionParams } from '../../engine/session
 import { createLabeledStream } from '../../world/labeled-stream';
 import { createWorld, type WorldOverrides } from '../../world/world';
 import type { SceneElement } from '../style-renderer';
+import { computeCanvasSize, renderScene, type CanvasLike } from '../../compositor/render-scene';
 import { angleDifference, growthStepFor, wanderDeltaFor } from './branch';
 import type { Blossom } from './blossom';
 import {
@@ -934,6 +935,127 @@ describe('createBotanicalStyle — spawn-x variety (roadmap C2)', () => {
     runTicks(b.renderer, 2200, 100, paramsAt);
 
     expect(a.state.foregroundSystems[0]!.roots.length).toBeGreaterThan(6); // sanity: births actually happened
+    expect(a.renderer.scene()).toEqual(b.renderer.scene());
+  });
+});
+
+describe('createBotanicalStyle — spawn-y variety + off-canvas overscan (roadmap C3)', () => {
+  const SEED = 'c3-spawn-y-seed';
+
+  /** A no-op CanvasLike stub: exercises the real draw math (drawCircleElement / drawStrokeSegment) against out-of-[0,1] y without a DOM, asserting nothing throws / no NaN reaches a draw call. */
+  function makeStubCtx(): CanvasLike & { calls: number } {
+    const ctx = {
+      calls: 0,
+      fillStyle: '',
+      strokeStyle: '',
+      globalAlpha: 1,
+      lineWidth: 1,
+      lineCap: 'butt' as const,
+      clearRect() {},
+      fillRect() {},
+      beginPath() {},
+      arc(x: number, y: number, r: number) {
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(r)) throw new Error(`non-finite arc(${x},${y},${r})`);
+        ctx.calls++;
+      },
+      moveTo(x: number, y: number) {
+        if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error(`non-finite moveTo(${x},${y})`);
+      },
+      lineTo(x: number, y: number) {
+        if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error(`non-finite lineTo(${x},${y})`);
+        ctx.calls++;
+      },
+      fill() {},
+      stroke() {},
+    };
+    return ctx;
+  }
+
+  it('both fields 0 is a complete no-op: births identical to C1 default', () => {
+    const TARGET = 3;
+    const explicitZero = createBotanicalInternal({
+      mainBranchSpawnYSpread: 0,
+      mainBranchSpawnYOverscan: 0,
+      mainBranchTarget: TARGET,
+      mainBranchSpawnSpacing: 0.15,
+    });
+    const c1Default = createBotanicalInternal({ mainBranchTarget: TARGET, mainBranchSpawnSpacing: 0.15 });
+    explicitZero.renderer.init(createWorld(SEED, 0, FAST_CYCLE_OVERRIDES));
+    c1Default.renderer.init(createWorld(SEED, 0, FAST_CYCLE_OVERRIDES));
+
+    const paramsAt = (i: number) => makeParams({ speed: 0.6 + 0.3 * Math.sin(i * 0.04), expansion: 0.55, symmetry: 0.35 });
+    runTicks(explicitZero.renderer, 1800, 100, paramsAt);
+    runTicks(c1Default.renderer, 1800, 100, paramsAt);
+
+    expect(explicitZero.state.foregroundSystems[0]!.roots.length).toBeGreaterThan(6); // sanity
+    expect(explicitZero.renderer.scene()).toEqual(c1Default.renderer.scene());
+  });
+
+  it('with YSpread > 0, births span a wide vertical band around the fixed root-band center', () => {
+    const TARGET = 3;
+    const YSPREAD = 0.4;
+    const { renderer, state } = createBotanicalInternal({
+      mainBranchSpawnYSpread: YSPREAD, // overscan 0
+      mainBranchTarget: TARGET,
+      mainBranchSpawnSpacing: 0.15,
+    });
+    renderer.init(createWorld(SEED, 0, FAST_CYCLE_OVERRIDES));
+    runTicks(renderer, 2600, 100, () => makeParams({ speed: 0.85, expansion: 0.6, symmetry: 0.3 }));
+
+    const center = DEFAULT_BOTANICAL_TUNING_CONFIG.rootYMin + DEFAULT_BOTANICAL_TUNING_CONFIG.rootYSpan / 2;
+    const bornYs = state.foregroundSystems[0]!.roots.slice(TARGET).map((r) => r.y);
+    expect(bornYs.length).toBeGreaterThan(10);
+    // Wide band: births reach well above and well below the center.
+    expect(Math.min(...bornYs)).toBeLessThan(center - YSPREAD * 0.6);
+    expect(Math.max(...bornYs)).toBeGreaterThan(center + YSPREAD * 0.6);
+    // Overscan 0 -> every offset is bounded by YSPREAD.
+    expect(Math.max(...bornYs.map((y) => Math.abs(y - center)))).toBeLessThanOrEqual(YSPREAD + 1e-9);
+  });
+
+  it('with YOverscan > 0, some births land outside [0, 1] and the scene still renders (no throw, canvas height unchanged)', () => {
+    const TARGET = 3;
+    const { renderer, state } = createBotanicalInternal({
+      mainBranchSpawnYSpread: 0.4,
+      mainBranchSpawnYOverscan: 0.35, // half = 0.75 around center ~0.525 -> reaches ~[-0.225, 1.275]
+      mainBranchTarget: TARGET,
+      mainBranchSpawnSpacing: 0.15,
+    });
+    renderer.init(createWorld(SEED, 0, FAST_CYCLE_OVERRIDES));
+    runTicks(renderer, 2600, 100, () => makeParams({ speed: 0.85, expansion: 0.6, symmetry: 0.3 }));
+
+    const bornYs = state.foregroundSystems[0]!.roots.slice(TARGET).map((r) => r.y);
+    expect(bornYs.some((y) => y < 0)).toBe(true); // above the top edge
+    expect(bornYs.some((y) => y > 1)).toBe(true); // below the bottom edge
+
+    // The scene renders: canvas height stays the fixed value (out-of-[0,1] y
+    // never inflates it -- computeCanvasSize keys height off the fixed input,
+    // width off max x only), and the real draw math handles off-canvas y
+    // without producing a non-finite coordinate.
+    const scene = renderer.scene();
+    const size = computeCanvasSize(scene, 640);
+    expect(size.height).toBe(640);
+    const ctx = makeStubCtx();
+    expect(() => renderScene(ctx, scene, size)).not.toThrow();
+    expect(ctx.calls).toBeGreaterThan(0); // it actually drew something
+  });
+
+  it('is deterministic with the fields engaged: same seed + tuning, run twice, identical scene', () => {
+    const tuning = {
+      mainBranchSpawnYSpread: 0.5,
+      mainBranchSpawnYOverscan: 0.25,
+      mainBranchTarget: 3,
+      mainBranchSpawnSpacing: 0.2,
+    };
+    const a = createBotanicalInternal(tuning);
+    const b = createBotanicalInternal(tuning);
+    a.renderer.init(createWorld('c3-determinism-seed', 0, FAST_CYCLE_OVERRIDES));
+    b.renderer.init(createWorld('c3-determinism-seed', 0, FAST_CYCLE_OVERRIDES));
+
+    const paramsAt = (i: number) => makeParams({ speed: 0.5 + 0.35 * Math.sin(i * 0.05), expansion: 0.6, symmetry: 0.3 });
+    runTicks(a.renderer, 2200, 100, paramsAt);
+    runTicks(b.renderer, 2200, 100, paramsAt);
+
+    expect(a.state.foregroundSystems[0]!.roots.length).toBeGreaterThan(6);
     expect(a.renderer.scene()).toEqual(b.renderer.scene());
   });
 });
