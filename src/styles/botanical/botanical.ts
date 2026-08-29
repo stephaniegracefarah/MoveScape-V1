@@ -792,7 +792,7 @@ function revealPendingBlossoms(system: GrowthSystemState, dt: number, intervalMs
   }
 }
 
-/** The Nth foreground system's id: 'fg0', 'fg1', ... -- see maybeSpawnNextForegroundSystem. */
+/** The Nth foreground system's id: 'fg0', 'fg1', ... -- as of roadmap C1 only 'fg0' is ever used (the population lives in one system), but the helper stays so systemId strings and their labeled-stream namespaces are unchanged. */
 const foregroundSystemId = (index: number): string => `${FOREGROUND_SYSTEM_ID}${index}`;
 
 /**
@@ -803,7 +803,18 @@ const foregroundSystemId = (index: number): string => `${FOREGROUND_SYSTEM_ID}${
  */
 export interface BotanicalState {
   sessionSeed: string;
-  /** Ordered list of foreground growth systems -- normally length 1, growing to 2+ when an earlier system fills its maxConcurrentBranches budget and a successor picks up the sweep (see maybeSpawnNextForegroundSystem). Rendered/stepped identically and in order, oldest first. */
+  /**
+   * The foreground growth systems. As of roadmap C1 (the population model,
+   * docs/HANDOFF.md Roadmap C entry) this is ALWAYS exactly length 1 -- every
+   * main branch lives in `foregroundSystems[0]`. The array type is kept
+   * (rather than collapsed to a single system) only because bake-safety
+   * code, the dev magic panel, and ~40 tests read `foregroundSystems[0]` /
+   * `foregroundSystems[foregroundSystems.length - 1]`; nothing ever appends a
+   * second entry now. The old `maybeSpawnNextForegroundSystem` single-frontier
+   * hand-off (which grew this to 2+) is gone -- successor growth is now a
+   * continuously-seeded, born-and-ending population of finite-life gen-0
+   * branches within the one system (see maybeSpawnMainBranches).
+   */
   foregroundSystems: GrowthSystemState[];
   echoes: GrowthSystemState[];
   latestParams: MovementParams | undefined;
@@ -821,10 +832,28 @@ export interface BotanicalState {
   baseGrowthPerTick: number;
   baseMatureDurationMs: number;
   windAngle: number;
+  /**
+   * Still seed-derived from the `rootCount` world knob (world-layer tests
+   * assert on the knob name, so it stays), but as of roadmap C1 it NO LONGER
+   * sizes the initial foreground population -- `tuning.mainBranchTarget`
+   * does. Kept computed for any diagnostic/inspection use and so the knob
+   * draw sequence is unchanged; not read by the growth logic anymore.
+   */
   rootCount: number;
   branchSpreadBase: number;
   wanderAmplitudeBase: number;
   blossomsPerCluster: number;
+
+  /**
+   * Roadmap C1: the largest `tipX` any generation-0 branch in the foreground
+   * system has ever reached -- monotonic, updated every tick. Drives ONLY
+   * the main-branch birth-spacing gate (maybeSpawnMainBranches); it is not a
+   * scroll/canvas-width input (render-scene.ts already tracks max x over all
+   * emitted geometry independently).
+   */
+  frontMaxX: number;
+  /** Roadmap C1: `frontMaxX` at the moment the most recent main branch was born (initialised to `frontMaxX` right after the initial population is created). A new main branch may only be born once `frontMaxX - lastMainBirthX >= tuning.mainBranchSpawnSpacing` (unless the safety floor fires). */
+  lastMainBirthX: number;
 }
 
 function createEmptyState(tuning: BotanicalTuningConfig): BotanicalState {
@@ -846,6 +875,8 @@ function createEmptyState(tuning: BotanicalTuningConfig): BotanicalState {
     branchSpreadBase: 0,
     wanderAmplitudeBase: 0,
     blossomsPerCluster: 0,
+    frontMaxX: 0,
+    lastMainBirthX: 0,
   };
 }
 
@@ -1024,6 +1055,16 @@ function stepGrowthSystem(
   params: MovementParams,
   dt: number,
   maxGenerationForSystem: number,
+  /**
+   * Roadmap C1: whether a mature generation-0 branch resprouts a fresh
+   * sibling at its own root when its `lifecycleTimer` elapses (the legacy
+   * behavior). The foreground system passes `false` -- its gen-0 branches
+   * just stay mature forever, exactly like gen>0 branches, and successor
+   * growth comes from maybeSpawnMainBranches' born-and-ending population
+   * instead. Echo systems pass `true` and keep the legacy near-root resprout
+   * byte-for-byte (C4 flips them to the population model later).
+   */
+  resproutRoots: boolean,
 ): void {
   const newBranches: Branch[] = [];
   const liveCount = () => system.branches.length + newBranches.length;
@@ -1126,16 +1167,24 @@ function stepGrowthSystem(
       }
     } else {
       // mature -- permanent (docs/styles/botanical.md section 7's "marks are
-      // permanent ink": no shrink, no removal, ever). A generation-0 branch's
-      // timer instead triggers front-driven new growth: once matureDurationMs
-      // elapses, a new sibling spawns at the same root (subject to the same
-      // maxConcurrentBranches cap that already gates forking) and the timer
-      // resets, so a root keeps producing fresh growth for the life of the
-      // session rather than going still. Forked (generation > 0) branches
-      // just carry an unused timer once mature -- only roots resprout.
+      // permanent ink": no shrink, no removal, ever).
+      //
+      // LEGACY RESPROUT (echo systems only, `resproutRoots === true`): a
+      // generation-0 branch's timer triggers front-driven new growth -- once
+      // matureDurationMs elapses a fresh sibling spawns at the same root
+      // (subject to the same maxConcurrentBranches cap that gates forking)
+      // and the timer resets, so a root keeps producing growth for the life
+      // of the session. Forked (generation > 0) branches just carry an
+      // unused timer -- only roots resprout.
+      //
+      // POPULATION MODE (foreground, `resproutRoots === false`, roadmap C1):
+      // a mature gen-0 branch does nothing on its timer -- identical terminal
+      // behavior to a gen>0 branch. Successor growth is a born-and-ending
+      // population of finite-life gen-0 "main" branches (maybeSpawnMainBranches,
+      // called from stepState for the foreground system only).
       branch.lifecycleTimer += dt;
 
-      if (branch.lifecycleTimer >= branch.matureDurationMs) {
+      if (resproutRoots && branch.lifecycleTimer >= branch.matureDurationMs) {
         branch.lifecycleTimer = 0;
         if (branch.generation === 0 && liveCount() < state.maxConcurrentBranches) {
           newBranches.push(spawnRootBranch(state, system, systemId, branch.rootIndex));
@@ -1185,46 +1234,126 @@ function initState(state: BotanicalState, world: World): void {
   state.foregroundSystems = [createEmptyGrowthSystem(foregroundSystemId(0))];
   state.echoes = ECHO_CONFIGS.map((cfg) => createEmptyGrowthSystem(cfg.systemId));
 
-  initGrowthSystem(state, state.foregroundSystems[0]!, foregroundSystemId(0), state.rootCount);
+  // Roadmap C1: the initial foreground population is `mainBranchTarget`
+  // roots, NOT the `rootCount` knob -- same seeded draw sequence
+  // (`${systemId}:roots` stream), just a different loop bound. Echoes keep
+  // their own fixed per-config rootCount (C4 changes them later).
+  initGrowthSystem(state, state.foregroundSystems[0]!, foregroundSystemId(0), state.tuning.mainBranchTarget);
   ECHO_CONFIGS.forEach((echoConfig, i) => {
     initGrowthSystem(state, state.echoes[i]!, echoConfig.systemId, echoConfig.rootCount);
   });
+
+  // Seed the birth-spacing gate from the population just created: every
+  // initial main branch starts with tipX === its own rootX, so the front is
+  // the rightmost initial root x. Births are then paced by how far the front
+  // advances past this point.
+  state.frontMaxX = 0;
+  for (const branch of state.foregroundSystems[0]!.branches) {
+    if (branch.generation === 0 && branch.tipX > state.frontMaxX) state.frontMaxX = branch.tipX;
+  }
+  state.lastMainBirthX = state.frontMaxX;
+}
+
+/** Count of currently-GROWING generation-0 branches in `system` -- the population maybeSpawnMainBranches keeps topped up to `tuning.mainBranchTarget`. Forked sub-branches (generation >= 1) never count. */
+function growingMainBranchCount(system: GrowthSystemState): number {
+  let n = 0;
+  for (const branch of system.branches) {
+    if (branch.generation === 0 && branch.lifecycle === 'growing') n++;
+  }
+  return n;
 }
 
 /**
- * Once the currently-active (last) foreground system fills its
- * maxConcurrentBranches budget, spawns a successor that continues the sweep
- * seamlessly rather than raising or sharing the cap (docs/HANDOFF.md,
- * growth-plateau fix folded into M5 Stage 3). "Seamless" is the whole
- * requirement: the new system's one starting root is placed exactly at the
- * old system's growth front -- the branch with the largest tipX, i.e. the
- * one that has traveled furthest along the rightward sweep -- not at a fresh
- * random position, so the hand-off reads as the same tree continuing rather
- * than a new wave starting elsewhere on the canvas.
+ * Roadmap C1 birth: appends one fresh generation-0 "main" branch to the
+ * foreground system at the current growth front. Replaces both the old
+ * near-origin resprout and the single-frontier hand-off.
  *
- * Self-limiting by construction: a freshly-appended successor starts with
- * exactly 1 branch, far under maxConcurrentBranches's minimum of 15, so it
- * becomes the new "last" system and the very next tick's check on it
- * immediately returns false. No extra "already spawned" flag is needed.
+ * Placement (C1 keeps this deliberately simple -- C2/C3 add x/y variety):
+ *  - `x` = `state.frontMaxX` (born at the front, as the old hand-off used
+ *    `frontier.tipX`).
+ *  - `y` = the `tipY` of the current furthest-right gen-0 branch (as the old
+ *    hand-off used `frontier.tipY`); if none exists yet, a seeded mid-band y
+ *    drawn the same way initGrowthSystem draws root y.
+ *  - `z` = initGrowthSystem's own stratified formula with a rolling index:
+ *    `frac((newIndex + zDraw) / mainBranchTarget)`. This cycles successive
+ *    births through the foreground depth bands (spread is desirable) while
+ *    keeping each individual birth's z bounded to one 1/target-wide stratum
+ *    rather than the full [0,1] -- a narrower spread than a raw uniform draw,
+ *    which keeps the live-vs-renderScene() depth-ordering divergence closer
+ *    to baseline (see docs/HANDOFF.md render-divergence notes).
+ *  - `baseDirectionCenter` = the sweep angle jittered by
+ *    `rootBaseDirectionSpread`, same as an initial root.
+ *
+ * Every draw is a labeled stream off `state.sessionSeed` keyed by the new
+ * root index, so births stay bit-identical live vs replay. Birth cadence is
+ * driven purely by dt-advanced sim state (`state.frontMaxX`) via
+ * maybeSpawnMainBranches -- no wall-clock anywhere.
  */
-function maybeSpawnNextForegroundSystem(state: BotanicalState): void {
-  const last = state.foregroundSystems[state.foregroundSystems.length - 1]!;
-  if (last.branches.length < state.maxConcurrentBranches) return;
+function spawnMainBranch(state: BotanicalState, system: GrowthSystemState): void {
+  const systemId = system.systemId;
+  const newIndex = system.roots.length;
 
-  const frontier = last.branches.reduce((furthest, branch) => (branch.tipX > furthest.tipX ? branch : furthest));
+  let frontier: Branch | undefined;
+  for (const branch of system.branches) {
+    if (branch.generation !== 0) continue;
+    if (!frontier || branch.tipX > frontier.tipX) frontier = branch;
+  }
 
-  const newSystemId = foregroundSystemId(state.foregroundSystems.length);
-  const dirJitter = createLabeledStream(state.sessionSeed, `${newSystemId}:handoffDirection`)();
-  const baseDirectionCenter = COMPOSITION_SWEEP_ANGLE + (dirJitter * 2 - 1) * state.tuning.rootBaseDirectionSpread;
+  const x = state.frontMaxX;
 
-  const root: RootPoint = { x: frontier.tipX, y: frontier.tipY, z: frontier.z, baseDirectionCenter };
+  const y = frontier
+    ? frontier.tipY
+    : state.tuning.rootYMin +
+      createLabeledStream(state.sessionSeed, `${systemId}:root${newIndex}:rootY`)() * state.tuning.rootYSpan;
 
-  const newSystem = createEmptyGrowthSystem(newSystemId);
-  newSystem.roots = [root];
-  newSystem.resproutCounters.set(0, 0);
-  newSystem.branches = [spawnRootBranch(state, newSystem, newSystemId, 0)];
+  const zDraw = createLabeledStream(state.sessionSeed, `${systemId}:root${newIndex}:rootZ`)();
+  const target = Math.max(1, state.tuning.mainBranchTarget);
+  const zRolling = (newIndex + zDraw) / target;
+  const z = clamp01(zRolling - Math.floor(zRolling));
 
-  state.foregroundSystems.push(newSystem);
+  const dirJitterDraw = createLabeledStream(state.sessionSeed, `${systemId}:root${newIndex}:rootDir`)();
+  const baseDirectionCenter =
+    COMPOSITION_SWEEP_ANGLE + (dirJitterDraw * 2 - 1) * state.tuning.rootBaseDirectionSpread;
+
+  system.roots.push({ x, y, z, baseDirectionCenter });
+  system.resproutCounters.set(newIndex, 0);
+  system.branches.push(spawnRootBranch(state, system, systemId, newIndex));
+}
+
+/**
+ * Roadmap C1 (the population model): keeps the foreground system topped up to
+ * `tuning.mainBranchTarget` concurrently-growing generation-0 branches.
+ * Called from stepState for the foreground system ONLY (echoes keep the
+ * legacy resprout until C4), right where the deleted
+ * `maybeSpawnNextForegroundSystem` used to run.
+ *
+ * A new main branch is born whenever the growing gen-0 count is below target
+ * AND the growth front has advanced at least `mainBranchSpawnSpacing` past
+ * the last birth -- the spacing gate stops the whole population re-spawning
+ * on one tick. Each birth sets `lastMainBirthX = frontMaxX`, so the loop
+ * self-limits to (at most) one birth per qualifying tick unless spacing is 0.
+ *
+ * Safety floor: if the growing gen-0 count is exactly 0, one branch is born
+ * immediately, ignoring the spacing gate -- growth must never fully stall
+ * (e.g. after a long still stretch where the front didn't advance while the
+ * whole population matured out).
+ */
+function maybeSpawnMainBranches(state: BotanicalState, system: GrowthSystemState): void {
+  const target = state.tuning.mainBranchTarget;
+  const spacing = state.tuning.mainBranchSpawnSpacing;
+
+  if (growingMainBranchCount(system) === 0) {
+    spawnMainBranch(state, system);
+    state.lastMainBirthX = state.frontMaxX;
+  }
+
+  while (
+    growingMainBranchCount(system) < target &&
+    state.frontMaxX - state.lastMainBirthX >= spacing
+  ) {
+    spawnMainBranch(state, system);
+    state.lastMainBirthX = state.frontMaxX;
+  }
 }
 
 function stepState(state: BotanicalState, params: MovementParams, sessionParams: SessionParams, dt: number): void {
@@ -1232,9 +1361,17 @@ function stepState(state: BotanicalState, params: MovementParams, sessionParams:
   state.latestSessionParams = sessionParams;
 
   for (const system of state.foregroundSystems) {
-    stepGrowthSystem(state, system, system.systemId, params, dt, state.tuning.maxGeneration);
+    stepGrowthSystem(state, system, system.systemId, params, dt, state.tuning.maxGeneration, false);
   }
-  maybeSpawnNextForegroundSystem(state);
+
+  // Roadmap C1: advance the monotonic growth front (max tipX over foreground
+  // gen-0 branches), then top the main-branch population back up to target.
+  // Foreground only -- echoes never drive the front and keep legacy resprout.
+  const foreground = state.foregroundSystems[0]!;
+  for (const branch of foreground.branches) {
+    if (branch.generation === 0 && branch.tipX > state.frontMaxX) state.frontMaxX = branch.tipX;
+  }
+  maybeSpawnMainBranches(state, foreground);
 
   ECHO_CONFIGS.forEach((echoConfig, i) => {
     stepGrowthSystem(
@@ -1244,6 +1381,7 @@ function stepState(state: BotanicalState, params: MovementParams, sessionParams:
       params,
       dt,
       Math.min(state.tuning.maxGeneration, echoConfig.maxGenerationCap),
+      true,
     );
   });
 
@@ -1398,10 +1536,10 @@ function buildScene(state: BotanicalState): Scene {
  * per-element depth-offset/opacity-multiplier math, just kept as one
  * SceneLayer per growth system instead of flattened into buildScene's
  * single shared array. `layerId` is each system's own `systemId`, which
- * stays stable and unique for the life of a session (foregroundSystems only
- * ever grows via maybeSpawnNextForegroundSystem; echoes are fixed). Does
- * not affect buildScene/scene()/finish() in any way -- this is purely
- * additive.
+ * stays stable and unique for the life of a session (as of roadmap C1 the
+ * layers are exactly `fg0` + the fixed echoes -- the population model keeps
+ * one foreground system). Does not affect buildScene/scene()/finish() in any
+ * way -- this is purely additive.
  */
 function buildSceneLayers(state: BotanicalState): SceneLayer[] {
   const layers: SceneLayer[] = [];

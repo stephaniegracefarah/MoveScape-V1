@@ -111,6 +111,34 @@ export interface BotanicalTuningConfig {
   crossRootBakeSafetyMargin: number;
 
   /**
+   * Roadmap C1 (the population model, docs/HANDOFF.md Roadmap C entry): the
+   * target number of concurrently-GROWING generation-0 "main" branches in
+   * the single foreground growth system. Replaces the old near-origin
+   * resprout + single-frontier hand-off, both of which made the whole scroll
+   * after the opening one dominant lineage. Each main branch grows to its
+   * seeded targetLength, matures, fires its blossom cluster, and then stays
+   * mature forever (no resprout -- same terminal behavior gen>0 branches
+   * already have). Whenever the count of currently-growing gen-0 branches
+   * drops below this, a new one is born at the growth front (subject to
+   * mainBranchSpawnSpacing). The initial population (initGrowthSystem) is
+   * also this many roots. Live-tunable via the dev panel like every other
+   * field here.
+   */
+  mainBranchTarget: number;
+
+  /**
+   * Roadmap C1: the minimum front-advance distance (normalized world units,
+   * same scale as targetLengthBase) the growth front must travel past the
+   * last main-branch birth before another main branch may be born. Stops the
+   * whole population from re-spawning on a single tick the instant the
+   * growing count dips. The safety floor (a growing-gen-0 count of exactly 0
+   * while the session is live) overrides this gate -- growth must never fully
+   * stall. Set to 0 to disable spacing entirely (births refill the target
+   * immediately). Live-tunable via the dev panel.
+   */
+  mainBranchSpawnSpacing: number;
+
+  /**
    * Forced-bake ceiling (roadmap B, docs/HANDOFF.md): the maximum SIMULATED
    * time (milliseconds, accumulated from each step()'s own `dt` -- never
    * wall-clock, never render frames, so live and replay stay bit-identical)
@@ -179,6 +207,13 @@ export const DEFAULT_BOTANICAL_TUNING_CONFIG: BotanicalTuningConfig = {
   blossomCrossDrawProbability: 0.4,
   blossomRevealIntervalMs: 300,
   blossomRevealSpeedFloor: 0,
+  // Roadmap C1: default 3 concurrent growing main branches, births gated to
+  // at least 0.4 world units of front advance apart (targetLengthBase is
+  // 0.65, so successive main branches enter the frame roughly two-thirds of
+  // a full main-branch length apart -- multiple distinct lineages down the
+  // scroll rather than one).
+  mainBranchTarget: 3,
+  mainBranchSpawnSpacing: 0.4,
   crossRootBakeSafetyMargin: 0.15,
   // ~4 simulated seconds (240 ticks at the 60 Hz fixed timestep). Long
   // enough that a normal resolve -- which lands within a tick or a few --

@@ -114,6 +114,17 @@ const FAST_CYCLE_OVERRIDES: WorldOverrides = {
   matureDurationMs: 0, // -> 3000ms, the minimum
 };
 
+// Roadmap C1: many bake-safety tests below want a growth system with a
+// FIXED, known number of generation-0 "main" branches for the whole run.
+// The `rootCount` world knob no longer sizes the population -- `mainBranchTarget`
+// does -- and new main branches are otherwise continuously born at the
+// growth front. `FIXED_POPULATION(n)` pins both: exactly `n` initial main
+// branches, and a birth-spacing gate so large that no further main branch is
+// ever born within any test's tick budget. (The safety floor can still fire
+// if the whole population matures out, but these bake-safety scenarios keep
+// at least one growing throughout, so in practice the count stays `n`.)
+const FIXED_POPULATION = (n: number) => ({ mainBranchTarget: n, mainBranchSpawnSpacing: 1e9 });
+
 // Roadmap B: the pure-threat-model sweeps below (the "zero bake-order
 // violation" tests) exist to verify isSafeToBake / computeBakeThreats --
 // the threat model this session deliberately did NOT touch. The new
@@ -263,11 +274,17 @@ describe('createBotanicalStyle — speed drives growth honestly (invariant 6)', 
 });
 
 describe('createBotanicalStyle — expansion widens spatial spread', () => {
-  it('expansion=1 produces a measurably wider bounding-box spread than expansion=0, across resprout cycles', () => {
+  it('expansion=1 produces a measurably wider bounding-box spread than expansion=0, for a main branch and its forks', () => {
+    // Roadmap C1: pin the foreground to a single main branch (+ its forks +
+    // its cluster) so this measures expansion's effect on one lineage's
+    // spread, not the front-advance distance of a continuously-born
+    // population (which is speed-driven and equal in both runs, and would
+    // swamp the expansion signal).
     const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0 };
+    const tuning = FIXED_POPULATION(1);
 
-    const low = createBotanicalInternal();
-    const high = createBotanicalInternal();
+    const low = createBotanicalInternal(tuning);
+    const high = createBotanicalInternal(tuning);
     low.renderer.init(createWorld('expansion-seed', 0, overrides));
     high.renderer.init(createWorld('expansion-seed', 0, overrides));
 
@@ -699,69 +716,140 @@ describe('createBotanicalStyle — branchDensity knob changes steady-state eleme
   );
 });
 
-describe('createBotanicalStyle — growth-plateau fix: seamless successor foreground system', () => {
-  // A low branchDensity (0 -> the minimum, 15) combined with fast growth
-  // (FAST_CYCLE_OVERRIDES) fills the foreground system's maxConcurrentBranches
-  // budget quickly, forcing maybeSpawnNextForegroundSystem to fire well
-  // within a bounded number of ticks.
-  const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, branchDensity: 0 };
+describe('createBotanicalStyle — population model (roadmap C1)', () => {
+  // Replaces the old "growth-plateau fix: seamless successor foreground
+  // system" block. C1 removes both hardcoded single-lineage mechanisms
+  // (near-origin gen-0 resprout + the maybeSpawnNextForegroundSystem
+  // single-frontier hand-off) and replaces them with a continuously-seeded,
+  // born-and-ending population of finite-life generation-0 "main" branches,
+  // all living in the single foreground system (foregroundSystems stays
+  // length 1 forever).
+  const SEED = 'c1-population-seed';
 
-  it('spawns a second system anchored exactly at the first system\'s growth front (largest tipX), not a fresh random position', () => {
-    const { renderer, state } = createBotanicalInternal();
-    renderer.init(createWorld('handoff-seed', 0, overrides));
+  it('keeps the growing generation-0 count within [1, mainBranchTarget] every tick, and refills a matured-out population', () => {
+    const TARGET = 4;
+    const { renderer, state } = createBotanicalInternal({
+      mainBranchTarget: TARGET,
+      mainBranchSpawnSpacing: 0.1, // small -- the front keeps up with maturation at this speed
+    });
+    renderer.init(createWorld(SEED, 0, FAST_CYCLE_OVERRIDES));
+    expect(state.foregroundSystems[0]!.roots.length).toBe(TARGET); // initial population
 
-    const paramsAt = () => makeParams({ speed: 0.9, expansion: 0.6, symmetry: 0.3 });
+    const fg = () => state.foregroundSystems[0]!;
+    const growingGen0 = () => fg().branches.filter((b) => b.generation === 0 && b.lifecycle === 'growing').length;
 
-    // Captured the instant foregroundSystems grows past length 1, before any
-    // further ticks let the old system's frontier branch move on -- this is
-    // what makes the comparison below an exact-position check, not a fuzzy one.
-    let frontierTipX: number | undefined;
-    let frontierTipY: number | undefined;
-    let newRootX: number | undefined;
-    let newRootY: number | undefined;
-
-    let tick = 0;
+    const counts: number[] = [];
     let time = 0;
-    const dt = 200;
-    while (state.foregroundSystems.length < 2 && tick < 3000) {
-      const beforeCount = state.foregroundSystems.length;
-      renderer.step(paramsAt(), INITIAL_SESSION_PARAMS, time, dt);
-      time += dt;
-      tick++;
-
-      if (state.foregroundSystems.length > beforeCount) {
-        const oldSystem = state.foregroundSystems[state.foregroundSystems.length - 2]!;
-        const frontier = oldSystem.branches.reduce((furthest, b) => (b.tipX > furthest.tipX ? b : furthest));
-        const newBranch = state.foregroundSystems[state.foregroundSystems.length - 1]!.branches[0]!;
-        frontierTipX = frontier.tipX;
-        frontierTipY = frontier.tipY;
-        newRootX = newBranch.rootX;
-        newRootY = newBranch.rootY;
-      }
+    for (let t = 0; t < 2400; t++) {
+      renderer.step(makeParams({ speed: 0.85, expansion: 0.6, symmetry: 0.3 }), INITIAL_SESSION_PARAMS, time, 100);
+      time += 100;
+      const c = growingGen0();
+      // Hard invariants of the population model: never overshoots the
+      // target, never fully stalls (safety floor).
+      expect(c).toBeLessThanOrEqual(TARGET);
+      expect(c).toBeGreaterThanOrEqual(1);
+      counts.push(c);
     }
 
-    expect(tick).toBeLessThan(3000); // sanity: a hand-off actually happened within budget
-    expect(state.foregroundSystems.length).toBeGreaterThan(1);
-    expect(state.foregroundSystems[0]!.branches.length).toBeGreaterThanOrEqual(state.maxConcurrentBranches);
-    // The new system's first branch starts exactly where the old system's
-    // growth front was -- a genuine hand-off, not a fresh root planted
-    // elsewhere on the canvas.
-    expect(newRootX).toBe(frontierTipX);
-    expect(newRootY).toBe(frontierTipY);
+    // After warm-up, a well-paced scenario sits at (near) the target on
+    // average -- the population is genuinely refilled, not a one-shot.
+    const avg = counts.slice(200).reduce((a, b) => a + b, 0) / counts.slice(200).length;
+    expect(avg).toBeGreaterThanOrEqual(TARGET - 1.5);
+
+    // Many more main branches were born than the initial population, roughly
+    // in step with the front advancing.
+    expect(fg().roots.length).toBeGreaterThan(TARGET * 3);
   });
 
-  it('same seed, run twice, produces an identical foregroundSystems hand-off (determinism)', () => {
-    const a = createBotanicalInternal();
-    const b = createBotanicalInternal();
-    a.renderer.init(createWorld('handoff-determinism-seed', 0, overrides));
-    b.renderer.init(createWorld('handoff-determinism-seed', 0, overrides));
+  it('main branches end permanently (no resprout): every foreground root is spawned exactly once', () => {
+    const { renderer, state } = createBotanicalInternal({ mainBranchTarget: 3, mainBranchSpawnSpacing: 0.2 });
+    renderer.init(createWorld(SEED, 0, FAST_CYCLE_OVERRIDES));
+    runTicks(renderer, 1500, 100, () => makeParams({ speed: 0.8, expansion: 0.5, symmetry: 0.4 }));
 
-    const paramsAt = () => makeParams({ speed: 0.9, expansion: 0.6, symmetry: 0.3 });
-    runTicks(a.renderer, 3000, 200, paramsAt);
-    runTicks(b.renderer, 3000, 200, paramsAt);
+    const fg = state.foregroundSystems[0]!;
+    expect(fg.roots.length).toBeGreaterThan(5); // sanity: births happened
+    // resproutCounters holds "times spawnRootBranch ran for this root". In
+    // the population model every main branch is born once and never
+    // resprouts, so every counter is exactly 1.
+    for (const [, count] of fg.resproutCounters) {
+      expect(count).toBe(1);
+    }
+    // And plenty of them have matured and simply stayed mature (permanent
+    // ink), exactly like a gen>0 branch.
+    const maturedGen0 = fg.branches.filter((b) => b.generation === 0 && b.lifecycle === 'mature').length;
+    expect(maturedGen0).toBeGreaterThan(3);
+  });
 
-    expect(a.state.foregroundSystems.length).toBeGreaterThan(1); // sanity: the fix actually engaged
+  it('never lets the growing generation-0 count hit 0 while the session keeps moving (safety floor)', () => {
+    // Spacing set absurdly high so the ONLY way a new main branch is ever
+    // born is the safety floor (growing count == 0). Growth must still never
+    // fully stall over a long run.
+    const { renderer, state } = createBotanicalInternal({ mainBranchTarget: 2, mainBranchSpawnSpacing: 1e9 });
+    renderer.init(createWorld(SEED, 0, FAST_CYCLE_OVERRIDES));
+
+    let time = 0;
+    let everZero = false;
+    for (let t = 0; t < 3000; t++) {
+      renderer.step(makeParams({ speed: 0.7, expansion: 0.5, symmetry: 0.5 }), INITIAL_SESSION_PARAMS, time, 100);
+      time += 100;
+      const growing = state.foregroundSystems[0]!.branches.filter(
+        (b) => b.generation === 0 && b.lifecycle === 'growing',
+      ).length;
+      if (growing === 0) everZero = true;
+    }
+    expect(everZero).toBe(false);
+    // The floor really was the mechanism keeping it alive: with 1e9 spacing,
+    // births only ever come from the floor, yet the population kept refilling.
+    expect(state.foregroundSystems[0]!.roots.length).toBeGreaterThan(2);
+  });
+
+  it('foregroundSystems stays exactly length 1 forever (no successor hand-off)', () => {
+    const { renderer, state } = createBotanicalInternal({ mainBranchTarget: 3, mainBranchSpawnSpacing: 0.15 });
+    renderer.init(createWorld(SEED, 0, { ...FAST_CYCLE_OVERRIDES, branchDensity: 0 }));
+    runTicks(renderer, 3000, 200, () => makeParams({ speed: 0.9, expansion: 0.6, symmetry: 0.3 }));
+    expect(state.foregroundSystems.length).toBe(1);
+    expect((renderer.sceneLayers?.() ?? []).map((l) => l.layerId)).toEqual(['fg0', 'echo0', 'echo1']);
+  });
+
+  it('same seed + tuning + param stream, run twice, produces an identical scene (determinism)', () => {
+    const tuning = { mainBranchTarget: 3, mainBranchSpawnSpacing: 0.2 };
+    const a = createBotanicalInternal(tuning);
+    const b = createBotanicalInternal(tuning);
+    a.renderer.init(createWorld('c1-determinism-seed', 0, FAST_CYCLE_OVERRIDES));
+    b.renderer.init(createWorld('c1-determinism-seed', 0, FAST_CYCLE_OVERRIDES));
+
+    const paramsAt = (i: number) => makeParams({ speed: 0.5 + 0.35 * Math.sin(i * 0.05), expansion: 0.6, symmetry: 0.3 });
+    runTicks(a.renderer, 2500, 100, paramsAt);
+    runTicks(b.renderer, 2500, 100, paramsAt);
+
+    expect(a.state.foregroundSystems[0]!.roots.length).toBeGreaterThan(6); // sanity: births actually happened
     expect(a.renderer.scene()).toEqual(b.renderer.scene());
+  });
+
+  it('echo systems still resprout (legacy-resprout mode) -- C1 only changed the foreground', () => {
+    // The guard that C1 didn't accidentally kill echo growth: an echo system
+    // still spawns fresh generation-0 growth at its own root over a long
+    // run, driven by the mature-timer resprout the foreground no longer uses.
+    // Forking off (forkCountMin/Span = 0) so the echo's maxConcurrentBranches
+    // budget isn't saturated by sub-branches before the resprout timer can
+    // fire -- makes the resprout directly observable via resproutCounters.
+    const { renderer, state } = createBotanicalInternal({
+      mainBranchTarget: 2,
+      forkCountMin: 0,
+      forkCountSpan: 0,
+    });
+    renderer.init(createWorld('c1-echo-resprout-seed', 0, FAST_CYCLE_OVERRIDES));
+    runTicks(renderer, 2500, 200, () => makeParams({ speed: 0.85, expansion: 0.5, symmetry: 0.4 }));
+
+    const echoResproutCounts = state.echoes.map((s) => s.resproutCounters.get(0) ?? 0);
+    // Each echo root sprouted many times over the run (its first branch plus
+    // repeated resprouts) -- legacy behavior fully intact.
+    expect(Math.max(...echoResproutCounts)).toBeGreaterThan(3);
+    // Contrast: no foreground main branch ever resprouts -- each is born
+    // once and ends permanently.
+    for (const [, count] of state.foregroundSystems[0]!.resproutCounters) {
+      expect(count).toBe(1);
+    }
   });
 });
 
@@ -779,21 +867,18 @@ describe('createBotanicalStyle — sceneLayers (incremental live-rendering, docs
     expect(layers?.map((l) => l.layerId)).toEqual(['fg0', 'echo0', 'echo1']);
   });
 
-  it('grows to include a second layerId once the growth-plateau hand-off spawns a successor foreground system', () => {
+  it('keeps exactly the fg0 + echo layers even after a long run with many main-branch births (roadmap C1: no successor foreground system)', () => {
     const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, branchDensity: 0 };
-    const { renderer, state } = createBotanicalInternal();
+    const { renderer, state } = createBotanicalInternal({ mainBranchTarget: 3, mainBranchSpawnSpacing: 0.15 });
     renderer.init(createWorld('scene-layers-handoff-seed', 0, overrides));
 
     const paramsAt = () => makeParams({ speed: 0.9, expansion: 0.6, symmetry: 0.3 });
-    let tick = 0;
-    while (state.foregroundSystems.length < 2 && tick < 3000) {
-      renderer.step(paramsAt(), INITIAL_SESSION_PARAMS, tick * 200, 200);
-      tick++;
-    }
-    expect(state.foregroundSystems.length).toBeGreaterThan(1); // sanity: the hand-off actually happened
+    runTicks(renderer, 3000, 200, paramsAt);
 
+    expect(state.foregroundSystems.length).toBe(1);
+    expect(state.foregroundSystems[0]!.roots.length).toBeGreaterThan(6); // sanity: the population really did refill many times
     const layers = renderer.sceneLayers?.() ?? [];
-    expect(layers.map((l) => l.layerId)).toEqual(['fg0', 'fg1', 'echo0', 'echo1']);
+    expect(layers.map((l) => l.layerId)).toEqual(['fg0', 'echo0', 'echo1']);
   });
 
   it('is never silently out of sync with scene(): flattening every layer\'s elements in order reproduces scene().elements exactly', () => {
@@ -1293,8 +1378,8 @@ describe('createBotanicalStyle — bake-order safety: single-root WITH forking (
     // with roots.length <= 1 was skipped entirely). A large margin makes
     // withholding easy to observe within a bounded tick budget, same
     // technique as the two-root "withholds" test below.
-    const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0 }; // -> 1 root
-    const { renderer, state } = createBotanicalInternal({ crossRootBakeSafetyMargin: 0.4 });
+    const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0 };
+    const { renderer, state } = createBotanicalInternal({ ...FIXED_POPULATION(1), crossRootBakeSafetyMargin: 0.4 }); // -> 1 main branch, no births
     renderer.init(createWorld('single-root-forking-withhold-seed', 0, overrides));
 
     const paramsAt = () => makeParams({ speed: 0.6, expansion: 0.6, symmetry: 0.4 });
@@ -1321,7 +1406,10 @@ describe('createBotanicalStyle — bake-order safety: single-root WITH forking (
 });
 
 describe('createBotanicalStyle — bake-order safety: forced two-root integration', () => {
-  const TWO_ROOT_OVERRIDES: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0.75 }; // -> 1 + floor(0.75*2) = 2 roots
+  // Roadmap C1: two fixed main branches (was the rootCount=0.75 knob), no
+  // further births within any of these tests' budgets.
+  const TWO_ROOT_OVERRIDES: WorldOverrides = { ...FAST_CYCLE_OVERRIDES };
+  const TWO_ROOT_TUNING = FIXED_POPULATION(2);
 
   it('no baked-order violation occurs between any two UNRELATED branches -- cross-root or same-root cousins alike -- across many ticks and several seeds', () => {
     // Generalized (session 018) from a cross-root-only sweep: with default
@@ -1340,7 +1428,7 @@ describe('createBotanicalStyle — bake-order safety: forced two-root integratio
     const TICKS = 1200;
 
     for (let seedNum = 0; seedNum < 5; seedNum++) {
-      const { renderer, state } = createBotanicalInternal(CEILING_EFFECTIVELY_DISABLED);
+      const { renderer, state } = createBotanicalInternal({ ...CEILING_EFFECTIVELY_DISABLED, ...TWO_ROOT_TUNING });
       renderer.init(createWorld(`bake-safety-seed-${seedNum}`, 0, TWO_ROOT_OVERRIDES));
       expect(state.foregroundSystems[0]!.roots.length).toBe(2); // sanity: the scenario actually engages the fix
 
@@ -1378,7 +1466,7 @@ describe('createBotanicalStyle — bake-order safety: forced two-root integratio
   });
 
   it("withholds a nearer, already-mature branch's final flag until the farther root's frontier catches up, in the full renderer pipeline", () => {
-    const { renderer, state } = createBotanicalInternal({ crossRootBakeSafetyMargin: 0.4 }); // large margin -- easy to observe withholding
+    const { renderer, state } = createBotanicalInternal({ ...TWO_ROOT_TUNING, crossRootBakeSafetyMargin: 0.4 }); // large margin -- easy to observe withholding
     renderer.init(createWorld('bake-safety-withhold-seed', 0, TWO_ROOT_OVERRIDES));
 
     const paramsAt = () => makeParams({ speed: 0.6, expansion: 0.5, symmetry: 0.5 });
@@ -1399,8 +1487,8 @@ describe('createBotanicalStyle — bake-order safety: forced two-root integratio
   });
 
   it('same seed, forced two roots, produces identical scenes across two independent runs (determinism holds with the safety gate engaged)', () => {
-    const a = createBotanicalInternal();
-    const b = createBotanicalInternal();
+    const a = createBotanicalInternal(TWO_ROOT_TUNING);
+    const b = createBotanicalInternal(TWO_ROOT_TUNING);
     a.renderer.init(createWorld('bake-safety-determinism-seed', 0, TWO_ROOT_OVERRIDES));
     b.renderer.init(createWorld('bake-safety-determinism-seed', 0, TWO_ROOT_OVERRIDES));
 
@@ -1408,7 +1496,10 @@ describe('createBotanicalStyle — bake-order safety: forced two-root integratio
     runTicks(a.renderer, 900, 16.67, paramsAt);
     runTicks(b.renderer, 900, 16.67, paramsAt);
 
-    expect(a.state.foregroundSystems[0]!.roots.length).toBe(2); // sanity
+    // >= 2, not exactly 2: the 1e9 spacing gate blocks distance-paced births,
+    // but the safety floor still adds a main branch if the initial pair
+    // matures out during the run -- deterministically, so both runs match.
+    expect(a.state.foregroundSystems[0]!.roots.length).toBeGreaterThanOrEqual(2);
     expect(a.renderer.scene()).toEqual(b.renderer.scene());
   });
 });
@@ -1440,10 +1531,10 @@ describe('createBotanicalStyle — bake-order safety: single-root foreground, ge
     const dt = 16.67;
     const TICKS = 2000;
     const SEED_COUNT = 10;
-    const SINGLE_ROOT_OVERRIDES: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0 }; // -> 1 root
+    const SINGLE_ROOT_OVERRIDES: WorldOverrides = { ...FAST_CYCLE_OVERRIDES };
 
     for (let seedNum = 0; seedNum < SEED_COUNT; seedNum++) {
-      const { renderer, state } = createBotanicalInternal(CEILING_EFFECTIVELY_DISABLED);
+      const { renderer, state } = createBotanicalInternal({ ...CEILING_EFFECTIVELY_DISABLED, ...FIXED_POPULATION(1) });
       renderer.init(createWorld(`single-root-fg-generous-sweep-seed-${seedNum}`, 0, SINGLE_ROOT_OVERRIDES));
       expect(state.foregroundSystems[0]!.roots.length).toBe(1); // sanity: genuinely single-root
 
@@ -1676,16 +1767,15 @@ describe('createBotanicalStyle — bake-order safety: echo systems (session 019)
 // A `mature` branch (or an already-revealed blossom) that has been blocked
 // from resolving safe for longer than tuning.forcedBakeCeilingMs of
 // SIMULATED time is force-marked bakeResolved anyway, regardless of what
-// isSafeToBake says (resolveBucketBakeThreats in botanical.ts). Botanical's
-// front-driven resprouting spawns a fresh growing branch at each
-// generation-0 root's fixed near-origin rootX forever, so there is always a
-// low-x blocker near the origin -- without this ceiling, mature branches
-// (and blossoms) behind it never resolve, stay in the live compositor's
-// per-frame redraw pass permanently, and the un-baked "live" set grows
-// without bound (phase-1 profiling: FPS ~50 -> 8-17 within 3.5 min, live
-// circle count 500 -> 14,000+ and climbing). The founder approved this
-// blunt ceiling and explicitly accepted the resulting rare, small
-// depth-ordering artifact as permanent.
+// isSafeToBake says (resolveBucketBakeThreats in botanical.ts). This was
+// originally the fix for the foreground's near-origin gen-0 resprout, which
+// parked a growing branch at low x forever so mature branches behind it
+// never baked. Roadmap C1 replaced foreground resprout with a born-at-the-
+// front population model, so that specific runaway is gone -- the ceiling
+// now stands purely as a belt-and-braces safety net (echo systems still
+// resprout; C4 changes them). The founder approved this blunt ceiling and
+// explicitly accepted the resulting rare, small depth-ordering artifact as
+// permanent.
 describe('createBotanicalStyle — forced-bake ceiling (roadmap B)', () => {
   const TWO_ROOT_FAST: WorldOverrides = { baseGrowthRate: 0.99, matureDurationMs: 0, rootCount: 0.5 }; // -> 2 roots
 
@@ -1706,14 +1796,20 @@ describe('createBotanicalStyle — forced-bake ceiling (roadmap B)', () => {
   const average = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
 
   it(
-    'the mature-but-unresolved branch set (and the unresolved-blossom set) plateaus and drains over 60+ simulated seconds instead of growing without bound',
+    'the mature-but-unresolved branch set (and the unresolved-blossom set) stays bounded and drains over 60+ simulated seconds -- with OR without the ceiling (roadmap C1 removed the near-origin blocker the ceiling was papering over)',
     () => {
-      // The required evidence that the unbounded-growth bug is gone. Same
-      // seed / movement / tuning run twice: once with the default ceiling,
-      // once with it effectively disabled. Without the ceiling this
-      // FAST_CYCLE + 2-root scenario reproduces the runaway (the
-      // unresolved-blossom set climbs into the thousands); with it, both
-      // sets stay bounded and show no upward drift across the run.
+      // ROADMAP C1 UPDATE: this test's original regression guard -- "without
+      // the ceiling this FAST_CYCLE + 2-root foreground scenario reproduces
+      // the runaway (unresolved-blossom set into the thousands)" -- no longer
+      // holds, BY DESIGN. That runaway came from the foreground's near-origin
+      // gen-0 resprout permanently parking a growing branch at low x, so
+      // every mature branch behind it stayed blocked forever. C1's
+      // population model removes that mechanism entirely (main branches are
+      // born at the FRONT and end permanently), so the foreground live set is
+      // now bounded on its own. The forced-bake ceiling stays as a belt-and-
+      // braces safety net (echoes still resprout; C4 changes them) -- this
+      // test now verifies it stays bounded either way and the ceiling never
+      // makes it worse. See the C1 handoff entry / builder report.
       const dt = 16.67;
       const TICKS = 3600; // 60 simulated seconds
       const SAMPLE_EVERY = 300; // once per 5 simulated seconds
@@ -1738,60 +1834,61 @@ describe('createBotanicalStyle — forced-bake ceiling (roadmap B)', () => {
       const withCeiling = sweep(); // DEFAULT_BOTANICAL_TUNING_CONFIG.forcedBakeCeilingMs (4000ms)
       const noCeiling = sweep(CEILING_EFFECTIVELY_DISABLED);
 
-      // --- With the ceiling: both sets plateau (bounded, no upward drift) ---
-      // Hard bounds -- far above what a healthy plateau reaches for this
-      // scenario (measured maxima ~50 mature, ~800 blossoms), far below the
-      // unbounded case.
-      expect(Math.max(...withCeiling.mature)).toBeLessThan(150);
-      expect(Math.max(...withCeiling.blossoms)).toBeLessThan(2000);
-      // No upward drift: the last-third average is not materially larger
-      // than the average of the first few post-warmup samples (drains
-      // rather than accumulates).
       const postWarmup = (xs: number[]) => xs.slice(2, 6);
       const lateThird = (xs: number[]) => xs.slice(-4);
-      expect(average(lateThird(withCeiling.blossoms))).toBeLessThanOrEqual(average(postWarmup(withCeiling.blossoms)) * 1.6);
-      expect(average(lateThird(withCeiling.mature))).toBeLessThanOrEqual(average(postWarmup(withCeiling.mature)) * 2 + 15);
 
-      // --- Regression guard: the scenario genuinely triggers the runaway
-      // without the ceiling, and the ceiling is what tames it ---
-      expect(Math.max(...noCeiling.blossoms)).toBeGreaterThan(3000);
-      expect(Math.max(...noCeiling.blossoms)).toBeGreaterThan(Math.max(...withCeiling.blossoms) * 4);
-      expect(Math.max(...noCeiling.mature)).toBeGreaterThan(Math.max(...withCeiling.mature) * 1.5);
+      // --- Both runs: the foreground live set is bounded and shows no
+      // upward drift (drains rather than accumulates). Measured maxima for
+      // this scenario are ~45 mature / ~180 blossoms with the ceiling, ~45 /
+      // ~480 without -- both comfortably under these bounds, neither
+      // anywhere near the pre-C1 "into the thousands" runaway. ---
+      for (const run of [withCeiling, noCeiling]) {
+        expect(Math.max(...run.mature)).toBeLessThan(150);
+        expect(Math.max(...run.blossoms)).toBeLessThan(2000);
+        expect(average(lateThird(run.blossoms))).toBeLessThanOrEqual(average(postWarmup(run.blossoms)) * 1.8 + 20);
+        expect(average(lateThird(run.mature))).toBeLessThanOrEqual(average(postWarmup(run.mature)) * 2 + 15);
+      }
+
+      // --- The ceiling never makes the unresolved set larger; it can only
+      // ever force MORE content to resolve, so its maxima are <= the
+      // no-ceiling run's. ---
+      expect(Math.max(...withCeiling.blossoms)).toBeLessThanOrEqual(Math.max(...noCeiling.blossoms) + 1);
+      expect(Math.max(...withCeiling.mature)).toBeLessThanOrEqual(Math.max(...noCeiling.mature) + 1);
     },
     60000,
   );
 
   it('does NOT fire in the common fast-resolve case: a branch that resolves safe within a tick or few never advances its counter or gets force-resolved', () => {
-    // Single-root, no forking -- every branch shares its root's own fixed z
-    // (spawnRootBranch never jitters resprout z), so isSafeToBake, which
-    // only ever gates against a strictly FARTHER-z threat, can never block
-    // anything here. Every mature branch resolves safe the normal way,
-    // immediately. The forced-ceiling counter path must be a complete
-    // no-op: matureBlockedMs stays 0 for every branch, for the whole run.
-    const overrides: WorldOverrides = { ...FAST_CYCLE_OVERRIDES, rootCount: 0 }; // -> 1 root
-    // forkCountMin/Span are TUNING fields (not world knobs) -- 0/0 forces
-    // drawForkFractions to a fork count of 0, i.e. genuinely no forking ever.
+    // Roadmap C1: the foreground is no longer a single-root, one-z shape
+    // (the population model gives concurrent main branches stratified across
+    // depth), so the clean "no farther-z threat can ever exist" scenario now
+    // lives on an ECHO system -- one root, resprout forever (legacy mode),
+    // and with forking off (forkCountMin/Span = 0) every echo0 branch shares
+    // echo0's single root z EXACTLY. isSafeToBake only gates against a
+    // strictly FARTHER-z threat, so nothing here is ever blocked; every
+    // mature echo branch resolves safe the normal way, immediately. The
+    // forced-ceiling counter path must be a complete no-op: matureBlockedMs
+    // stays 0 for every echo0 branch, for the whole run.
     // DEFAULT ceiling (not disabled) -- it simply must never engage here.
     const { renderer, state } = createBotanicalInternal({ forkCountMin: 0, forkCountSpan: 0 });
-    renderer.init(createWorld('forced-ceiling-fast-resolve-seed', 0, overrides));
+    renderer.init(createWorld('forced-ceiling-fast-resolve-seed', 0, FAST_CYCLE_OVERRIDES));
 
     let sawForcedCounterAdvance = false;
     let time = 0;
     for (let t = 0; t < 900; t++) {
       renderer.step(makeParams({ speed: 0.8, expansion: 0.6, symmetry: 0.4 }), INITIAL_SESSION_PARAMS, time, 16.67);
       time += 16.67;
-      for (const system of state.foregroundSystems) {
-        for (const branch of system.branches) {
-          if (branch.matureBlockedMs !== 0) sawForcedCounterAdvance = true;
-        }
+      for (const branch of state.echoes[0]!.branches) {
+        if (branch.matureBlockedMs !== 0) sawForcedCounterAdvance = true;
       }
     }
 
-    const allBranches = state.foregroundSystems.flatMap((s) => s.branches);
-    expect(allBranches.every((b) => b.generation === 0)).toBe(true); // sanity: forking really was off
-    expect(allBranches.some((b) => b.lifecycle === 'mature' && b.bakeResolved)).toBe(true); // sanity: branches did mature and resolve...
+    const echo0 = state.echoes[0]!.branches;
+    expect(echo0.every((b) => b.generation === 0)).toBe(true); // sanity: forking really was off
+    expect(echo0.length).toBeGreaterThan(1); // sanity: the echo resprouted (legacy mode) -- multiple branches over the run
+    expect(echo0.some((b) => b.lifecycle === 'mature' && b.bakeResolved)).toBe(true); // sanity: branches did mature and resolve...
     expect(sawForcedCounterAdvance).toBe(false); // ...the normal safe way -- the ceiling counter never advanced for any branch
-    expect(allBranches.every((b) => b.matureBlockedMs === 0)).toBe(true);
+    expect(echo0.every((b) => b.matureBlockedMs === 0)).toBe(true);
   });
 
   it('never force-resolves a still-growing branch, no matter how long it has been growing while blocked', () => {
