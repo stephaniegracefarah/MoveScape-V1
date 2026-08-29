@@ -129,7 +129,14 @@ export function renderBucketedScene(ctx: CanvasLike, layers: SceneLayer[], canva
   for (const bucket of BUCKET_PAINT_ORDER) {
     const elements: SceneElement[] = [];
     for (const layer of layersByBucket[bucket]) {
-      elements.push(...layer.elements);
+      // NOT `elements.push(...layer.elements)`: spreading a large array as
+      // call arguments overflows the call stack ("Maximum call stack size
+      // exceeded") once it passes the engine's arg-count limit (~65-125k).
+      // A dense long session (high `density` knob, roadmap C3.5) puts
+      // hundreds of thousands of blossom elements in one layer, which is
+      // exactly the save-time export path the founder hit. Push one at a
+      // time instead.
+      for (const element of layer.elements) elements.push(element);
     }
     // Farthest (largest z) first, so nearer elements draw last and end up
     // on top -- same convention as renderScene()/live-compositor.ts, but

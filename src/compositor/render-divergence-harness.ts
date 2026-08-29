@@ -99,7 +99,11 @@ const BUCKET_PAINT_ORDER: ('echo1' | 'echo0' | 'foreground')[] = ['echo1', 'echo
 export function renderSceneByBucket(ctx: CanvasLike, layers: SceneLayer[], canvasSize: CanvasSize): void {
   const byBucket: Record<'echo1' | 'echo0' | 'foreground', SceneElement[]> = { echo1: [], echo0: [], foreground: [] };
   for (const layer of layers) {
-    byBucket[bucketForLayerId(layer.layerId)].push(...layer.elements);
+    // One at a time, not `.push(...layer.elements)` -- spreading a large
+    // array as args overflows the call stack at high element counts (dense
+    // long sessions, roadmap C3.5). Same fix as export-render.ts.
+    const bucket = byBucket[bucketForLayerId(layer.layerId)];
+    for (const element of layer.elements) bucket.push(element);
   }
   for (const bucket of BUCKET_PAINT_ORDER) {
     renderScene(ctx, { elements: byBucket[bucket] }, canvasSize);
