@@ -1268,9 +1268,11 @@ function growingMainBranchCount(system: GrowthSystemState): number {
  * foreground system at the current growth front. Replaces both the old
  * near-origin resprout and the single-frontier hand-off.
  *
- * Placement (C1 keeps this deliberately simple -- C2/C3 add x/y variety):
- *  - `x` = `state.frontMaxX` (born at the front, as the old hand-off used
- *    `frontier.tipX`).
+ * Placement (C3 still adds y variety):
+ *  - `x` = `state.frontMaxX + (xDraw*2-1) * tuning.mainBranchSpawnXSpread`
+ *    (roadmap C2). At the default spread 0 this is exactly `state.frontMaxX`
+ *    (born at the front, as the old hand-off used `frontier.tipX`); raised,
+ *    births scatter behind / at / ahead of the front.
  *  - `y` = the `tipY` of the current furthest-right gen-0 branch (as the old
  *    hand-off used `frontier.tipY`); if none exists yet, a seeded mid-band y
  *    drawn the same way initGrowthSystem draws root y.
@@ -1299,8 +1301,6 @@ function spawnMainBranch(state: BotanicalState, system: GrowthSystemState): void
     if (!frontier || branch.tipX > frontier.tipX) frontier = branch;
   }
 
-  const x = state.frontMaxX;
-
   const y = frontier
     ? frontier.tipY
     : state.tuning.rootYMin +
@@ -1314,6 +1314,16 @@ function spawnMainBranch(state: BotanicalState, system: GrowthSystemState): void
   const dirJitterDraw = createLabeledStream(state.sessionSeed, `${systemId}:root${newIndex}:rootDir`)();
   const baseDirectionCenter =
     COMPOSITION_SWEEP_ANGLE + (dirJitterDraw * 2 - 1) * state.tuning.rootBaseDirectionSpread;
+
+  // Roadmap C2: x-spread around the front. The `:spawnX` draw is APPENDED
+  // after the existing `:rootY` / `:rootZ` / `:rootDir` draws (never
+  // reordered) and is ALWAYS taken -- at the default spread of 0 it
+  // multiplies out to exactly `state.frontMaxX` (C1 behavior), and because
+  // it is always drawn, raising the field mid-session can't shift any later
+  // birth's other labeled draws. A birth ahead of the front pushes
+  // `state.frontMaxX` forward on the next tick's update (still monotonic).
+  const xDraw = createLabeledStream(state.sessionSeed, `${systemId}:root${newIndex}:spawnX`)();
+  const x = state.frontMaxX + (xDraw * 2 - 1) * state.tuning.mainBranchSpawnXSpread;
 
   system.roots.push({ x, y, z, baseDirectionCenter });
   system.resproutCounters.set(newIndex, 0);

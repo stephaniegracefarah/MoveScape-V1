@@ -853,6 +853,91 @@ describe('createBotanicalStyle — population model (roadmap C1)', () => {
   });
 });
 
+describe('createBotanicalStyle — spawn-x variety (roadmap C2)', () => {
+  const SEED = 'c2-spawn-x-seed';
+
+  it('mainBranchSpawnXSpread = 0 is a complete no-op: births land exactly at frontMaxX, scene identical to C1 default', () => {
+    const paramsAt = (i: number) => makeParams({ speed: 0.6 + 0.3 * Math.sin(i * 0.04), expansion: 0.55, symmetry: 0.35 });
+
+    // Explicit 0 override vs. the C1 default (field absent) -- must be
+    // byte-for-byte identical, proving the always-taken `:spawnX` draw does
+    // not perturb any other draw.
+    const TARGET = 3;
+    const explicitZero = createBotanicalInternal({ mainBranchSpawnXSpread: 0, mainBranchTarget: TARGET, mainBranchSpawnSpacing: 0.15 });
+    const c1Default = createBotanicalInternal({ mainBranchTarget: TARGET, mainBranchSpawnSpacing: 0.15 });
+    explicitZero.renderer.init(createWorld(SEED, 0, FAST_CYCLE_OVERRIDES));
+    c1Default.renderer.init(createWorld(SEED, 0, FAST_CYCLE_OVERRIDES));
+
+    const rootXs: number[] = [];
+    let time = 0;
+    for (let t = 0; t < 1800; t++) {
+      explicitZero.renderer.step(paramsAt(t), INITIAL_SESSION_PARAMS, time, 100);
+      c1Default.renderer.step(paramsAt(t), INITIAL_SESSION_PARAMS, time, 100);
+      time += 100;
+      for (const root of explicitZero.state.foregroundSystems[0]!.roots.slice(rootXs.length)) {
+        rootXs.push(root.x);
+      }
+    }
+
+    expect(explicitZero.state.foregroundSystems[0]!.roots.length).toBeGreaterThan(6); // sanity: births happened
+    expect(explicitZero.renderer.scene()).toEqual(c1Default.renderer.scene());
+    // The initial TARGET roots use seeded mid-band placement; every root
+    // BORN after that lands on the monotonic frontMaxX, so those x values
+    // are non-decreasing in birth order.
+    const bornXs = rootXs.slice(TARGET);
+    expect(bornXs.length).toBeGreaterThan(3);
+    for (let i = 1; i < bornXs.length; i++) {
+      expect(bornXs[i]!).toBeGreaterThanOrEqual(bornXs[i - 1]! - 1e-9);
+    }
+  });
+
+  it('with spread > 0, births are distributed both behind and ahead of the front, bounded by the spread', () => {
+    const SPREAD = 0.8;
+    const { renderer, state } = createBotanicalInternal({
+      mainBranchSpawnXSpread: SPREAD,
+      mainBranchTarget: 3,
+      mainBranchSpawnSpacing: 0.15,
+    });
+    renderer.init(createWorld(SEED, 0, FAST_CYCLE_OVERRIDES));
+
+    const fg = () => state.foregroundSystems[0]!;
+    const offsets: number[] = [];
+    let seenRoots = fg().roots.length;
+    let time = 0;
+    for (let t = 0; t < 2600; t++) {
+      renderer.step(makeParams({ speed: 0.85, expansion: 0.6, symmetry: 0.3 }), INITIAL_SESSION_PARAMS, time, 100);
+      time += 100;
+      // Any root added this tick was placed using the frontMaxX value that
+      // step() has just finished advancing -- so newRoot.x - state.frontMaxX
+      // is exactly this birth's own (xDraw*2-1)*SPREAD offset.
+      for (let i = seenRoots; i < fg().roots.length; i++) {
+        offsets.push(fg().roots[i]!.x - state.frontMaxX);
+      }
+      seenRoots = fg().roots.length;
+    }
+
+    expect(offsets.length).toBeGreaterThan(20); // sanity: plenty of births to sample
+    expect(Math.min(...offsets)).toBeLessThan(-0.05); // some land behind the front
+    expect(Math.max(...offsets)).toBeGreaterThan(0.05); // some land ahead of / off the front
+    expect(Math.max(...offsets.map((o) => Math.abs(o)))).toBeLessThanOrEqual(SPREAD + 1e-9);
+  });
+
+  it('is deterministic with the field engaged: same seed + tuning, run twice, identical scene', () => {
+    const tuning = { mainBranchSpawnXSpread: 0.9, mainBranchTarget: 3, mainBranchSpawnSpacing: 0.2 };
+    const a = createBotanicalInternal(tuning);
+    const b = createBotanicalInternal(tuning);
+    a.renderer.init(createWorld('c2-determinism-seed', 0, FAST_CYCLE_OVERRIDES));
+    b.renderer.init(createWorld('c2-determinism-seed', 0, FAST_CYCLE_OVERRIDES));
+
+    const paramsAt = (i: number) => makeParams({ speed: 0.5 + 0.35 * Math.sin(i * 0.05), expansion: 0.6, symmetry: 0.3 });
+    runTicks(a.renderer, 2200, 100, paramsAt);
+    runTicks(b.renderer, 2200, 100, paramsAt);
+
+    expect(a.state.foregroundSystems[0]!.roots.length).toBeGreaterThan(6); // sanity: births actually happened
+    expect(a.renderer.scene()).toEqual(b.renderer.scene());
+  });
+});
+
 describe('createBotanicalStyle — sceneLayers (incremental live-rendering, docs/HANDOFF.md frame-rate-collapse fix)', () => {
   it('returns one layer per active system, layerIds matching each system\'s own systemId, in the same order buildScene visits them', () => {
     const renderer = createBotanicalStyle();

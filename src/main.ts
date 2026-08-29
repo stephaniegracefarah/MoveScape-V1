@@ -1618,6 +1618,7 @@ if (app) {
         blossomRevealSpeedFloor: { min: 0, max: 1, step: 0.01 }, // blended fraction of speed [0,1], mirrors speedFloor
         mainBranchTarget: { min: 1, max: 8, step: 1 }, // concurrent growing gen-0 "main" branches (roadmap C1 population model)
         mainBranchSpawnSpacing: { min: 0, max: 2, step: 0.05 }, // min front-advance (world units) between successive main-branch births
+        mainBranchSpawnXSpread: { min: 0, max: 1.5, step: 0.05 }, // half-width (world units) of the random x offset on each main-branch birth (roadmap C2); 0 = born exactly at the front
         crossRootBakeSafetyMargin: { min: 0, max: 0.5, step: 0.005 }, // world units, same scale as targetLengthBase
         forcedBakeCeilingMs: { min: 500, max: 20000, step: 250 }, // simulated ms a mature/revealed element may stay blocked before a forced bake (roadmap B)
       };

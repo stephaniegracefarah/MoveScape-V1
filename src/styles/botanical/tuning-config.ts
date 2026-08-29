@@ -139,6 +139,24 @@ export interface BotanicalTuningConfig {
   mainBranchSpawnSpacing: number;
 
   /**
+   * Roadmap C2 (spawn-x variety, docs/HANDOFF.md Roadmap C entry): the
+   * half-width (world units, same scale as targetLengthBase /
+   * mainBranchSpawnSpacing) of the random x offset applied to each newly-born
+   * main branch's origin. A birth's x is `state.frontMaxX + (xDraw * 2 - 1) *
+   * mainBranchSpawnXSpread`, where `xDraw` is a per-birth labeled stream. At
+   * the default 0 the offset is exactly 0, so every birth lands at
+   * `state.frontMaxX` -- byte-for-byte the C1 behavior. Raised, births can
+   * land behind the front (structure catching up), at it, or ahead of / off
+   * the right edge (structure entering the frame already in progress). A
+   * birth ahead of `state.frontMaxX` simply pushes the monotonic front
+   * forward on the next tick's update. The `spawnX` draw is ALWAYS taken
+   * (even at 0, where it multiplies out), so raising this field mid-session
+   * via the dev panel never shifts any later birth's other labeled draws.
+   * Live-tunable via the dev panel like every other field here.
+   */
+  mainBranchSpawnXSpread: number;
+
+  /**
    * Forced-bake ceiling (roadmap B, docs/HANDOFF.md): the maximum SIMULATED
    * time (milliseconds, accumulated from each step()'s own `dt` -- never
    * wall-clock, never render frames, so live and replay stay bit-identical)
@@ -214,6 +232,10 @@ export const DEFAULT_BOTANICAL_TUNING_CONFIG: BotanicalTuningConfig = {
   // scroll rather than one).
   mainBranchTarget: 3,
   mainBranchSpawnSpacing: 0.4,
+  // Roadmap C2: default 0 -- every main branch is born exactly at the growth
+  // front (C1 behavior). Raise to let births scatter behind / ahead of the
+  // front so structure enters the frame already in progress.
+  mainBranchSpawnXSpread: 0,
   crossRootBakeSafetyMargin: 0.15,
   // ~4 simulated seconds (240 ticks at the 60 Hz fixed timestep). Long
   // enough that a normal resolve -- which lands within a tick or a few --
