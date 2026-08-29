@@ -1537,6 +1537,8 @@ if (app) {
         // input ~0px wide once these moved into the narrow dev-tools panel.
         const row = document.createElement('div');
         row.style.cssText = 'display:flex; flex-direction:column; gap:3px; margin:8px 0;';
+        // For the panel's filter box (see buildPanel): match against this.
+        row.dataset.tuner = labelText.toLowerCase();
 
         const header = document.createElement('div');
         header.style.cssText = 'display:flex; justify-content:space-between; align-items:baseline; gap:8px; font-size:11px;';
@@ -1636,6 +1638,23 @@ if (app) {
         // scrollbar inside the already-scrolling dev panel was unusable.
         panel.style.cssText = 'margin: 8px 0 0; padding-top: 10px; border-top: 1px solid #4a3f38; font-size: 12px;';
 
+        // Filter box: ~50 sliders across the two groups is too many to scan.
+        // Type a substring (e.g. "mainbranch", "fork", "blossom") to show only
+        // matching rows; empty shows all. Rows are also sorted alphabetically
+        // within each group (below), so a family like mainBranch* clusters.
+        const filterInput = document.createElement('input');
+        filterInput.type = 'search';
+        filterInput.placeholder = 'filter sliders…';
+        filterInput.style.cssText =
+          'display:block; width:100%; box-sizing:border-box; margin:0 0 8px; padding:4px 6px; font-size:11px; font-family:monospace;';
+        filterInput.addEventListener('input', () => {
+          const q = filterInput.value.trim().toLowerCase();
+          for (const row of panel.querySelectorAll<HTMLElement>('[data-tuner]')) {
+            row.hidden = q !== '' && !(row.dataset.tuner ?? '').includes(q);
+          }
+        });
+        panel.appendChild(filterInput);
+
         // Seed the panel's world-knob sliders from the world's own current
         // seed-derived values (not 0): whatever world is already live, or
         // (no session started yet) a fresh same-seed World built the same
@@ -1662,7 +1681,7 @@ if (app) {
         const worldSliderInputs: Record<string, HTMLInputElement> = {};
         const worldValueEls: Record<string, HTMLSpanElement> = {};
 
-        for (const name of worldKnobNames) {
+        for (const name of [...worldKnobNames].sort()) {
           const row = makeSliderRow(name, 0, 0.999999, 0.000001, initialOverrides[name] ?? 0, (value) => {
             manualOverridesActive = true;
             panelWorldOverrides = { ...(panelWorldOverrides ?? initialOverrides), [name]: value };
@@ -1693,7 +1712,7 @@ if (app) {
         const workingTuning: BotanicalTuningConfig = { ...DEFAULT_BOTANICAL_TUNING_CONFIG };
         panelTuningConfig = workingTuning;
 
-        for (const key of Object.keys(DEFAULT_BOTANICAL_TUNING_CONFIG) as (keyof BotanicalTuningConfig)[]) {
+        for (const key of (Object.keys(DEFAULT_BOTANICAL_TUNING_CONFIG) as (keyof BotanicalTuningConfig)[]).sort()) {
           const range = TUNING_RANGES[key];
           const row = makeSliderRow(key, range.min, range.max, range.step, DEFAULT_BOTANICAL_TUNING_CONFIG[key], (value) => {
             workingTuning[key] = value;
