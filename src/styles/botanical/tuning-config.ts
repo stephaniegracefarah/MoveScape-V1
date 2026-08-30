@@ -111,98 +111,108 @@ export interface BotanicalTuningConfig {
   crossRootBakeSafetyMargin: number;
 
   /**
-   * Roadmap C1 (the population model, docs/HANDOFF.md Roadmap C entry): the
-   * target number of concurrently-GROWING generation-0 "main" branches in
-   * the single foreground growth system. Replaces the old near-origin
-   * resprout + single-frontier hand-off, both of which made the whole scroll
-   * after the opening one dominant lineage. Each main branch grows to its
-   * seeded targetLength, matures, fires its blossom cluster, and then stays
-   * mature forever (no resprout -- same terminal behavior gen>0 branches
-   * already have). Whenever the count of currently-growing gen-0 branches
-   * drops below this, a new one is born at the growth front (subject to
-   * mainBranchSpawnSpacing). The initial population (initGrowthSystem) is
-   * also this many roots. Live-tunable via the dev panel like every other
-   * field here.
+   * Roadmap C1 rework (docs/HANDOFF.md Roadmap C / Session 026): the fixed,
+   * small number N of PERSISTENT trunk-lineages in the single foreground
+   * growth system. This is the ONLY control over "how many main branches" --
+   * it is deliberately NOT scaled by `density` (the founder wants a small,
+   * controlled number: 3-4 concurrent, persistent, continuous trunks).
+   *
+   * Each lineage is an unbroken chain of generation-0 segments: exactly one
+   * is `growing` at any moment; when it matures, the lineage CONTINUES from
+   * that segment's own tip (spawnTrunkContinuation) -- never handed to a
+   * shared front, never re-seeded at the origin. So each lineage reads as one
+   * continuous meandering line running the full length of the scroll, in its
+   * own vertical band, with its own persistent `lean` (trunkLeanSpread),
+   * forking + blooming along its length. Replaces the ephemeral
+   * born-and-ending population (mainBranchTarget / maybeSpawnMainBranches)
+   * and the near-origin resprout + single-frontier hand-off before it.
+   *
+   * The initial N origins (initForegroundLineages) sit near the left edge in
+   * N evenly-spaced vertical bands. Dev-panel range 1..6 step 1.
    */
-  mainBranchTarget: number;
+  trunkCount: number;
 
   /**
-   * Roadmap C1: the minimum front-advance distance (normalized world units,
-   * same scale as targetLengthBase) the growth front must travel past the
-   * last main-branch birth before another main branch may be born. Stops the
-   * whole population from re-spawning on a single tick the instant the
-   * growing count dips. The safety floor (a growing-gen-0 count of exactly 0
-   * while the session is live) overrides this gate -- growth must never fully
-   * stall. Set to 0 to disable spacing entirely (births refill the target
-   * immediately). Live-tunable via the dev panel.
+   * Roadmap C1 rework: the half-range (radians) of each trunk-lineage's
+   * PERSISTENT `lean` -- a per-lineage bias, drawn once from
+   * `createLabeledStream(sessionSeed, \`${systemId}:trunk${i}:lean\`)` and
+   * STRATIFIED across the N lineages so trunk 0 consistently drifts one way
+   * and trunk N-1 the other (`lean_i ~= trunkLeanSpread * ((i + jitter)/(N-1)
+   * * 2 - 1)`). The lean is added to every segment's `sweepTarget` (the angle
+   * the segment arcs toward) and, at a reduced weight, to each continuation's
+   * starting direction. This is what keeps the N trunks in visually distinct
+   * bands criss-crossing each other instead of collapsing together. N == 1 ->
+   * lean is 0 (a single centred meander). Dev-panel range 0..1.2 step 0.02.
    */
-  mainBranchSpawnSpacing: number;
+  trunkLeanSpread: number;
 
   /**
-   * Roadmap C2 (spawn-x variety, docs/HANDOFF.md Roadmap C entry): the
-   * half-width (world units, same scale as targetLengthBase /
-   * mainBranchSpawnSpacing) of the random x offset applied to each newly-born
-   * main branch's origin. A birth's x is `state.frontMaxX + (xDraw * 2 - 1) *
-   * mainBranchSpawnXSpread`, where `xDraw` is a per-birth labeled stream. At
-   * the default 0 the offset is exactly 0, so every birth lands at
-   * `state.frontMaxX` -- byte-for-byte the C1 behavior. Raised, births can
-   * land behind the front (structure catching up), at it, or ahead of / off
-   * the right edge (structure entering the frame already in progress). A
-   * birth ahead of `state.frontMaxX` simply pushes the monotonic front
-   * forward on the next tick's update. The `spawnX` draw is ALWAYS taken
-   * (even at 0, where it multiplies out), so raising this field mid-session
-   * via the dev panel never shifts any later birth's other labeled draws.
-   * Live-tunable via the dev panel like every other field here.
+   * Roadmap C1 rework: the half-range (radians) of the small SEEDED random
+   * jitter added to a maturing segment's final direction when its lineage
+   * spawns the successor segment (spawnTrunkContinuation) -- this is what
+   * keeps the trunk meandering rather than running dead straight after each
+   * continuation. Applied on top of the segment's own inherited direction and
+   * the (reduced-weight) persistent lean bias. Dev-panel range 0..0.8 step
+   * 0.02.
+   */
+  trunkContinuationJitter: number;
+
+  /**
+   * Roadmap C1 rework -- repurposed from the retired born-at-the-front
+   * population model: the half-width (world units, same scale as
+   * targetLengthBase) of a seeded x stagger applied to the N INITIAL trunk
+   * origins (initForegroundLineages). At the default 0 every trunk starts at
+   * exactly `ROOT_X_MIN` (evenly spaced in y only, no x spread); raised, the
+   * origins stagger rightward slightly so the trunks don't all enter at the
+   * same vertical line. Only affects the N initial origins -- continuations
+   * carry on from wherever the previous segment's tip landed. Dev-panel range
+   * 0..0.4 step 0.02.
    */
   mainBranchSpawnXSpread: number;
 
   /**
-   * Roadmap C3 (spawn-y variety, docs/HANDOFF.md Roadmap C entry): the
-   * half-height (normalized canvas-y units) of the random y offset applied
-   * to each newly-born main branch's origin, measured around a FIXED
-   * vertical center (`rootYMin + rootYSpan/2` -- the middle of the existing
-   * root band, NOT the wandering frontier tip). At the default 0 this whole
-   * path is inert: `y` stays `frontier.tipY` with the seeded mid-band
-   * fallback, exactly C1. Raised above 0, `y = center + (yDraw*2-1) *
-   * (mainBranchSpawnYSpread + mainBranchSpawnYOverscan)` where `yDraw` is a
-   * per-birth labeled stream, so births spread across a tall vertical band.
-   * Dev-panel range 0..0.6 step 0.02.
+   * Roadmap C1 rework -- repurposed: extra half-height (normalized canvas-y)
+   * that WIDENS the vertical band the N initial trunk origins are distributed
+   * across, beyond the base `[rootYMin, rootYMin + rootYSpan]`. At the
+   * default 0 the N origins are evenly spaced across exactly that base band.
+   * Raised, the outermost trunks push toward the top/bottom edges so they
+   * lean off-frame and are hard-clipped there (with mainBranchSpawnYOverscan
+   * for the part that lands fully off-canvas). Dev-panel range 0..0.6 step
+   * 0.02.
    */
   mainBranchSpawnYSpread: number;
 
   /**
-   * Roadmap C3: extra half-height (normalized) added to
-   * `mainBranchSpawnYSpread` when computing a birth's y offset, whose only
-   * purpose is to let `y` land OUTSIDE [0, 1] -- above the top edge or below
-   * the bottom -- so those main branches grow partly off-canvas and are
-   * hard-clipped at the edge (organic edge-clipping, not an imposed
-   * diagonal). Inert unless `mainBranchSpawnYSpread > 0` (it only widens the
-   * draw that path takes). Geometry off the top/bottom is simply clipped by
-   * the compositor; it never resizes the canvas (canvas height is fixed at
-   * CANVAS_HEIGHT_PX, only width grows). Dev-panel range 0..0.4 step 0.02.
+   * Roadmap C1 rework -- repurposed: extra half-height (normalized) added on
+   * top of `mainBranchSpawnYSpread` when distributing the N initial trunk
+   * origins, whose purpose is to let the OUTERMOST origins land OUTSIDE
+   * [0, 1] -- above the top edge or below the bottom -- so those trunks grow
+   * partly off-canvas and are hard-clipped at the edge (organic edge-clipping
+   * from where the trunk actually goes, not an imposed diagonal). Geometry
+   * off the top/bottom is simply clipped by the compositor; it never resizes
+   * the canvas (height is fixed at CANVAS_HEIGHT_PX, only width grows).
+   * Dev-panel range 0..0.4 step 0.02.
    */
   mainBranchSpawnYOverscan: number;
 
   /**
    * Roadmap C3.5 Commit 2 (docs/HANDOFF.md Roadmap C / Session 026): the ONE
-   * coordinated "how dense is the whole scroll" dial. Default 0.5 is a true
+   * coordinated "how LUSH is the whole scroll" dial. Default 0.5 is a true
    * no-op -- the scene is byte-identical to leaving it out. It maps to a
    * single coordinated scalar `f = 2 ** ((density - 0.5) * 2)` (so density 0
    * -> f = 0.5, density 0.5 -> f = 1.0, density 1.0 -> f = 2.0), applied once
    * at init() on top of the individual base dials:
-   *   - mainBranchTarget        -> Math.max(1, round(base * f))
    *   - forkCountMin / forkCountSpan -> round(base * f)  (a base >= 1 stays >= 1)
-   *   - mainBranchSpawnSpacing  -> base / f   (denser => tighter births)
    *   - blossomsPerCluster (the already-world-knob-mapped internal value)
    *                             -> round(base * f)
-   * maxGeneration is deliberately left alone (its own separate dial). The
-   * individual fields still work as the base values `f` multiplies, so they
-   * stay usable for fine-tuning; `density` is the coordinated control on top.
-   * Pure deterministic config math evaluated once at init -- no new random
-   * draws. (When f changes mainBranchTarget, the initial-population seeded
-   * draw sequence length changes with it, exactly as changing
-   * mainBranchTarget directly does today -- still fully deterministic.)
-   * Dev-panel range 0..1 step 0.02.
+   * `trunkCount` is deliberately NOT scaled by density (the C1 rework: the
+   * founder wants a small, controlled number of trunks -- lushness is forks +
+   * blossoms ALONG those trunks, not more trunks). maxGeneration is also left
+   * alone (its own separate dial). The individual fields still work as the
+   * base values `f` multiplies, so they stay usable for fine-tuning;
+   * `density` is the coordinated control on top. Pure deterministic config
+   * math evaluated once at init -- no new random draws. Dev-panel range
+   * 0..1 step 0.02.
    */
   density: number;
 
@@ -275,27 +285,26 @@ export const DEFAULT_BOTANICAL_TUNING_CONFIG: BotanicalTuningConfig = {
   blossomCrossDrawProbability: 0.4,
   blossomRevealIntervalMs: 300,
   blossomRevealSpeedFloor: 0,
-  // Roadmap C1: default 3 concurrent growing main branches, births gated to
-  // at least 0.4 world units of front advance apart (targetLengthBase is
-  // 0.65, so successive main branches enter the frame roughly two-thirds of
-  // a full main-branch length apart -- multiple distinct lineages down the
-  // scroll rather than one).
-  mainBranchTarget: 3,
-  mainBranchSpawnSpacing: 0.4,
-  // Roadmap C2: default 0 -- every main branch is born exactly at the growth
-  // front (C1 behavior). Raise to let births scatter behind / ahead of the
-  // front so structure enters the frame already in progress.
+  // Roadmap C1 rework: 3 persistent, continuous trunk-lineages -- each one
+  // unbroken meandering gen-0 chain running the full length of the scroll in
+  // its own vertical band. NOT scaled by density.
+  trunkCount: 3,
+  // Persistent per-lineage lean, stratified across the trunks so they fan out
+  // into distinct bands (0.55 rad half-range ~= +/-31 deg of arc-target bias).
+  trunkLeanSpread: 0.55,
+  // Small seeded meander jitter at each segment continuation (~+/-14 deg).
+  trunkContinuationJitter: 0.25,
+  // Roadmap C1 rework -- repurposed to spread the N INITIAL trunk origins:
+  // default 0 -> all origins at ROOT_X_MIN, evenly spaced in y only. Raise
+  // XSpread to stagger the origins' x; raise YSpread (+ YOverscan for the
+  // fully-off-canvas part) to push the outermost trunks toward / past the
+  // top and bottom edges so they lean off-frame and clip there.
   mainBranchSpawnXSpread: 0,
-  // Roadmap C3: both default 0 -- birth y stays frontier.tipY with the
-  // seeded mid-band fallback (C1). Raise mainBranchSpawnYSpread to spread
-  // births across a tall vertical band around the fixed root-band center;
-  // add mainBranchSpawnYOverscan to let some births land above/below the
-  // canvas so those branches grow off the top/bottom edge and are clipped.
   mainBranchSpawnYSpread: 0,
   mainBranchSpawnYOverscan: 0,
   // Roadmap C3.5 Commit 2: 0.5 is the true no-op midpoint (f = 1.0). Lower =
-  // sparser scroll, higher = denser -- one coordinated dial over
-  // mainBranchTarget / forkCount* / mainBranchSpawnSpacing / blossomsPerCluster.
+  // sparser, higher = lusher -- one coordinated dial over forkCount* /
+  // blossomsPerCluster (NOT trunkCount).
   density: 0.5,
   crossRootBakeSafetyMargin: 0.15,
   // ~4 simulated seconds (240 ticks at the 60 Hz fixed timestep). Long

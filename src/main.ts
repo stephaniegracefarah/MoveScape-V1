@@ -1618,12 +1618,13 @@ if (app) {
         blossomCrossDrawProbability: { min: 0, max: 1, step: 0.01 },
         blossomRevealIntervalMs: { min: 0, max: 300, step: 1 }, // 0 = instant (old behavior); higher = slower "watercolor" build
         blossomRevealSpeedFloor: { min: 0, max: 1, step: 0.01 }, // blended fraction of speed [0,1], mirrors speedFloor
-        density: { min: 0, max: 1, step: 0.02 }, // roadmap C3.5: one coordinated dial over mainBranchTarget / forkCount* / mainBranchSpawnSpacing / blossomsPerCluster; 0.5 = no-op
-        mainBranchTarget: { min: 1, max: 8, step: 1 }, // concurrent growing gen-0 "main" branches (roadmap C1 population model)
-        mainBranchSpawnSpacing: { min: 0, max: 2, step: 0.05 }, // min front-advance (world units) between successive main-branch births
-        mainBranchSpawnXSpread: { min: 0, max: 1.5, step: 0.05 }, // half-width (world units) of the random x offset on each main-branch birth (roadmap C2); 0 = born exactly at the front
-        mainBranchSpawnYSpread: { min: 0, max: 0.6, step: 0.02 }, // half-height (normalized) of the main-branch birth y spread around the fixed root-band center (roadmap C3); 0 = C1 (y = frontier tipY)
-        mainBranchSpawnYOverscan: { min: 0, max: 0.4, step: 0.02 }, // extra half-height (normalized) letting births land above/below the canvas so branches clip at the top/bottom edge (roadmap C3); inert unless YSpread > 0
+        density: { min: 0, max: 1, step: 0.02 }, // roadmap C3.5: one coordinated dial over forkCount* / blossomsPerCluster (NOT trunkCount); 0.5 = no-op
+        trunkCount: { min: 1, max: 6, step: 1 }, // roadmap C1 rework: N persistent, continuous trunk-lineages (NOT density-scaled)
+        trunkLeanSpread: { min: 0, max: 1.2, step: 0.02 }, // half-range (rad) of each lineage's persistent, stratified lean -> distinct criss-crossing bands
+        trunkContinuationJitter: { min: 0, max: 0.8, step: 0.02 }, // half-range (rad) of the seeded meander jitter at each segment continuation
+        mainBranchSpawnXSpread: { min: 0, max: 0.4, step: 0.02 }, // roadmap C1 rework: seeded x stagger on the N initial trunk origins; 0 = all at ROOT_X_MIN
+        mainBranchSpawnYSpread: { min: 0, max: 0.6, step: 0.02 }, // roadmap C1 rework: widens the vertical band the N initial trunk origins spread across; 0 = base [rootYMin, rootYMin+rootYSpan]
+        mainBranchSpawnYOverscan: { min: 0, max: 0.4, step: 0.02 }, // roadmap C1 rework: extra half-height letting the outermost origins land off-canvas so those trunks clip at the top/bottom edge
         crossRootBakeSafetyMargin: { min: 0, max: 0.5, step: 0.005 }, // world units, same scale as targetLengthBase
         forcedBakeCeilingMs: { min: 500, max: 20000, step: 250 }, // simulated ms a mature/revealed element may stay blocked before a forced bake (roadmap B)
       };
