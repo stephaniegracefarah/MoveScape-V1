@@ -1537,6 +1537,8 @@ if (app) {
         // input ~0px wide once these moved into the narrow dev-tools panel.
         const row = document.createElement('div');
         row.style.cssText = 'display:flex; flex-direction:column; gap:3px; margin:8px 0;';
+        // For the panel's filter box (see buildPanel): match against this.
+        row.dataset.tuner = labelText.toLowerCase();
 
         const header = document.createElement('div');
         header.style.cssText = 'display:flex; justify-content:space-between; align-items:baseline; gap:8px; font-size:11px;';
@@ -1616,6 +1618,13 @@ if (app) {
         blossomCrossDrawProbability: { min: 0, max: 1, step: 0.01 },
         blossomRevealIntervalMs: { min: 0, max: 300, step: 1 }, // 0 = instant (old behavior); higher = slower "watercolor" build
         blossomRevealSpeedFloor: { min: 0, max: 1, step: 0.01 }, // blended fraction of speed [0,1], mirrors speedFloor
+        density: { min: 0, max: 1, step: 0.02 }, // roadmap C3.5: one coordinated dial over forkCount* / blossomsPerCluster (NOT trunkCount); 0.5 = no-op
+        trunkCount: { min: 1, max: 6, step: 1 }, // roadmap C1 rework: N persistent, continuous trunk-lineages (NOT density-scaled)
+        trunkLeanSpread: { min: 0, max: 1.2, step: 0.02 }, // half-range (rad) of each lineage's persistent, stratified lean -> distinct criss-crossing bands
+        trunkContinuationJitter: { min: 0, max: 0.8, step: 0.02 }, // half-range (rad) of the seeded meander jitter at each segment continuation
+        mainBranchSpawnXSpread: { min: 0, max: 0.4, step: 0.02 }, // roadmap C1 rework: seeded x stagger on the N initial trunk origins; 0 = all at ROOT_X_MIN
+        mainBranchSpawnYSpread: { min: 0, max: 0.6, step: 0.02 }, // roadmap C1 rework: widens the vertical band the N initial trunk origins spread across; 0 = base [rootYMin, rootYMin+rootYSpan]
+        mainBranchSpawnYOverscan: { min: 0, max: 0.4, step: 0.02 }, // roadmap C1 rework: extra half-height letting the outermost origins land off-canvas so those trunks clip at the top/bottom edge
         crossRootBakeSafetyMargin: { min: 0, max: 0.5, step: 0.005 }, // world units, same scale as targetLengthBase
         forcedBakeCeilingMs: { min: 500, max: 20000, step: 250 }, // simulated ms a mature/revealed element may stay blocked before a forced bake (roadmap B)
       };
@@ -1629,6 +1638,23 @@ if (app) {
         // its own font size. No inner max-height/scroll -- a nested
         // scrollbar inside the already-scrolling dev panel was unusable.
         panel.style.cssText = 'margin: 8px 0 0; padding-top: 10px; border-top: 1px solid #4a3f38; font-size: 12px;';
+
+        // Filter box: ~50 sliders across the two groups is too many to scan.
+        // Type a substring (e.g. "mainbranch", "fork", "blossom") to show only
+        // matching rows; empty shows all. Rows are also sorted alphabetically
+        // within each group (below), so a family like mainBranch* clusters.
+        const filterInput = document.createElement('input');
+        filterInput.type = 'search';
+        filterInput.placeholder = 'filter sliders…';
+        filterInput.style.cssText =
+          'display:block; width:100%; box-sizing:border-box; margin:0 0 8px; padding:4px 6px; font-size:11px; font-family:monospace;';
+        filterInput.addEventListener('input', () => {
+          const q = filterInput.value.trim().toLowerCase();
+          for (const row of panel.querySelectorAll<HTMLElement>('[data-tuner]')) {
+            row.hidden = q !== '' && !(row.dataset.tuner ?? '').includes(q);
+          }
+        });
+        panel.appendChild(filterInput);
 
         // Seed the panel's world-knob sliders from the world's own current
         // seed-derived values (not 0): whatever world is already live, or
@@ -1656,7 +1682,7 @@ if (app) {
         const worldSliderInputs: Record<string, HTMLInputElement> = {};
         const worldValueEls: Record<string, HTMLSpanElement> = {};
 
-        for (const name of worldKnobNames) {
+        for (const name of [...worldKnobNames].sort()) {
           const row = makeSliderRow(name, 0, 0.999999, 0.000001, initialOverrides[name] ?? 0, (value) => {
             manualOverridesActive = true;
             panelWorldOverrides = { ...(panelWorldOverrides ?? initialOverrides), [name]: value };
@@ -1687,7 +1713,7 @@ if (app) {
         const workingTuning: BotanicalTuningConfig = { ...DEFAULT_BOTANICAL_TUNING_CONFIG };
         panelTuningConfig = workingTuning;
 
-        for (const key of Object.keys(DEFAULT_BOTANICAL_TUNING_CONFIG) as (keyof BotanicalTuningConfig)[]) {
+        for (const key of (Object.keys(DEFAULT_BOTANICAL_TUNING_CONFIG) as (keyof BotanicalTuningConfig)[]).sort()) {
           const range = TUNING_RANGES[key];
           const row = makeSliderRow(key, range.min, range.max, range.step, DEFAULT_BOTANICAL_TUNING_CONFIG[key], (value) => {
             workingTuning[key] = value;

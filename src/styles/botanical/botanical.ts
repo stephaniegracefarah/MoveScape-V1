@@ -83,6 +83,27 @@ const COMPOSITION_SWEEP_ANGLE = 0;
 const ROOT_X_MIN = 0.05;
 const ROOT_X_SPAN = 0.2;
 
+// Roadmap C1 rework: small seeded y jitter (normalized) applied to each of
+// the N evenly-spaced trunk origins, so they don't land on a perfect grid.
+const TRUNK_ORIGIN_Y_JITTER = 0.03;
+// Roadmap C1 rework: how strongly a lineage's persistent lean nudges each
+// continuation segment's STARTING direction (the lean's main effect is
+// already carried by sweepTarget; this is a light additional bias so the
+// meander keeps trending the lineage's way).
+const TRUNK_CONTINUATION_LEAN_WEIGHT = 0.4;
+// Roadmap C1 rework: at each continuation, a restoring nudge (radians per
+// unit of y-error, capped) aiming the successor segment back toward its
+// lineage's own band centre (`root.y`) -- applied both to the segment's
+// starting direction and, at a reduced weight, to its sweepTarget (so the
+// whole segment arcs back toward the lane, not just its first point).
+// Combined with the wander noise + the leaned sweepTarget, this keeps each
+// trunk oscillating inside its own horizontal lane over the whole scroll
+// instead of drifting off and pinning to an edge -- "its own vertical band"
+// -- while still meandering and crossing its neighbours.
+const TRUNK_BAND_RESTORE_GAIN = 2.4;
+const TRUNK_BAND_RESTORE_MAX = 0.7;
+const TRUNK_BAND_RESTORE_SWEEP_WEIGHT = 0.6;
+
 /** One independent growth system's own randomness namespace, z-offset, and opacity multiplier -- everything that makes a depth echo "the same kind of growth further back in atmosphere" rather than the main event. Fixed/not knob-configurable for this first pass (visual spec section 5). */
 interface EchoConfig {
   systemId: string;
@@ -119,6 +140,18 @@ interface RootPoint {
   y: number;
   z: number;
   baseDirectionCenter: number;
+  /**
+   * Roadmap C1 rework (docs/HANDOFF.md Roadmap C / Session 026): this
+   * lineage's PERSISTENT lean -- a fixed per-lineage angular bias (radians)
+   * drawn once at init from `${systemId}:trunk${i}:lean` and STRATIFIED
+   * across the foreground's N trunks so trunk 0 consistently drifts one way
+   * and trunk N-1 the other. Added to every segment's `sweepTarget` and (at
+   * reduced weight) to each continuation's starting direction, which is what
+   * keeps the N trunks in visually distinct, criss-crossing vertical bands
+   * instead of collapsing into one line. Always 0 for echo roots and for a
+   * single-trunk foreground (`trunkCount === 1`).
+   */
+  lean: number;
 }
 
 /** A freshly-matured branch's whole blossom cluster, generated (and therefore fully decided, deterministically) all at once, but revealed into `GrowthSystemState.blossoms` a few at a time -- see revealPendingBlossoms. `blossoms` keeps its own already-generated members in their fixed generation order; `revealedCount` is how many of those are visible so far. */
@@ -595,7 +628,37 @@ function resolveBucketBakeThreats(
   forkZBound: ForkZBound,
   dt: number,
   forcedBakeCeilingMs: number,
+  /**
+   * Roadmap C3.5 (docs/HANDOFF.md Roadmap C / Session 026) -- the bake-
+   * pipeline split. When true (foreground bucket only), a mature branch of
+   * generation >= 1 -- a forked twig: short, thin, shallow z-spread, low
+   * paint-order risk -- resolves `bakeResolved` IMMEDIATELY on the tick it
+   * matures, skipping the isSafeToBake threat check and the forced-bake
+   * ceiling (`matureBlockedMs`) entirely, and a revealed blossom whose owning
+   * branch is generation >= 1 does the same. This is what drains the bulk of
+   * the live (per-frame-redrawn) set fast enough that raising fork/blossom
+   * density (Commit 2's `density` knob) cannot make it grow without bound.
+   * Generation-0 mature branches and their blossoms -- the few long main
+   * branches, where depth ordering actually matters -- are untouched: full
+   * isSafeToBake + crossRootBakeSafetyMargin + forced-bake-ceiling path,
+   * exactly as before. Echo buckets pass `false` and keep their session-019
+   * behaviour byte-for-byte (C4 revisits echoes).
+   */
+  matureForkFastResolve: boolean,
 ): BakeSafety {
+  // Fast-resolve mature gen>=1 twigs BEFORE computeBakeThreats, so a
+  // just-matured twig also stops being a threat to everything else on the
+  // same tick (the `!branch.bakeResolved` filter below then drops it).
+  if (matureForkFastResolve) {
+    for (const system of systems) {
+      for (const branch of system.branches) {
+        if (branch.lifecycle === 'mature' && !branch.bakeResolved && branch.generation >= 1) {
+          branch.bakeResolved = true;
+        }
+      }
+    }
+  }
+
   const bakeSystems: BakeSafetySystem[] = systems.map((system) => ({
     branches: system.branches
       .filter((branch) => branch.lifecycle === 'growing' || !branch.bakeResolved)
@@ -613,6 +676,9 @@ function resolveBucketBakeThreats(
   for (const system of systems) {
     for (const branch of system.branches) {
       if (branch.lifecycle !== 'mature' || branch.bakeResolved) continue;
+      // With `matureForkFastResolve` set, every gen>=1 twig was already
+      // resolved above -- only generation-0 main branches can still reach
+      // here, and they keep the full careful path unchanged.
       if (!stillBlockedIds.has(branch.id)) {
         // Resolved the normal, safe way -- nothing farther and unrelated can
         // still paint over it.
@@ -656,6 +722,18 @@ function resolveBucketBakeThreats(
     // session 013's frame-rate-collapse cost shape (found via this exact
     // fix's own test suite timing out -- see docs/HANDOFF.md session 021).
     for (const blossom of system.unresolvedBlossoms) {
+      // Roadmap C3.5: a revealed blossom whose owning branch is generation
+      // >= 1 resolves immediately too -- most blossoms sit on fine twigs, so
+      // this is what drains the blossom live set fast. Owning-branch
+      // generation is read from the blossom's own branchId: a forked child's
+      // id always contains '/' (spawnChildBranch's `${parent.id}/child${n}`),
+      // a generation-0 id never does -- the same id-scheme reliance
+      // isAncestorOrDescendant already uses. Gen-0 blossoms keep the careful
+      // isSafeToBake + ceiling path.
+      if (matureForkFastResolve && blossom.branchId.includes('/')) {
+        blossom.bakeResolved = true;
+        continue;
+      }
       if (isSafeToBake({ id: blossom.branchId, z: blossom.z, tipX: blossom.x, threats, margin })) {
         blossom.bakeResolved = true;
         continue;
@@ -705,6 +783,9 @@ function resolveBakeThreats(state: BotanicalState, dt: number): BakeSafetyByBuck
     },
     dt,
     forcedBakeCeilingMs,
+    // Roadmap C3.5: the foreground bucket gets the bake-pipeline split
+    // (mature gen>=1 twigs + their blossoms resolve immediately).
+    true,
   );
   const echoes = state.echoes.map((echoSystem, i) =>
     resolveBucketBakeThreats(
@@ -719,6 +800,8 @@ function resolveBakeThreats(state: BotanicalState, dt: number): BakeSafetyByBuck
       },
       dt,
       forcedBakeCeilingMs,
+      // Echoes unchanged from session 019 -- C4 revisits the echo model.
+      false,
     ),
   );
   return { foreground, echoes };
@@ -792,7 +875,7 @@ function revealPendingBlossoms(system: GrowthSystemState, dt: number, intervalMs
   }
 }
 
-/** The Nth foreground system's id: 'fg0', 'fg1', ... -- see maybeSpawnNextForegroundSystem. */
+/** The Nth foreground system's id: 'fg0', 'fg1', ... -- as of roadmap C1 only 'fg0' is ever used (the population lives in one system), but the helper stays so systemId strings and their labeled-stream namespaces are unchanged. */
 const foregroundSystemId = (index: number): string => `${FOREGROUND_SYSTEM_ID}${index}`;
 
 /**
@@ -803,7 +886,19 @@ const foregroundSystemId = (index: number): string => `${FOREGROUND_SYSTEM_ID}${
  */
 export interface BotanicalState {
   sessionSeed: string;
-  /** Ordered list of foreground growth systems -- normally length 1, growing to 2+ when an earlier system fills its maxConcurrentBranches budget and a successor picks up the sweep (see maybeSpawnNextForegroundSystem). Rendered/stepped identically and in order, oldest first. */
+  /**
+   * The foreground growth systems. As of the roadmap C1 rework (docs/HANDOFF.md
+   * Roadmap C / Session 026) this is ALWAYS exactly length 1 -- every trunk
+   * lineage lives in `foregroundSystems[0]`, one `roots` entry per lineage
+   * (fixed length `trunkCount` forever). The array type is kept (rather than
+   * collapsed to a single system) only because bake-safety code, the dev
+   * magic panel, and ~40 tests read `foregroundSystems[0]` /
+   * `foregroundSystems[foregroundSystems.length - 1]`; nothing ever appends a
+   * second entry. Successor growth is the persistent trunk-lineage model:
+   * each lineage always has exactly one growing gen-0 segment and, when it
+   * matures, continues from that segment's own tip (spawnTrunkContinuation) --
+   * never a shared front, never re-seeded at the origin.
+   */
   foregroundSystems: GrowthSystemState[];
   echoes: GrowthSystemState[];
   latestParams: MovementParams | undefined;
@@ -821,10 +916,48 @@ export interface BotanicalState {
   baseGrowthPerTick: number;
   baseMatureDurationMs: number;
   windAngle: number;
+  /**
+   * Still seed-derived from the `rootCount` world knob (world-layer tests
+   * assert on the knob name, so it stays), but as of the roadmap C1 rework it
+   * NO LONGER sizes the foreground -- `tuning.trunkCount` does. Kept computed
+   * for diagnostic/inspection use and so the knob draw sequence is unchanged;
+   * not read by the growth logic anymore.
+   */
   rootCount: number;
   branchSpreadBase: number;
   wanderAmplitudeBase: number;
+  /**
+   * Blossoms per freshly-matured cluster (visual spec section 3), mapped from
+   * the `blossomsPerCluster` world knob -- then, roadmap C3.5 Commit 2,
+   * multiplied by `densityFactor` here at initState (a plain number, not read
+   * from tuning again downstream, so the multiply lands once and for all).
+   */
   blossomsPerCluster: number;
+
+  /**
+   * Roadmap C3.5 Commit 2 (docs/HANDOFF.md Roadmap C / Session 026): the
+   * `density` tuning knob resolved to a coordinated scalar
+   * `f = 2 ** ((density - 0.5) * 2)` and pre-applied, once at initState, to
+   * the population/fork/blossom volume dials below (and to
+   * `blossomsPerCluster` above). At density 0.5 (f = 1) every effective value
+   * equals its base -- a true no-op, scene byte-identical to Commit 1.
+   */
+  densityFactor: number;
+  /** `round(tuning.forkCountMin * densityFactor)`, clamped to >= 1 only when the base is itself >= 1 (an explicit base of 0 stays 0 -- no forking). */
+  effectiveForkCountMin: number;
+  /** `round(tuning.forkCountSpan * densityFactor)`. */
+  effectiveForkCountSpan: number;
+
+  /**
+   * Roadmap C1 rework: the growth front -- the largest `tipX` any foreground
+   * trunk lineage's CURRENT generation-0 segment has reached, updated every
+   * tick (monotonic in practice: continuations pick up from the previous
+   * tip). The scroll view tracks the rightmost of the N advancing trunk
+   * tips. Not itself a canvas-width input (render-scene.ts tracks max x over
+   * all emitted geometry independently); kept for diagnostics / tests /
+   * "Show the magic".
+   */
+  frontMaxX: number;
 }
 
 function createEmptyState(tuning: BotanicalTuningConfig): BotanicalState {
@@ -846,6 +979,10 @@ function createEmptyState(tuning: BotanicalTuningConfig): BotanicalState {
     branchSpreadBase: 0,
     wanderAmplitudeBase: 0,
     blossomsPerCluster: 0,
+    densityFactor: 1,
+    effectiveForkCountMin: 0,
+    effectiveForkCountSpan: 0,
+    frontMaxX: 0,
   };
 }
 
@@ -853,10 +990,10 @@ function currentExpansion(state: BotanicalState): number {
   return state.latestParams?.expansion ?? DEFAULT_EXPANSION_BEFORE_FIRST_STEP;
 }
 
-/** Draws forkFractions for a freshly-spawned branch: count from tuning's fork-count range, jittered spacing via computeForkFractions. */
+/** Draws forkFractions for a freshly-spawned branch: count from the density-scaled fork-count range (state.effectiveForkCount*, roadmap C3.5 Commit 2 -- equal to tuning.forkCount* at density 0.5), jittered spacing via computeForkFractions. */
 function drawForkFractions(state: BotanicalState, id: string): number[] {
   const countDraw = createLabeledStream(state.sessionSeed, `${id}:forkCount`)();
-  const count = Math.floor(state.tuning.forkCountMin + countDraw * state.tuning.forkCountSpan);
+  const count = Math.floor(state.effectiveForkCountMin + countDraw * state.effectiveForkCountSpan);
   const jitterStream = createLabeledStream(state.sessionSeed, `${id}:forkJitter`);
   const jitterDraws = Array.from({ length: count }, () => jitterStream());
   return computeForkFractions(count, jitterDraws, state.tuning);
@@ -891,7 +1028,12 @@ function spawnRootBranch(
   const baseWidth = state.tuning.branchBaseWidthMin + widthDraw * state.tuning.branchBaseWidthSpan;
 
   const sweepDraw = createLabeledStream(state.sessionSeed, `${id}:sweepTarget`)();
-  const sweepTarget = COMPOSITION_SWEEP_ANGLE + (sweepDraw * 2 - 1) * state.tuning.rootBaseDirectionSpread;
+  // Roadmap C1 rework: `root.lean` (0 for echoes / a single trunk) is the
+  // lineage's persistent angular bias -- folding it into every segment's
+  // sweepTarget is what keeps each foreground trunk arcing consistently in
+  // its own band.
+  const sweepTarget =
+    COMPOSITION_SWEEP_ANGLE + root.lean + (sweepDraw * 2 - 1) * state.tuning.rootBaseDirectionSpread;
 
   return spawnBranch({
     id,
@@ -1010,10 +1152,148 @@ function initGrowthSystem(
     const z = clamp01((i + zJitter) / rootCount);
     const baseDirectionCenter = COMPOSITION_SWEEP_ANGLE + (dirJitter * 2 - 1) * state.tuning.rootBaseDirectionSpread;
 
-    system.roots.push({ x, y, z, baseDirectionCenter });
+    system.roots.push({ x, y, z, baseDirectionCenter, lean: 0 });
     system.resproutCounters.set(i, 0);
     system.branches.push(spawnRootBranch(state, system, systemId, i));
   }
+}
+
+/**
+ * Roadmap C1 rework (docs/HANDOFF.md Roadmap C / Session 026): builds the
+ * foreground system's N PERSISTENT trunk-lineages -- one `roots` entry each
+ * (fixed length `trunkCount` forever), each with its first growing gen-0
+ * segment. Replaces `initGrowthSystem` for the foreground only; echoes still
+ * use `initGrowthSystem`.
+ *
+ * The N origins sit near the left edge (`ROOT_X_MIN` band) at N EVENLY-SPACED
+ * vertical bands across `[rootYMin, rootYMin + rootYSpan]`, widened by
+ * `mainBranchSpawnYSpread` (+ `mainBranchSpawnYOverscan`, which may push the
+ * outermost origins past y=0 / y=1 so those trunks clip at the top/bottom
+ * edges), each with a small seeded jitter. `mainBranchSpawnXSpread` staggers
+ * the origins' x. Each lineage's z is stratified `clamp01((i + jitter) / N)`
+ * so the trunks fan across the depth bands. Each lineage draws a PERSISTENT
+ * `lean` from its own `createLabeledStream(sessionSeed, `${systemId}:trunk${i}:lean`)`
+ * (stratified across the N trunks so trunk 0 leans one way and trunk N-1 the
+ * other) that biases its sweepTarget and each continuation's direction -- its
+ * wobble CHARACTER. The lineage stays in its own horizontal lane over the
+ * whole scroll via a per-continuation restoring nudge toward `root.y`
+ * (spawnTrunkContinuation), not via the lean. All draws are labeled streams
+ * off `state.sessionSeed`, so init is bit-identical live vs replay.
+ */
+function initForegroundLineages(state: BotanicalState, system: GrowthSystemState, systemId: string): void {
+  system.resproutCounters = new Map();
+  system.roots = [];
+  system.branches = [];
+  system.blossoms = [];
+  system.pendingClusters = [];
+
+  const n = Math.max(1, Math.round(state.tuning.trunkCount));
+  const originStream = createLabeledStream(state.sessionSeed, `${systemId}:trunkOrigins`);
+
+  const bandMin = state.tuning.rootYMin - state.tuning.mainBranchSpawnYSpread - state.tuning.mainBranchSpawnYOverscan;
+  const bandMax =
+    state.tuning.rootYMin + state.tuning.rootYSpan + state.tuning.mainBranchSpawnYSpread + state.tuning.mainBranchSpawnYOverscan;
+
+  for (let i = 0; i < n; i++) {
+    // Draw order fixed per lineage: yJitter, xJitter, zJitter, dirJitter --
+    // appending a field later never shifts an earlier one.
+    const yJitter = originStream();
+    const xJitter = originStream();
+    const zJitter = originStream();
+    const dirJitter = originStream();
+    const leanJitter = createLabeledStream(state.sessionSeed, `${systemId}:trunk${i}:lean`)();
+
+    const bandFrac = n === 1 ? 0.5 : i / (n - 1);
+    const yCenter = bandMin + bandFrac * (bandMax - bandMin);
+    const y = yCenter + (yJitter * 2 - 1) * TRUNK_ORIGIN_Y_JITTER;
+
+    const x = ROOT_X_MIN + xJitter * state.tuning.mainBranchSpawnXSpread;
+    const z = clamp01((i + zJitter) / n);
+
+    // Stratified lean: -spread .. +spread across the trunks, per-trunk
+    // jittered, clamped so |lean| never exceeds trunkLeanSpread. A single
+    // trunk gets no lean (nothing to separate from).
+    const leanFrac = Math.max(0, Math.min(1, (i + (leanJitter - 0.5) * 0.5) / (n - 1)));
+    const lean = n === 1 ? 0 : state.tuning.trunkLeanSpread * (leanFrac * 2 - 1);
+
+    const baseDirectionCenter =
+      COMPOSITION_SWEEP_ANGLE + lean + (dirJitter * 2 - 1) * state.tuning.rootBaseDirectionSpread;
+
+    system.roots.push({ x, y, z, baseDirectionCenter, lean });
+    system.resproutCounters.set(i, 0);
+    system.branches.push(spawnRootBranch(state, system, systemId, i));
+  }
+}
+
+/**
+ * Roadmap C1 rework: the lineage-continuation spawn. When a trunk lineage's
+ * current generation-0 segment matures, its successor gen-0 segment is spawned
+ * HERE, at that segment's own tip -- so the lineage reads as one unbroken
+ * meandering line. Same z as the maturing segment (== the lineage's origin z,
+ * so successive segments never threaten each other in the bake-safety check).
+ * Direction continues the meander: the segment's final `direction`, plus a
+ * reduced-weight persistent-lean bias, plus a gentle restoring nudge back
+ * toward the lineage's band centre (`root.y`), plus a small seeded jitter
+ * (`trunkContinuationJitter`). `targetLength` is seeded exactly as a root
+ * segment's. Every draw is a per-segment labeled stream keyed
+ * `${systemId}:trunk${i}:${k}:...` (the lineage's FIRST segment keeps
+ * spawnRootBranch's `${systemId}:root${i}:0` id; continuations from segment 1
+ * on use `trunk`), so continuations are bit-identical live vs replay; the
+ * trigger is deterministic maturity (no wall-clock).
+ */
+function spawnTrunkContinuation(state: BotanicalState, system: GrowthSystemState, matured: Branch): Branch {
+  const systemId = system.systemId;
+  const lineageIndex = matured.rootIndex;
+  const root = system.roots[lineageIndex]!;
+  const counter = system.resproutCounters.get(lineageIndex) ?? 0;
+  system.resproutCounters.set(lineageIndex, counter + 1);
+  const id = `${systemId}:trunk${lineageIndex}:${counter}`;
+
+  // Gentle pull back toward this lineage's band centre (root.y). y grows
+  // downward, so a positive (root.y - tipY) means "tip is above the band,
+  // aim down"; negative means "aim up".
+  const bandRestore = Math.max(
+    -TRUNK_BAND_RESTORE_MAX,
+    Math.min(TRUNK_BAND_RESTORE_MAX, (matured.tipY - root.y) * -TRUNK_BAND_RESTORE_GAIN),
+  );
+
+  const dirDraw = createLabeledStream(state.sessionSeed, `${id}:continueDir`)();
+  const baseDirection =
+    matured.direction +
+    root.lean * TRUNK_CONTINUATION_LEAN_WEIGHT +
+    bandRestore +
+    (dirDraw * 2 - 1) * state.tuning.trunkContinuationJitter;
+
+  const targetLengthDraw = createLabeledStream(state.sessionSeed, `${id}:targetLength`)();
+  const targetLength = computeTargetLength(state.tuning.targetLengthBase, targetLengthDraw, 0, state.tuning);
+
+  const colorDraw = createLabeledStream(state.sessionSeed, `${id}:color`)();
+  const color = state.palette.branchColors[Math.floor(colorDraw * state.palette.branchColors.length)]!;
+
+  const widthDraw = createLabeledStream(state.sessionSeed, `${id}:width`)();
+  const baseWidth = state.tuning.branchBaseWidthMin + widthDraw * state.tuning.branchBaseWidthSpan;
+
+  const sweepDraw = createLabeledStream(state.sessionSeed, `${id}:sweepTarget`)();
+  const sweepTarget =
+    COMPOSITION_SWEEP_ANGLE +
+    root.lean +
+    bandRestore * TRUNK_BAND_RESTORE_SWEEP_WEIGHT +
+    (sweepDraw * 2 - 1) * state.tuning.rootBaseDirectionSpread;
+
+  return spawnBranch({
+    id,
+    generation: 0,
+    rootIndex: lineageIndex,
+    z: matured.z,
+    color,
+    rootX: matured.tipX,
+    rootY: matured.tipY,
+    baseDirection,
+    targetLength,
+    sweepTarget,
+    baseWidth,
+    forkFractions: drawForkFractions(state, id),
+  });
 }
 
 /** Advances one growth system one tick: growth/wander/fork-crossing/lifecycle for every branch, exactly mirroring the pre-rebuild single-system stepState, just parametrized so the foreground system and each depth echo can all run through the same logic independently. Nothing is ever removed from `system.branches`/`system.blossoms` (permanent ink, docs/styles/botanical.md section 7) -- this function only ever appends. */
@@ -1024,9 +1304,54 @@ function stepGrowthSystem(
   params: MovementParams,
   dt: number,
   maxGenerationForSystem: number,
+  /**
+   * Roadmap C1 rework (docs/HANDOFF.md Roadmap C / Session 026): the
+   * successor-growth mode for a maturing generation-0 branch.
+   *
+   * `true` (FOREGROUND -- the persistent trunk-lineage model): the instant a
+   * gen-0 segment matures, its lineage CONTINUES from that segment's own tip
+   * -- a successor gen-0 segment (spawnTrunkContinuation) is appended the same
+   * tick, so each lineage always has exactly one growing gen-0 segment and
+   * reads as one unbroken line. Not gated by `maxConcurrentBranches` (the N
+   * trunks are mandatory); only forks are gated, on the growing-branch count.
+   *
+   * `false` (ECHO -- legacy resprout, byte-for-byte, until C4): a mature
+   * gen-0 branch does nothing until its `lifecycleTimer` reaches
+   * `matureDurationMs`, then a fresh sibling spawns at the SAME fixed root
+   * (gated by `maxConcurrentBranches`) and the timer resets.
+   */
+  continueFromTip: boolean,
 ): void {
   const newBranches: Branch[] = [];
   const liveCount = () => system.branches.length + newBranches.length;
+
+  // Roadmap C3.5 (docs/HANDOFF.md Roadmap C / Session 026): in the FOREGROUND
+  // population system, forking is gated on the count of currently-GROWING
+  // branches, NOT on `system.branches` total. `system.branches` is
+  // permanent-ink append-only and grows without bound over a session
+  // (docs/styles/botanical.md section 7) -- gating forking on its length meant
+  // that once it passed `maxConcurrentBranches` (15-60) ALL forking stopped
+  // for the rest of the session (a previous "raise the fork counts" attempt
+  // exposed this: the live/unbaked set grew to 354 unresolved mature branches
+  // with no drain). Gating on the growing count instead makes
+  // `maxConcurrentBranches` a STRUCTURAL, density-knob-independent ceiling on
+  // concurrent live (per-frame-redrawn) work: a new fork is only created
+  // while the growing count is under it, and as branches mature the count
+  // falls and forking resumes. Combined with the bake-pipeline split
+  // (resolveBucketBakeThreats: mature gen>=1 twigs resolve immediately), this
+  // holds the per-frame redraw set flat regardless of how dense the `density`
+  // knob (Commit 2) is set. Seeded once here from the current branch list,
+  // then kept incrementally (+1 per new growing branch this tick, -1 per
+  // maturation this tick) so it stays O(n) per tick. Echo systems
+  // (`continueFromTip === false`) keep the old `liveCount()` fork gate AND
+  // the legacy resprout gate byte-for-byte -- echoes are entirely C4's concern.
+  const gateForkOnGrowingCount = continueFromTip;
+  let growingCount = 0;
+  for (const branch of system.branches) {
+    if (branch.lifecycle === 'growing') growingCount++;
+  }
+  const forkGateOpen = (): boolean =>
+    gateForkOnGrowingCount ? growingCount < state.maxConcurrentBranches : liveCount() < state.maxConcurrentBranches;
 
   const effectiveWanderAmplitudeBase =
     state.wanderAmplitudeBase * (1 + state.latestSessionParams.movementVariance * SESSION_VARIANCE_WANDER_SCALE);
@@ -1108,14 +1433,16 @@ function stepGrowthSystem(
       if (branch.generation < maxGenerationForSystem) {
         const crossedForkIndices = checkCrossedForks(branch, previousGrownLength);
         for (const forkIndex of crossedForkIndices) {
-          if (liveCount() < state.maxConcurrentBranches) {
+          if (forkGateOpen()) {
             newBranches.push(spawnChildBranch(state, branch, forkIndex));
+            growingCount++;
           }
         }
       }
 
       if (becameMature) {
         branch.lifecycle = 'mature';
+        growingCount--;
         branch.lifecycleTimer = 0;
         const jitterDraw = createLabeledStream(state.sessionSeed, `${branch.id}:matureDuration`)();
         branch.matureDurationMs = computeMatureDurationMs(state.baseMatureDurationMs, jitterDraw);
@@ -1123,19 +1450,38 @@ function stepGrowthSystem(
         // in a fixed order -- only *when* each of these already-generated
         // blossoms starts rendering is staggered (revealPendingBlossoms below).
         system.pendingClusters.push({ blossoms: spawnBlossomsFor(state, branch), revealedCount: 0, revealTimerMs: 0 });
+
+        // Roadmap C1 rework: PERSISTENT trunk-lineage continuation. The
+        // moment a foreground gen-0 segment matures, its lineage continues
+        // from that segment's own tip -- appended THIS tick, so the lineage
+        // never has a gap (exactly one growing gen-0 segment at all times).
+        // Mandatory: NOT gated by `maxConcurrentBranches` (the N trunks are
+        // the fixed backbone; only forks are gated). Echoes keep the legacy
+        // timer-based resprout in the mature branch below.
+        if (continueFromTip && branch.generation === 0) {
+          newBranches.push(spawnTrunkContinuation(state, system, branch));
+          growingCount++;
+        }
       }
     } else {
       // mature -- permanent (docs/styles/botanical.md section 7's "marks are
-      // permanent ink": no shrink, no removal, ever). A generation-0 branch's
-      // timer instead triggers front-driven new growth: once matureDurationMs
-      // elapses, a new sibling spawns at the same root (subject to the same
-      // maxConcurrentBranches cap that already gates forking) and the timer
-      // resets, so a root keeps producing fresh growth for the life of the
-      // session rather than going still. Forked (generation > 0) branches
-      // just carry an unused timer once mature -- only roots resprout.
+      // permanent ink": no shrink, no removal, ever).
+      //
+      // LEGACY RESPROUT (echo systems only, `continueFromTip === false`): a
+      // generation-0 branch's timer triggers front-driven new growth -- once
+      // matureDurationMs elapses a fresh sibling spawns at the same root
+      // (subject to the same maxConcurrentBranches cap that gates forking)
+      // and the timer resets, so a root keeps producing growth for the life
+      // of the session. Forked (generation > 0) branches just carry an
+      // unused timer -- only roots resprout.
+      //
+      // FOREGROUND (`continueFromTip === true`): a mature gen-0 segment does
+      // nothing here -- its lineage's continuation already spawned from its
+      // tip on the tick it matured (above). Terminally identical to a gen>0
+      // branch from this point.
       branch.lifecycleTimer += dt;
 
-      if (branch.lifecycleTimer >= branch.matureDurationMs) {
+      if (!continueFromTip && branch.lifecycleTimer >= branch.matureDurationMs) {
         branch.lifecycleTimer = 0;
         if (branch.generation === 0 && liveCount() < state.maxConcurrentBranches) {
           newBranches.push(spawnRootBranch(state, system, systemId, branch.rootIndex));
@@ -1180,61 +1526,66 @@ function initState(state: BotanicalState, world: World): void {
   state.wanderAmplitudeBase = WANDER_AMPLITUDE_MIN + wanderAmplitudeBaseRaw * WANDER_AMPLITUDE_SPAN;
   state.blossomsPerCluster = BLOSSOMS_PER_CLUSTER_MIN + Math.floor(blossomsPerClusterRaw * BLOSSOMS_PER_CLUSTER_SPAN);
 
+  // Roadmap C3.5 Commit 2 (docs/HANDOFF.md Roadmap C / Session 026): the
+  // `density` knob -> one coordinated scalar `f`, applied ONCE here on top of
+  // the individual base dials. density 0.5 -> f = 1 -> every effective value
+  // below equals its base (a true no-op: same draws, same scene). Pure
+  // deterministic config math, no random draws. maxGeneration is deliberately
+  // left untouched (its own separate dial).
+  const densityFactor = 2 ** ((state.tuning.density - 0.5) * 2);
+  state.densityFactor = densityFactor;
+  // Roadmap C1 rework: `trunkCount` is NOT density-scaled (the founder wants
+  // a small, controlled number of trunks). density scales forks + blossoms
+  // ALONG the trunks only.
+  // A base fork count of exactly 0 (an explicit "never fork" override) stays
+  // 0; any base >= 1 stays >= 1 after scaling down.
+  state.effectiveForkCountMin =
+    state.tuning.forkCountMin >= 1
+      ? Math.max(1, Math.round(state.tuning.forkCountMin * densityFactor))
+      : Math.round(state.tuning.forkCountMin * densityFactor);
+  state.effectiveForkCountSpan = Math.round(state.tuning.forkCountSpan * densityFactor);
+  state.blossomsPerCluster = Math.round(state.blossomsPerCluster * densityFactor);
+
   state.latestParams = undefined;
   state.mechanismSample = null;
   state.foregroundSystems = [createEmptyGrowthSystem(foregroundSystemId(0))];
   state.echoes = ECHO_CONFIGS.map((cfg) => createEmptyGrowthSystem(cfg.systemId));
 
-  initGrowthSystem(state, state.foregroundSystems[0]!, foregroundSystemId(0), state.rootCount);
+  // Roadmap C1 rework: the foreground is exactly `tuning.trunkCount`
+  // persistent trunk-lineages (NOT the `rootCount` knob, NOT density-scaled).
+  // Echoes keep their own fixed per-config rootCount + legacy resprout (C4).
+  initForegroundLineages(state, state.foregroundSystems[0]!, foregroundSystemId(0));
   ECHO_CONFIGS.forEach((echoConfig, i) => {
     initGrowthSystem(state, state.echoes[i]!, echoConfig.systemId, echoConfig.rootCount);
   });
-}
 
-/**
- * Once the currently-active (last) foreground system fills its
- * maxConcurrentBranches budget, spawns a successor that continues the sweep
- * seamlessly rather than raising or sharing the cap (docs/HANDOFF.md,
- * growth-plateau fix folded into M5 Stage 3). "Seamless" is the whole
- * requirement: the new system's one starting root is placed exactly at the
- * old system's growth front -- the branch with the largest tipX, i.e. the
- * one that has traveled furthest along the rightward sweep -- not at a fresh
- * random position, so the hand-off reads as the same tree continuing rather
- * than a new wave starting elsewhere on the canvas.
- *
- * Self-limiting by construction: a freshly-appended successor starts with
- * exactly 1 branch, far under maxConcurrentBranches's minimum of 15, so it
- * becomes the new "last" system and the very next tick's check on it
- * immediately returns false. No extra "already spawned" flag is needed.
- */
-function maybeSpawnNextForegroundSystem(state: BotanicalState): void {
-  const last = state.foregroundSystems[state.foregroundSystems.length - 1]!;
-  if (last.branches.length < state.maxConcurrentBranches) return;
-
-  const frontier = last.branches.reduce((furthest, branch) => (branch.tipX > furthest.tipX ? branch : furthest));
-
-  const newSystemId = foregroundSystemId(state.foregroundSystems.length);
-  const dirJitter = createLabeledStream(state.sessionSeed, `${newSystemId}:handoffDirection`)();
-  const baseDirectionCenter = COMPOSITION_SWEEP_ANGLE + (dirJitter * 2 - 1) * state.tuning.rootBaseDirectionSpread;
-
-  const root: RootPoint = { x: frontier.tipX, y: frontier.tipY, z: frontier.z, baseDirectionCenter };
-
-  const newSystem = createEmptyGrowthSystem(newSystemId);
-  newSystem.roots = [root];
-  newSystem.resproutCounters.set(0, 0);
-  newSystem.branches = [spawnRootBranch(state, newSystem, newSystemId, 0)];
-
-  state.foregroundSystems.push(newSystem);
+  // Growth front: rightmost of the N trunk tips (all start at their own
+  // rootX). Updated every tick in stepState; the scroll view tracks it.
+  state.frontMaxX = 0;
+  for (const branch of state.foregroundSystems[0]!.branches) {
+    if (branch.generation === 0 && branch.tipX > state.frontMaxX) state.frontMaxX = branch.tipX;
+  }
 }
 
 function stepState(state: BotanicalState, params: MovementParams, sessionParams: SessionParams, dt: number): void {
   state.latestParams = params;
   state.latestSessionParams = sessionParams;
 
+  // Roadmap C1 rework: foreground is the persistent trunk-lineage model
+  // (`continueFromTip: true` -- a maturing gen-0 segment's lineage continues
+  // from its own tip the same tick). Echoes keep legacy timer-resprout
+  // (`false`), C4's concern.
   for (const system of state.foregroundSystems) {
-    stepGrowthSystem(state, system, system.systemId, params, dt, state.tuning.maxGeneration);
+    stepGrowthSystem(state, system, system.systemId, params, dt, state.tuning.maxGeneration, true);
   }
-  maybeSpawnNextForegroundSystem(state);
+
+  // Growth front: rightmost of the N trunk lineages' current gen-0 tips. Not
+  // a canvas-width input (render-scene.ts tracks that itself); kept for
+  // diagnostics / tests / "Show the magic".
+  const foreground = state.foregroundSystems[0]!;
+  for (const branch of foreground.branches) {
+    if (branch.generation === 0 && branch.tipX > state.frontMaxX) state.frontMaxX = branch.tipX;
+  }
 
   ECHO_CONFIGS.forEach((echoConfig, i) => {
     stepGrowthSystem(
@@ -1244,6 +1595,7 @@ function stepState(state: BotanicalState, params: MovementParams, sessionParams:
       params,
       dt,
       Math.min(state.tuning.maxGeneration, echoConfig.maxGenerationCap),
+      false,
     );
   });
 
@@ -1398,10 +1750,10 @@ function buildScene(state: BotanicalState): Scene {
  * per-element depth-offset/opacity-multiplier math, just kept as one
  * SceneLayer per growth system instead of flattened into buildScene's
  * single shared array. `layerId` is each system's own `systemId`, which
- * stays stable and unique for the life of a session (foregroundSystems only
- * ever grows via maybeSpawnNextForegroundSystem; echoes are fixed). Does
- * not affect buildScene/scene()/finish() in any way -- this is purely
- * additive.
+ * stays stable and unique for the life of a session (the layers are exactly
+ * `fg0` + the fixed echoes -- the trunk-lineage model keeps one foreground
+ * system). Does not affect buildScene/scene()/finish() in any way -- this is
+ * purely additive.
  */
 function buildSceneLayers(state: BotanicalState): SceneLayer[] {
   const layers: SceneLayer[] = [];
